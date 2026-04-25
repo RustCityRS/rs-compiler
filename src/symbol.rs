@@ -1,0 +1,674 @@
+use crate::types::{BaseVarType, Type};
+use std::collections::HashMap;
+
+// ── LocalTable ─────────────────────────────────────────────────────────────
+// Matches RuneScriptTS `LocalTable` (RuneScript.ts): a flat ordered list of
+// all variable declarations within a script, used for slot assignment via
+// `getVariableId` (indexOf in type-filtered sublist).
+
+#[derive(Debug, Clone)]
+pub struct LocalEntry {
+    pub name: String,
+    pub var_type: Type,
+    pub is_param: bool,
+    pub is_array: bool,
+}
+
+/// Flat ordered list of all variable declarations within a script.
+///
+/// `entries` is `pub(crate)` rather than `pub` so the storage shape
+/// (currently a `Vec<LocalEntry>`) can change without breaking external
+/// consumers. Read access from inside the crate goes through
+/// `entries()`; mutations go through `push_param` / `push_local`.
+#[derive(Debug, Clone, Default)]
+pub struct LocalTable {
+    pub(crate) all: Vec<LocalEntry>,
+}
+
+impl LocalTable {
+    pub fn new() -> Self {
+        LocalTable { all: Vec::new() }
+    }
+
+    /// Read-only view of the ordered local entries. Use this for iteration.
+    pub fn entries(&self) -> &[LocalEntry] {
+        &self.all
+    }
+
+    pub fn push_param(&mut self, name: String, param_type: Type) -> i32 {
+        let id = self.get_variable_id_for_next(param_type, false);
+        self.all.push(LocalEntry {
+            name,
+            var_type: param_type,
+            is_param: true,
+            is_array: false,
+        });
+        id
+    }
+
+    pub fn push_local(&mut self, name: String, var_type: Type, is_array: bool) -> i32 {
+        let id = self.get_variable_id_for_next(var_type, is_array);
+        self.all.push(LocalEntry {
+            name,
+            var_type,
+            is_param: false,
+            is_array,
+        });
+        id
+    }
+
+    /// Matches TS `getVariableId`: indexOf in filtered list.
+    fn get_variable_id_for_next(&self, var_type: Type, is_array: bool) -> i32 {
+        if is_array {
+            self.all.iter().filter(|e| e.is_array).count() as i32
+        } else {
+            self.all
+                .iter()
+                .filter(|e| {
+                    e.var_type.base_type() == var_type.base_type() && (!e.is_array || e.is_param)
+                })
+                .count() as i32
+        }
+    }
+
+    /// Matches TS `getVariableId` for an existing entry by index.
+    pub fn get_variable_id(&self, index: usize) -> i32 {
+        let entry = &self.all[index];
+        if entry.is_array {
+            self.all[..index].iter().filter(|e| e.is_array).count() as i32
+        } else {
+            self.all[..index]
+                .iter()
+                .filter(|e| {
+                    e.var_type.base_type() == entry.var_type.base_type()
+                        && (!e.is_array || e.is_param)
+                })
+                .count() as i32
+        }
+    }
+
+    /// Matches TS `getLocalCount`.
+    pub fn get_local_count(&self, base: BaseVarType) -> u16 {
+        self.all
+            .iter()
+            .filter(|e| e.var_type.base_type() == base && (!e.is_array || e.is_param))
+            .count() as u16
+    }
+
+    /// Matches TS `getParameterCount`.
+    pub fn get_param_count(&self, base: BaseVarType) -> u16 {
+        self.all
+            .iter()
+            .filter(|e| e.is_param && e.var_type.base_type() == base)
+            .count() as u16
+    }
+}
+
+// ── SymbolKind ─────────────────────────────────────────────────────────────
+
+/// The kind of symbol stored in the symbol table.
+#[derive(Debug, Clone)]
+pub enum SymbolKind {
+    /// A local variable within a script.
+    LocalVar {
+        var_type: Type,
+        /// The local variable slot index.
+        slot: i32,
+        is_array: bool,
+    },
+    /// A script parameter (like a local var but set from call args).
+    ScriptParam { param_type: Type, slot: i32 },
+    /// A compiled script (or script reference).
+    Script {
+        id: i32,
+        trigger: String,
+        param_types: Vec<Type>,
+        return_types: Vec<Type>,
+    },
+    /// A game variable (varp, varn, vars, varbit).
+    GameVar {
+        var_type: Type,
+        var_id: i32,
+        /// Which game var type: "varp", "varn", "vars", "varbit"
+        category: String,
+    },
+    /// A constant value.
+    Constant {
+        const_type: Type,
+        int_value: Option<i32>,
+        string_value: Option<String>,
+    },
+    /// An engine command.
+    Command {
+        opcode: i32,
+        param_types: Vec<Type>,
+        return_types: Vec<Type>,
+    },
+}
+
+impl SymbolKind {
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            SymbolKind::LocalVar { .. } => "LocalVar",
+            SymbolKind::ScriptParam { .. } => "ScriptParam",
+            SymbolKind::Script { .. } => "Script",
+            SymbolKind::GameVar { .. } => "GameVar",
+            SymbolKind::Constant { .. } => "Constant",
+            SymbolKind::Command { .. } => "Command",
+        }
+    }
+}
+
+/// A single symbol entry in the table.
+#[derive(Debug, Clone)]
+pub struct Symbol {
+    pub name: String,
+    pub kind: SymbolKind,
+}
+
+/// A hierarchical symbol table supporting scoped lookup.
+#[derive(Debug, Clone)]
+pub struct SymbolTable {
+    /// Symbols in this scope.
+    symbols: HashMap<String, Symbol>,
+    /// Parent scope for hierarchical lookup.
+    parent: Option<Box<SymbolTable>>,
+    /// Counters for allocating local variable slots.
+    next_int_local: i32,
+    next_string_local: i32,
+    next_long_local: i32,
+    /// Total number of local variable declarations (including redeclarations of same name).
+    /// The Java compiler counts each def_X statement, even if the slot is reused.
+    total_int_decls: i32,
+    total_string_decls: i32,
+    total_long_decls: i32,
+}
+
+impl SymbolTable {
+    pub fn new() -> Self {
+        SymbolTable {
+            symbols: HashMap::new(),
+            parent: None,
+            next_int_local: 0,
+            next_string_local: 0,
+            next_long_local: 0,
+            total_int_decls: 0,
+            total_string_decls: 0,
+            total_long_decls: 0,
+        }
+    }
+
+    /// Create a child scope that inherits from this table.
+    pub fn child(parent: SymbolTable) -> Self {
+        let int_local = parent.next_int_local;
+        let string_local = parent.next_string_local;
+        let long_local = parent.next_long_local;
+        let int_decls = parent.total_int_decls;
+        let string_decls = parent.total_string_decls;
+        let long_decls = parent.total_long_decls;
+        SymbolTable {
+            symbols: HashMap::new(),
+            parent: Some(Box::new(parent)),
+            next_int_local: int_local,
+            next_string_local: string_local,
+            next_long_local: long_local,
+            total_int_decls: int_decls,
+            total_string_decls: string_decls,
+            total_long_decls: long_decls,
+        }
+    }
+
+    /// Create a child scope without consuming the parent (cloning).
+    pub fn new_child(&self) -> Self {
+        SymbolTable {
+            symbols: HashMap::new(),
+            parent: Some(Box::new(self.clone())),
+            next_int_local: self.next_int_local,
+            next_string_local: self.next_string_local,
+            next_long_local: self.next_long_local,
+            total_int_decls: self.total_int_decls,
+            total_string_decls: self.total_string_decls,
+            total_long_decls: self.total_long_decls,
+        }
+    }
+
+    /// Define a symbol in this scope.
+    pub fn define(&mut self, name: String, kind: SymbolKind) {
+        self.symbols.insert(name.clone(), Symbol { name, kind });
+    }
+
+    /// Define a local variable and auto-assign a slot.
+    /// `is_array` should be true for array declarations — arrays are excluded from
+    /// the local count in the trailer (matching the reference compiler).
+    pub fn define_local(&mut self, name: String, var_type: Type, is_array: bool) -> i32 {
+        // Count the declaration (Java compiler counts each def_X), but NOT arrays.
+        if !is_array {
+            match var_type.base_type() {
+                crate::types::BaseVarType::Integer => self.total_int_decls += 1,
+                crate::types::BaseVarType::String => self.total_string_decls += 1,
+                crate::types::BaseVarType::Long => self.total_long_decls += 1,
+            }
+        }
+        // Always advance the slot counter for each declaration, but if the
+        // name already exists in this scope, reuse its slot (the new slot
+        // becomes a phantom counted in totals but not referenced).
+        // This matches the Neptune compiler behavior where redeclaration
+        // within the SAME scope reuses the existing slot.
+        let new_slot = self.allocate_slot(&var_type);
+        let slot = if let Some(existing) = self.symbols.get(&name) {
+            match &existing.kind {
+                SymbolKind::LocalVar { slot, .. } => *slot,
+                _ => new_slot,
+            }
+        } else {
+            new_slot
+        };
+        self.define(
+            name,
+            SymbolKind::LocalVar {
+                var_type,
+                slot,
+                is_array,
+            },
+        );
+        slot
+    }
+
+    /// Define a script parameter and auto-assign a slot.
+    pub fn define_param(&mut self, name: String, param_type: Type) -> i32 {
+        match param_type.base_type() {
+            crate::types::BaseVarType::Integer => self.total_int_decls += 1,
+            crate::types::BaseVarType::String => self.total_string_decls += 1,
+            crate::types::BaseVarType::Long => self.total_long_decls += 1,
+        }
+        let slot = self.allocate_slot(&param_type);
+        self.define(name, SymbolKind::ScriptParam { param_type, slot });
+        slot
+    }
+
+    /// Allocate a slot for a given type.
+    fn allocate_slot(&mut self, var_type: &Type) -> i32 {
+        match var_type.base_type() {
+            crate::types::BaseVarType::Integer => {
+                let slot = self.next_int_local;
+                self.next_int_local += 1;
+                slot
+            }
+            crate::types::BaseVarType::String => {
+                let slot = self.next_string_local;
+                self.next_string_local += 1;
+                slot
+            }
+            crate::types::BaseVarType::Long => {
+                let slot = self.next_long_local;
+                self.next_long_local += 1;
+                slot
+            }
+        }
+    }
+
+    /// Look up a symbol by name, searching up through parent scopes.
+    pub fn lookup(&self, name: &str) -> Option<&Symbol> {
+        if let Some(sym) = self.symbols.get(name) {
+            return Some(sym);
+        }
+        if let Some(parent) = &self.parent {
+            return parent.lookup(name);
+        }
+        None
+    }
+
+    /// Look up a symbol only in this scope (not parents).
+    pub fn lookup_local(&self, name: &str) -> Option<&Symbol> {
+        self.symbols.get(name)
+    }
+
+    /// Check if a symbol exists in this scope or parent scopes.
+    pub fn contains(&self, name: &str) -> bool {
+        self.lookup(name).is_some()
+    }
+
+    /// Save the current slot counters. Used before entering a block scope.
+    pub fn save_slots(&self) -> (i32, i32, i32) {
+        (
+            self.next_int_local,
+            self.next_string_local,
+            self.next_long_local,
+        )
+    }
+
+    /// Restore slot counters to a saved state, but only if higher counters haven't
+    /// been set by a sibling scope. This is used between sibling blocks (if/else)
+    /// so each branch starts from the same slot baseline.
+    pub fn restore_slots(&mut self, saved: (i32, i32, i32)) {
+        self.next_int_local = saved.0;
+        self.next_string_local = saved.1;
+        self.next_long_local = saved.2;
+    }
+
+    /// Advance slot counters to be at least as high as the given values.
+    /// Used after a block scope to ensure the next sibling doesn't reuse slots.
+    pub fn merge_slots(&mut self, other: (i32, i32, i32)) {
+        self.next_int_local = self.next_int_local.max(other.0);
+        self.next_string_local = self.next_string_local.max(other.1);
+        self.next_long_local = self.next_long_local.max(other.2);
+    }
+
+    /// Merge total declaration counts from a child scope.
+    pub fn merge_decls(&mut self, child: &SymbolTable) {
+        self.total_int_decls = child.total_int_decls;
+        self.total_string_decls = child.total_string_decls;
+        self.total_long_decls = child.total_long_decls;
+    }
+
+    /// Get the total int local count (includes redeclarations, matching Java compiler).
+    pub fn int_local_count(&self) -> u16 {
+        self.total_int_decls as u16
+    }
+
+    /// Get the total string local count.
+    pub fn string_local_count(&self) -> u16 {
+        self.total_string_decls as u16
+    }
+
+    /// Get the total long local count.
+    pub fn long_local_count(&self) -> u16 {
+        self.total_long_decls as u16
+    }
+
+    /// Reset local variable counters (for starting a new script).
+    pub fn reset_locals(&mut self) {
+        self.next_int_local = 0;
+        self.next_string_local = 0;
+        self.next_long_local = 0;
+    }
+
+    /// Iterate over all symbols in this scope.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Symbol)> {
+        self.symbols.iter()
+    }
+}
+
+/// The root symbol table manager that holds all global symbols.
+///
+/// Field visibility is `pub(crate)` rather than `pub` so external consumers
+/// only touch the registry through accessor methods (`lookup_command`,
+/// `lookup_entity_id`, `register_script`, etc.). This lets internal storage
+/// change — e.g. swapping `HashMap<String, _>` for an interned-string map —
+/// without breaking the lib's public surface.
+#[derive(Debug, Clone)]
+pub struct SymbolRegistry {
+    /// All registered scripts by name.
+    pub(crate) scripts: HashMap<String, Symbol>,
+    /// All registered commands by name.
+    pub(crate) commands: HashMap<String, Symbol>,
+    /// All registered game variables by name.
+    pub(crate) game_vars: HashMap<String, Symbol>,
+    /// All registered constants by name (from .constant files).
+    pub(crate) constants: HashMap<String, Symbol>,
+    /// Entity IDs from pack files (loc.pack, npc.pack, stat.pack, etc.).
+    /// These are looked up for plain identifiers; constants override only ^name refs.
+    pub(crate) entity_ids: HashMap<String, Symbol>,
+    /// Entity IDs keyed by (name, type) — supports type-aware lookup so that
+    /// `smokepuff` resolves to synth=164 when used in sound_synth() but
+    /// spotanim=86 when used in spotanim_map(), matching Java compiler behaviour.
+    pub(crate) entity_ids_typed: HashMap<String, HashMap<Type, i32>>,
+    /// Parameter types for engine commands, parsed from engine.rs2.
+    /// Maps command name → ordered list of parameter types.
+    pub(crate) command_param_types: HashMap<String, Vec<Type>>,
+    /// Type-char values for RS2 type names (int, string, coord, stat, etc.).
+    /// Checked last in identifier resolution so commands take priority over type names.
+    pub(crate) type_chars: HashMap<String, i32>,
+    /// Script name to ID mapping (by name, last registration wins).
+    pub(crate) script_ids: HashMap<String, i32>,
+    /// Proc script IDs: name → ID for trigger="proc" scripts.
+    pub(crate) proc_script_ids: HashMap<String, i32>,
+    /// Label script IDs: name → ID for trigger="label" scripts.
+    pub(crate) label_script_ids: HashMap<String, i32>,
+    /// Trigger-specific script IDs: "trigger:name" → ID.
+    /// Used so queue(foo) resolves to the [queue,foo] script, not [proc,foo].
+    pub(crate) trigger_script_ids: HashMap<String, i32>,
+    /// Full script symbols keyed by "trigger:name".
+    /// Unlike `scripts` (name-only key, last-write-wins), this preserves
+    /// all trigger variants so `[proc,fib]` isn't overwritten by `[debugproc,fib]`.
+    pub(crate) scripts_by_trigger: HashMap<String, Symbol>,
+    /// Pre-assigned script IDs loaded from script.pack: "trigger:name" → ID.
+    /// When present, overrides sequential assignment so IDs match the Java compiler.
+    pub(crate) preloaded_script_ids: HashMap<String, i32>,
+    /// DB column types: "table:column" → first field Type (from dbcolumn.pack).
+    /// Used by db_find to determine the implicit BaseVarType argument.
+    pub(crate) dbcolumn_types: HashMap<String, Type>,
+    /// Component lookup: "interface_name:component_name" → packed (iface_id << 16 | comp_id).
+    pub(crate) components: HashMap<String, i32>,
+    /// Interface name → ID mapping (for component resolution).
+    pub(crate) interface_ids: HashMap<String, i32>,
+    /// Next available script ID.
+    next_script_id: i32,
+}
+
+impl SymbolRegistry {
+    pub fn new() -> Self {
+        SymbolRegistry {
+            scripts: HashMap::new(),
+            commands: HashMap::new(),
+            game_vars: HashMap::new(),
+            constants: HashMap::new(),
+            entity_ids: HashMap::new(),
+            entity_ids_typed: HashMap::new(),
+            command_param_types: HashMap::new(),
+            type_chars: HashMap::new(),
+            script_ids: HashMap::new(),
+            proc_script_ids: HashMap::new(),
+            label_script_ids: HashMap::new(),
+            trigger_script_ids: HashMap::new(),
+            scripts_by_trigger: HashMap::new(),
+            preloaded_script_ids: HashMap::new(),
+            dbcolumn_types: HashMap::new(),
+            components: HashMap::new(),
+            interface_ids: HashMap::new(),
+            next_script_id: 0,
+        }
+    }
+
+    /// Register a script by name with its type information.
+    pub fn register_script(
+        &mut self,
+        name: String,
+        trigger: String,
+        param_types: Vec<Type>,
+        return_types: Vec<Type>,
+    ) -> i32 {
+        let key = format!("{}:{}", trigger, name);
+        let id = if let Some(&preloaded) = self.preloaded_script_ids.get(&key) {
+            preloaded
+        } else {
+            let id = self.next_script_id;
+            self.next_script_id += 1;
+            id
+        };
+
+        self.script_ids.insert(name.clone(), id);
+        // Register in trigger-specific maps
+        self.trigger_script_ids
+            .insert(format!("{}:{}", trigger, name), id);
+        if trigger == "proc" {
+            self.proc_script_ids.insert(name.clone(), id);
+        } else if trigger == "label" {
+            self.label_script_ids.insert(name.clone(), id);
+        }
+        let symbol = Symbol {
+            name: name.clone(),
+            kind: SymbolKind::Script {
+                id,
+                trigger: trigger.clone(),
+                param_types,
+                return_types,
+            },
+        };
+        self.scripts_by_trigger
+            .insert(format!("{}:{}", trigger, name), symbol.clone());
+        self.scripts.insert(name, symbol);
+
+        id
+    }
+
+    /// Register a command (engine function).
+    pub fn register_command(
+        &mut self,
+        name: String,
+        opcode: i32,
+        param_types: Vec<Type>,
+        return_types: Vec<Type>,
+    ) {
+        self.commands.insert(
+            name.clone(),
+            Symbol {
+                name,
+                kind: SymbolKind::Command {
+                    opcode,
+                    param_types,
+                    return_types,
+                },
+            },
+        );
+    }
+
+    /// Register a game variable.
+    pub fn register_game_var(
+        &mut self,
+        name: String,
+        var_type: Type,
+        var_id: i32,
+        category: String,
+    ) {
+        self.game_vars.insert(
+            name.clone(),
+            Symbol {
+                name,
+                kind: SymbolKind::GameVar {
+                    var_type,
+                    var_id,
+                    category,
+                },
+            },
+        );
+    }
+
+    /// Register a constant value (from .constant files).
+    pub fn register_constant(
+        &mut self,
+        name: String,
+        const_type: Type,
+        int_value: Option<i32>,
+        string_value: Option<String>,
+    ) {
+        self.constants.insert(
+            name.clone(),
+            Symbol {
+                name,
+                kind: SymbolKind::Constant {
+                    const_type,
+                    int_value,
+                    string_value,
+                },
+            },
+        );
+    }
+
+    /// Register an entity ID (from stat.pack, npc.pack, loc.pack, etc.).
+    /// These are stored separately from .constant files values so plain
+    /// identifier resolution uses entity IDs, while ^name uses .constant files.
+    pub fn register_entity_id(&mut self, name: String, entity_type: Type, id: i32) {
+        // Store in the typed map (for type-aware lookup).
+        self.entity_ids_typed
+            .entry(name.clone())
+            .or_default()
+            .insert(entity_type, id);
+
+        // Also store in the flat map (priority-ordered; last write wins).
+        self.entity_ids.insert(
+            name.clone(),
+            Symbol {
+                name,
+                kind: SymbolKind::Constant {
+                    const_type: entity_type,
+                    int_value: Some(id),
+                    string_value: None,
+                },
+            },
+        );
+    }
+
+    /// Look up an entity ID for a specific expected type. Returns `None` if the
+    /// name is not registered for that type.
+    /// Normalizes the name (lowercase + spaces→underscores) matching TS normalizeName for Basic symbols.
+    pub fn lookup_entity_id_typed(&self, name: &str, expected: Type) -> Option<i32> {
+        let normalized = name.to_lowercase().replace(' ', "_");
+        self.entity_ids_typed
+            .get(&normalized)
+            .and_then(|m| m.get(&expected))
+            .copied()
+    }
+
+    /// Look up a script by name (last registration wins if multiple triggers share the name).
+    pub fn lookup_script(&self, name: &str) -> Option<&Symbol> {
+        self.scripts.get(name)
+    }
+
+    /// Look up a script by trigger and name (avoids name collisions between triggers).
+    pub fn lookup_script_by_trigger(&self, trigger: &str, name: &str) -> Option<&Symbol> {
+        self.scripts_by_trigger
+            .get(&format!("{}:{}", trigger, name))
+    }
+
+    /// Look up a command by name.
+    pub fn lookup_command(&self, name: &str) -> Option<&Symbol> {
+        self.commands.get(name)
+    }
+
+    /// Look up a game variable by name.
+    pub fn lookup_game_var(&self, name: &str) -> Option<&Symbol> {
+        self.game_vars.get(name)
+    }
+
+    /// Look up a constant by name (from .constant files).
+    pub fn lookup_constant(&self, name: &str) -> Option<&Symbol> {
+        self.constants.get(name)
+    }
+
+    /// Look up an entity ID by name (from stat.pack, npc.pack, etc.).
+    /// Normalizes the name matching TS normalizeName for Basic symbols.
+    pub fn lookup_entity_id(&self, name: &str) -> Option<&Symbol> {
+        let normalized = name.to_lowercase().replace(' ', "_");
+        self.entity_ids.get(&normalized)
+    }
+
+    /// Get the script ID for a given name.
+    pub fn script_id(&self, name: &str) -> Option<i32> {
+        self.script_ids.get(name).copied()
+    }
+
+    /// Get the proc script ID for a given name.
+    pub fn proc_script_id(&self, name: &str) -> Option<i32> {
+        self.proc_script_ids.get(name).copied()
+    }
+
+    /// Get the label script ID for a given name.
+    pub fn label_script_id(&self, name: &str) -> Option<i32> {
+        self.label_script_ids.get(name).copied()
+    }
+
+    pub fn script_id_for_trigger(&self, trigger: &str, name: &str) -> Option<i32> {
+        self.trigger_script_ids
+            .get(&format!("{}:{}", trigger, name))
+            .copied()
+    }
+
+    /// Look up a component by interface_name:component_name.
+    /// Returns the packed (iface_id << 16 | comp_id) value.
+    pub fn lookup_component(&self, iface_name: &str, comp_name: &str) -> Option<i32> {
+        self.components
+            .get(&format!("{}:{}", iface_name, comp_name))
+            .copied()
+    }
+}
