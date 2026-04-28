@@ -1,8 +1,8 @@
-use runescript_compiler::lexer::Lexer;
-use runescript_compiler::parser::Parser;
+use rs_compiler::lexer::Lexer;
+use rs_compiler::parser::Parser;
 use std::path::PathBuf;
 
-fn parse_source(source: &str) -> runescript_compiler::parser::ScriptFile {
+fn parse_source(source: &str) -> rs_compiler::parser::ScriptFile {
     let path = PathBuf::from("test.rs2");
     let tokens = Lexer::new(source, &path).tokenize().unwrap();
     let mut parser = Parser::new(tokens, &path);
@@ -34,7 +34,7 @@ if ($x > 0) {
     // Check that the if statement has an else body
     let stmt = &file.scripts[0].body[0];
     match stmt {
-        runescript_compiler::parser::Statement::If { else_body, .. } => {
+        rs_compiler::parser::Statement::If { else_body, .. } => {
             assert!(else_body.is_some(), "Expected else body");
         }
         _ => panic!("Expected If statement"),
@@ -73,7 +73,7 @@ switch_int ($x) {
     assert_eq!(file.scripts.len(), 1);
     let stmt = &file.scripts[0].body[0];
     match stmt {
-        runescript_compiler::parser::Statement::Switch { cases, default, .. } => {
+        rs_compiler::parser::Statement::Switch { cases, default, .. } => {
             assert_eq!(cases.len(), 2);
             assert!(default.is_some());
         }
@@ -184,7 +184,7 @@ if ($x = 1) {
     assert_eq!(file.scripts.len(), 1);
     let stmt = &file.scripts[0].body[0];
     match stmt {
-        runescript_compiler::parser::Statement::If {
+        rs_compiler::parser::Statement::If {
             else_if, else_body, ..
         } => {
             assert_eq!(else_if.len(), 2, "Expected 2 else-if branches");
