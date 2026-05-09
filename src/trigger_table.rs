@@ -65,7 +65,6 @@ const TRIGGERS: &[TriggerInfo] = &[
     npc("ai_opnpc3", 26),
     npc("ai_opnpc4", 27),
     npc("ai_opnpc5", 28),
-
     // ── Ground obj triggers ──────────────────────────────────────────
     obj("apobj1", 31),
     obj("apobj2", 32),
@@ -91,7 +90,6 @@ const TRIGGERS: &[TriggerInfo] = &[
     obj("ai_opobj3", 54),
     obj("ai_opobj4", 55),
     obj("ai_opobj5", 56),
-
     // ── Loc triggers ─────────────────────────────────────────────────
     loc("aploc1", 59),
     loc("aploc2", 60),
@@ -117,7 +115,6 @@ const TRIGGERS: &[TriggerInfo] = &[
     loc("ai_oploc3", 82),
     loc("ai_oploc4", 83),
     loc("ai_oploc5", 84),
-
     // ── Player triggers (no preferred type — fall through to flat lookup) ──
     flat("applayer1", 87),
     flat("applayer2", 88),
@@ -143,7 +140,6 @@ const TRIGGERS: &[TriggerInfo] = &[
     flat("ai_opplayer3", 110),
     flat("ai_opplayer4", 111),
     flat("ai_opplayer5", 112),
-
     // ── AI queue / timer (NPC-keyed, but historically not validated) ──
     npc_no_validate("ai_queue1", 117),
     npc_no_validate("ai_queue2", 118),
@@ -166,7 +162,6 @@ const TRIGGERS: &[TriggerInfo] = &[
     npc_no_validate("ai_queue19", 135),
     npc_no_validate("ai_queue20", 136),
     flat_no_validate("ai_timer", 139),
-
     // ── Held / inventory item triggers ───────────────────────────────
     obj("opheld1", 140),
     obj("opheld2", 141),
@@ -175,7 +170,6 @@ const TRIGGERS: &[TriggerInfo] = &[
     obj("opheld5", 144),
     obj("opheldu", 145),
     obj("opheldt", 146),
-
     // ── Interface / button triggers ──────────────────────────────────
     iface("if_button", 147, true),
     iface("if_close", 148, false),
@@ -191,7 +185,6 @@ const TRIGGERS: &[TriggerInfo] = &[
     component("inv_button4", 152),
     component("inv_button5", 153),
     component("inv_buttond", 154),
-
     // ── Player lifecycle / coord / stat triggers ─────────────────────
     flat_no_validate("login", 157),
     flat_no_validate("logout", 158),

@@ -11,10 +11,10 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 regex = "1.5"
+tracing = { workspace = true }
 
 # Internal crates - for definition loading and cache access
 rs-cache = { workspace = true }
-rs-definitions = { workspace = true }
 
 [dev-dependencies]
 ctor = "0.2"

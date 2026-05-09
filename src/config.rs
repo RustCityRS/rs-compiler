@@ -56,22 +56,29 @@ impl Default for Config {
 impl Config {
     pub fn load() -> Self {
         let config_path = Self::get_config_path();
-        if !config_path.exists() {
+        let mut config = if config_path.exists() {
+            fs::read_to_string(&config_path)
+                .ok()
+                .and_then(|c| serde_json::from_str(&c).ok())
+                .unwrap_or_default()
+        } else {
             let config = Config::default();
             config.save().unwrap_or_default();
-            return config;
+            config
+        };
+
+        // Env vars always override the saved config
+        if let Ok(dir) = env::var("RSC_SCRIPTS_DIR") {
+            config.scripts_dir = PathBuf::from(dir);
+        }
+        if let Ok(dir) = env::var("RSC_INSTALL_DIR") {
+            config.install_dir = PathBuf::from(dir);
+        }
+        if let Ok(name) = env::var("RSC_ENV") {
+            config.env_name = name;
         }
 
-        let mut file = fs::File::open(&config_path).unwrap_or_else(|_| {
-            let config = Config::default();
-            config.save().unwrap_or_default();
-            fs::File::open(&config_path).unwrap()
-        });
-
-        let mut contents = String::new();
-        file.read_to_string(&mut contents).unwrap_or_default();
-
-        serde_json::from_str(&contents).unwrap_or_default()
+        config
     }
 
     pub fn save(&self) -> io::Result<()> {

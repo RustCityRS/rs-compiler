@@ -1,6 +1,14 @@
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+
 # Build the project
 Write-Host "Building RuneScript Compiler..."
-cargo build --release
+cargo build --release -p rs-compiler
+
+# Resolve workspace target directory (binary lives at workspace root, not crate root)
+$TargetDir = Join-Path $ScriptDir "..\target\release"
+if (!(Test-Path $TargetDir)) {
+    $TargetDir = Join-Path $ScriptDir "target\release"
+}
 
 # Create installation directory
 $INSTALL_DIR = "$env:USERPROFILE\.rsc"
@@ -25,7 +33,7 @@ for ($i = 1; $i -le $MAX_RETRIES; $i++) {
             }
         }
         
-        Copy-Item "target\release\runescript-compiler.exe" -Destination $TARGET -Force
+        Copy-Item (Join-Path $TargetDir "rs-compiler.exe") -Destination $TARGET -Force
         break
     }
     catch {

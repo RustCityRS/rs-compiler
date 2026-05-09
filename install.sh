@@ -1,7 +1,15 @@
 #!/bin/bash
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 echo "Building RuneScript Compiler..."
-cargo build --release
+cargo build --release -p rs-compiler
+
+# Resolve workspace target directory (binary lives at workspace root, not crate root)
+TARGET_DIR="$SCRIPT_DIR/../target/release"
+if [ ! -d "$TARGET_DIR" ]; then
+    TARGET_DIR="$SCRIPT_DIR/target/release"
+fi
 
 # Create installation directory
 INSTALL_DIR="$HOME/.rsc"
@@ -47,11 +55,11 @@ echo "Installing RuneScript Compiler..."
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
     # Convert Windows path to Unix style for Git Bash
     INSTALL_DIR=$(cygpath -u "$INSTALL_DIR")
-    if ! copy_with_retry "target/release/runescript-compiler.exe" "$INSTALL_DIR/bin/rsc.exe"; then
+    if ! copy_with_retry "$TARGET_DIR/rs-compiler.exe" "$INSTALL_DIR/bin/rsc.exe"; then
         exit 1
     fi
 else
-    if ! copy_with_retry "target/release/runescript-compiler" "$INSTALL_DIR/bin/rsc"; then
+    if ! copy_with_retry "$TARGET_DIR/rs-compiler" "$INSTALL_DIR/bin/rsc"; then
         exit 1
     fi
 fi

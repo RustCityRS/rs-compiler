@@ -1,63 +1,51 @@
 # RuneScript Compiler (RSC)
 
-A compiler for RuneScript
+A compiler for RuneScript (.rs2), the scripting language used by RuneScape. Part of the rs-server workspace.
 
 ## Installation
 
 ### Prerequisites
 - [Rust](https://www.rust-lang.org/tools/install)
-- Git
 
-### Windows
+### Windows (PowerShell)
 ```powershell
-# Clone the repository
-git clone https://github.com/yourusername/runescript-compiler.git
-cd runescript-compiler
-
-# Run the installation script (requires PowerShell)
+cd rs-compiler
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
 ### Linux/macOS/Git Bash
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/runescript-compiler.git
-cd runescript-compiler
-
-# Run the installation script
+cd rs-compiler
 chmod +x install.sh
 ./install.sh
 ```
 
 The installation script will:
-1. Build the compiler in release mode
+1. Build the compiler in release mode (`cargo build --release`)
 2. Install it to `~/.rsc/bin` (or `%USERPROFILE%\.rsc\bin` on Windows)
 3. Add the installation directory to your PATH
 4. Create an `rsc` alias
-5. Update your shell configuration:
-   - For Bash: Updates `.bash_profile` or `.bashrc`
-   - For Zsh: Updates `.zshrc`
-   - For Windows PowerShell: Updates PowerShell profile
 
-After installation, restart your terminal or source your configuration file:
-```bash
-# The script will tell you which file to source, typically one of:
-source ~/.bashrc
-source ~/.bash_profile
-source ~/.zshrc
-```
+After installation, restart your terminal or source your shell config.
 
 ## Usage
 
-The RuneScript Compiler (RSC) provides the following commands:
-
-### Run a Script
+### Compile Scripts
 ```bash
-rsc run <script_name> [arguments...]
+rsc compile -s content/scripts -o data/pack/server
 
-# Example: Run Fibonacci script with n=10
-rsc run fib 10
+# With explicit pack directory
+rsc compile -s content/scripts -o data/pack/server --pack content/pack
 ```
+
+Compilation phases:
+1. **Parsing** - Lexes and parses all .rs2 files
+2. **Symbol registration** - Registers scripts, loads pack files, constants, engine commands
+3. **Type checking** - Validates types across all scripts
+4. **Code generation** - Emits bytecode
+5. **Pointer checking** - Static analysis for active-entity pointer hazards (warnings only)
+6. **Lint checks** - Unused locals, unreachable code (warnings only)
+7. **Write output** - Writes script.dat/script.idx to the output directory
 
 ### Analyze 2004Scape Codebase
 ```bash
@@ -66,13 +54,15 @@ rsc 2004
 
 ### Update RSC
 ```bash
-# Update to the latest version
 rsc update
+```
 
-# This will:
-# 1. Pull the latest changes from git
-# 2. Rebuild the compiler
-# 3. Reinstall it to your system
+### Manage Configuration
+```bash
+rsc config show    # Show current RC file
+rsc config edit    # Open RC file in $EDITOR
+rsc config init    # Initialize a new RC file
+rsc config list    # List environment variables and aliases
 ```
 
 ### Get Help
@@ -82,16 +72,17 @@ rsc --help
 
 ## Development
 
-To build from source:
+Build from source (from workspace root):
 ```bash
-cargo build
+cargo build -p rs-compiler
 ```
 
-To run tests:
+Run tests:
 ```bash
-cargo test
+cargo test -p rs-compiler
 ```
 
-## License
-
-[MIT License](LICENSE)
+Run directly without installing:
+```bash
+cargo run -p rs-compiler -- compile -s content/scripts -o data/pack/server
+```

@@ -165,8 +165,7 @@ fn undefined_local_reference_errors() {
          def_int $x = $missing;\n",
     );
     assert!(
-        res.has_error_containing("$missing")
-            || res.has_error_containing("could not be resolved"),
+        res.has_error_containing("$missing") || res.has_error_containing("could not be resolved"),
         "expected unresolved-local error, got:\n{}",
         res.dump()
     );
@@ -330,8 +329,7 @@ fn login_with_global_subject_typechecks() {
 fn login_with_params_errors() {
     let res = check("[login,_](int $x)\n");
     assert!(
-        res.has_error_containing("login")
-            && res.has_error_containing("parameter"),
+        res.has_error_containing("login") && res.has_error_containing("parameter"),
         "expected SCRIPT_TRIGGER_NO_PARAMETERS, got:\n{}",
         res.dump()
     );

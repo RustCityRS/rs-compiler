@@ -433,7 +433,7 @@ fn full_script_header_token_sequence() {
     let toks = lex("[proc,double](int $x)(int)");
     let expected = vec![
         Kind::LBracket,
-        Kind::Trigger,    // proc
+        Kind::Trigger, // proc
         Kind::Comma,
         Kind::Identifier, // double
         Kind::RBracket,

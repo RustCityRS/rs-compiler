@@ -10,9 +10,6 @@ pub struct Compiler {
     current_return_types: Vec<Type>,
     /// The line number of the currently-compiling statement.
     current_stmt_line: usize,
-    /// Last emitted line number (mirrors reference compiler's lastLineNumber).
-    /// Used to avoid emitting duplicate LineNumber entries.
-    last_line: i32,
 }
 
 impl Compiler {
@@ -21,7 +18,6 @@ impl Compiler {
             registry,
             current_return_types: Vec::new(),
             current_stmt_line: 0,
-            last_line: -1,
         }
     }
 
@@ -88,18 +84,6 @@ impl Compiler {
             Opcode::LineNumber,
             Operand::Int(line as i32),
         ));
-    }
-
-    /// Emit LineNumber only if the line differs from the last emitted line,
-    /// matching the reference compiler's lineInstruction dedup behavior.
-    fn emit_line_dedup(&mut self, line: usize, out: &mut CompiledScript) {
-        if line as i32 != self.last_line {
-            self.last_line = line as i32;
-            out.push(Instruction::new(
-                Opcode::LineNumber,
-                Operand::Int(line as i32),
-            ));
-        }
     }
 
     fn compile_statement(
@@ -2078,12 +2062,12 @@ mod tests {
     fn validate_warns_on_unresolved_if_button_subject() {
         let r = seed_registry();
         // Unknown component name — old bug shape (would silently never dispatch).
-        let warning = Compiler::validate_trigger_subject(
-            "if_button",
-            "options:com_does_not_exist",
-            &r,
+        let warning =
+            Compiler::validate_trigger_subject("if_button", "options:com_does_not_exist", &r);
+        assert!(
+            warning.is_some(),
+            "expected a warning for unresolved subject"
         );
-        assert!(warning.is_some(), "expected a warning for unresolved subject");
         assert!(warning.unwrap().contains("did not resolve"));
     }
 
@@ -2117,9 +2101,7 @@ mod tests {
     fn validate_silent_on_coord_triggers() {
         let r = seed_registry();
         // Coord-shaped names are parsed from the entity string itself.
-        assert!(
-            Compiler::validate_trigger_subject("zone", "0_50_50_10_10", &r).is_none()
-        );
+        assert!(Compiler::validate_trigger_subject("zone", "0_50_50_10_10", &r).is_none());
     }
 
     #[test]
