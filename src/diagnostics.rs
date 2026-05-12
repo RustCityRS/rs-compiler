@@ -1,5 +1,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
+use tracing::{error, info, warn};
 
 /// Single source of truth for how paths render in compiler diagnostics.
 ///
@@ -233,13 +234,23 @@ impl DiagnosticsCollector {
 
     pub fn print_all(&self) {
         for diag in &self.diagnostics {
-            eprintln!("{}", diag);
-            render_help(diag);
+            let msg = format!("{}", diag);
+            let help = render_help_string(diag);
+            let full = if help.is_empty() {
+                msg
+            } else {
+                format!("{}\n{}", msg, help)
+            };
+            match diag.severity {
+                Severity::Error => error!(target: "rs_compiler", "{}", full),
+                Severity::Warning => warn!(target: "rs_compiler", "{}", full),
+                Severity::Info => info!(target: "rs_compiler", "{}", full),
+            }
         }
         let errors = self.error_count();
         let warnings = self.warning_count();
         if errors > 0 || warnings > 0 {
-            eprintln!("\n{} error(s), {} warning(s) generated.", errors, warnings);
+            info!(target: "rs_compiler", "{} error(s), {} warning(s) generated.", errors, warnings);
         }
     }
 
@@ -269,24 +280,22 @@ impl Default for DiagnosticsCollector {
 ///
 /// Source text is read lazily from disk; if the read fails we fall back
 /// to printing the replacement alone.
-fn render_help(diag: &Diagnostic) {
+fn render_help_string(diag: &Diagnostic) -> String {
     if diag.help.is_empty() {
-        return;
+        return String::new();
     }
+    use std::fmt::Write;
+    let mut out = String::new();
     for help in &diag.help {
-        eprintln!("help: {}", help.message);
+        let _ = writeln!(out, "help: {}", help.message);
         for sug in &help.suggestions {
             let path = format_path(&sug.file);
             if let Some(label) = &sug.label {
-                eprintln!(
-                    "  ┌─ {} {}:{}-{}",
-                    label, path, sug.line_range.0, sug.line_range.1
-                );
+                let _ = writeln!(out, "  ┌─ {} {}:{}-{}", label, path, sug.line_range.0, sug.line_range.1);
             } else {
-                eprintln!("  ┌─ {}:{}-{}", path, sug.line_range.0, sug.line_range.1);
+                let _ = writeln!(out, "  ┌─ {}:{}-{}", path, sug.line_range.0, sug.line_range.1);
             }
 
-            // Try to read the original lines for a proper before/after.
             let original = std::fs::read_to_string(&sug.file).ok().and_then(|src| {
                 let start = sug.line_range.0.saturating_sub(1);
                 let end = sug.line_range.1;
@@ -303,15 +312,15 @@ fn render_help(diag: &Diagnostic) {
             match original {
                 Some(orig) => {
                     for l in orig.lines() {
-                        eprintln!("  - {}", l);
+                        let _ = writeln!(out, "  - {}", l);
                     }
                     for l in sug.replacement.lines() {
-                        eprintln!("  + {}", l);
+                        let _ = writeln!(out, "  + {}", l);
                     }
                 }
                 None => {
                     for l in sug.replacement.lines() {
-                        eprintln!("  + {}", l);
+                        let _ = writeln!(out, "  + {}", l);
                     }
                 }
             }
@@ -322,6 +331,8 @@ fn render_help(diag: &Diagnostic) {
             Applicability::HasPlaceholders => "HasPlaceholders (fill in the <…> tokens)",
             Applicability::Unspecified => "Unspecified",
         };
-        eprintln!("  = note: Applicability: {}", appl);
+        let _ = writeln!(out, "  = note: Applicability: {}", appl);
     }
+    out.truncate(out.trim_end().len());
+    out
 }
