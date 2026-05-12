@@ -291,9 +291,17 @@ fn render_help_string(diag: &Diagnostic) -> String {
         for sug in &help.suggestions {
             let path = format_path(&sug.file);
             if let Some(label) = &sug.label {
-                let _ = writeln!(out, "  ┌─ {} {}:{}-{}", label, path, sug.line_range.0, sug.line_range.1);
+                let _ = writeln!(
+                    out,
+                    "  ┌─ {} {}:{}-{}",
+                    label, path, sug.line_range.0, sug.line_range.1
+                );
             } else {
-                let _ = writeln!(out, "  ┌─ {}:{}-{}", path, sug.line_range.0, sug.line_range.1);
+                let _ = writeln!(
+                    out,
+                    "  ┌─ {}:{}-{}",
+                    path, sug.line_range.0, sug.line_range.1
+                );
             }
 
             let original = std::fs::read_to_string(&sug.file).ok().and_then(|src| {
