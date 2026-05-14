@@ -319,6 +319,7 @@ pub fn compile(
             "inv_buttond",
             "login",
             "logout",
+            "switch_window_mode",
             "timer",
             "softtimer",
             "queue",
