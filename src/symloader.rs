@@ -772,14 +772,14 @@ fn parse_coord_string(s: &str) -> Option<i32> {
     if parts.len() != 5 {
         return None;
     }
-    let level: i32 = parts[0].parse().ok()?;
+    let y: i32 = parts[0].parse().ok()?;
     let bx: i32 = parts[1].parse().ok()?;
     let bz: i32 = parts[2].parse().ok()?;
     let lx: i32 = parts[3].parse().ok()?;
     let lz: i32 = parts[4].parse().ok()?;
     let x = bx * 64 + lx;
     let z = bz * 64 + lz;
-    Some((level << 28) | (x << 14) | z)
+    Some((y << 28) | (x << 14) | z)
 }
 
 /// Load an entity pack file. Two `interface.pack` dialects are accepted:
