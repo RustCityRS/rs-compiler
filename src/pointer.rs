@@ -1637,6 +1637,16 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         false,
     );
     add(
+        "if_movesub",
+        &[ActivePlayer],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        false,
+    );
+    add(
         "set_player_op",
         &[ActivePlayer],
         &[],
