@@ -320,12 +320,6 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Check if a given character would start an identifier continuation
-    /// after the prefix character ($, %, ^).
-    fn is_ident_start(ch: u8) -> bool {
-        ch.is_ascii_alphabetic() || ch == b'_'
-    }
-
     pub fn tokenize(&mut self) -> Result<Vec<Token>, LexingError> {
         let mut tokens = Vec::new();
 
