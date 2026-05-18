@@ -666,9 +666,145 @@ impl SymbolRegistry {
 
     /// Look up a component by interface_name:component_name.
     /// Returns the packed (iface_id << 16 | comp_id) value.
+    /// Normalizes the component name so 647-style `com2` and 225-style `com_2`
+    /// both resolve against whichever form the pack was written in.
     pub fn lookup_component(&self, iface_name: &str, comp_name: &str) -> Option<i32> {
-        self.components
-            .get(&format!("{}:{}", iface_name, comp_name))
-            .copied()
+        let key = format!("{}:{}", iface_name, normalize_comp_name(comp_name));
+        self.components.get(&key).copied()
+    }
+}
+
+/// Strip underscores at alpha→digit boundaries to unify 647-style `com2`
+/// with 225-style `com_2`. Both normalize to `com2`.
+pub(crate) fn normalize_comp_name(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'_'
+            && i > 0
+            && bytes[i - 1].is_ascii_alphabetic()
+            && i + 1 < bytes.len()
+            && bytes[i + 1].is_ascii_digit()
+        {
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    unsafe { String::from_utf8_unchecked(out) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Type;
+
+    // ── normalize_comp_name ────────────────────────────────────────────
+
+    #[test]
+    fn normalize_strips_underscore_before_digits() {
+        assert_eq!(normalize_comp_name("com_2"), "com2");
+        assert_eq!(normalize_comp_name("com_10"), "com10");
+        assert_eq!(normalize_comp_name("com_0"), "com0");
+    }
+
+    #[test]
+    fn normalize_preserves_already_compact_names() {
+        assert_eq!(normalize_comp_name("com2"), "com2");
+        assert_eq!(normalize_comp_name("com10"), "com10");
+        assert_eq!(normalize_comp_name("com0"), "com0");
+    }
+
+    #[test]
+    fn normalize_preserves_non_digit_underscores() {
+        assert_eq!(normalize_comp_name("close_button"), "close_button");
+        assert_eq!(normalize_comp_name("thin_swords"), "thin_swords");
+        assert_eq!(normalize_comp_name("title"), "title");
+    }
+
+    #[test]
+    fn normalize_only_strips_alpha_digit_boundary() {
+        // underscore between two digits — not stripped
+        assert_eq!(normalize_comp_name("layer_2_3"), "layer2_3");
+        // underscore between digit and alpha — not stripped
+        assert_eq!(normalize_comp_name("3_panel"), "3_panel");
+    }
+
+    // ── lookup_component (647 pack style) ──────────────────────────────
+
+    fn registry_647_style() -> SymbolRegistry {
+        let mut r = SymbolRegistry::new();
+        r.interface_ids.insert("multi2".into(), 228);
+        // 647 pack registers `com0`..`com9` (no underscore)
+        for i in 0..10 {
+            let key = format!("multi2:com{}", i);
+            r.components.insert(key, (228 << 16) | i);
+        }
+        r
+    }
+
+    #[test]
+    fn lookup_647_pack_with_647_reference() {
+        let r = registry_647_style();
+        // Script uses the same 647 naming: `multi2:com2`
+        assert_eq!(r.lookup_component("multi2", "com2"), Some((228 << 16) | 2));
+        assert_eq!(r.lookup_component("multi2", "com9"), Some((228 << 16) | 9));
+    }
+
+    #[test]
+    fn lookup_647_pack_with_225_reference() {
+        let r = registry_647_style();
+        // Script uses 225 naming: `multi2:com_2` — must still resolve
+        assert_eq!(
+            r.lookup_component("multi2", "com_2"),
+            Some((228 << 16) | 2)
+        );
+        assert_eq!(
+            r.lookup_component("multi2", "com_9"),
+            Some((228 << 16) | 9)
+        );
+        assert_eq!(
+            r.lookup_component("multi2", "com_0"),
+            Some((228 << 16) | 0)
+        );
+    }
+
+    // ── lookup_component (225 pack style) ──────────────────────────────
+
+    fn registry_225_style() -> SymbolRegistry {
+        let mut r = SymbolRegistry::new();
+        r.interface_ids.insert("multi2".into(), 228);
+        // 225 pack registers `multi2:com_0`..`com_9` — but through
+        // symloader normalization these become `com0`..`com9`.
+        for i in 0..10 {
+            let key = format!("multi2:com{}", i);
+            r.components.insert(key, 2459 + i);
+        }
+        r
+    }
+
+    #[test]
+    fn lookup_225_pack_with_225_reference() {
+        let r = registry_225_style();
+        assert_eq!(r.lookup_component("multi2", "com_0"), Some(2459));
+        assert_eq!(r.lookup_component("multi2", "com_5"), Some(2464));
+    }
+
+    #[test]
+    fn lookup_225_pack_with_647_reference() {
+        let r = registry_225_style();
+        assert_eq!(r.lookup_component("multi2", "com0"), Some(2459));
+        assert_eq!(r.lookup_component("multi2", "com5"), Some(2464));
+    }
+
+    // ── lookup_component (miss) ────────────────────────────────────────
+
+    #[test]
+    fn lookup_returns_none_for_unknown_component() {
+        let r = registry_647_style();
+        assert_eq!(r.lookup_component("multi2", "nonexistent"), None);
+        assert_eq!(r.lookup_component("unknown_iface", "com0"), None);
     }
 }

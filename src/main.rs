@@ -44,6 +44,18 @@ enum Commands {
         /// Pack directory (overrides auto-detection)
         #[arg(long)]
         pack: Option<String>,
+        /// Run lint passes (unused locals, unreachable code) after compilation
+        #[arg(long, default_value_t = false)]
+        lint: bool,
+    },
+    /// Run all analysis passes without writing output
+    Lint {
+        /// Source directory containing .rs2 files
+        #[arg(short, long)]
+        source: Option<String>,
+        /// Pack directory (overrides auto-detection)
+        #[arg(long)]
+        pack: Option<String>,
     },
     /// Update the RuneScript Compiler to the latest version
     Update,
@@ -67,6 +79,13 @@ enum ConfigCommands {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+    
     let cli = Cli::parse();
     let config = Config::load();
 
@@ -75,8 +94,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             source,
             output,
             pack,
+            lint,
         } => {
-            compile_scripts(source, output, pack, &config)?;
+            compile_scripts(source, output, pack, lint, &config)?;
+        }
+        Commands::Lint { source, pack } => {
+            lint_scripts(source, pack, &config)?;
         }
         Commands::Update => {
             let current_dir = std::env::current_dir()?;
@@ -188,6 +211,7 @@ fn compile_scripts(
     source: Option<String>,
     output: String,
     pack_override: Option<String>,
+    lint: bool,
     config: &Config,
 ) -> Result<(), Box<dyn Error>> {
     let scripts_dir = source
@@ -195,5 +219,17 @@ fn compile_scripts(
         .unwrap_or_else(|| config.scripts_dir.clone());
     let pack_dir = pack_override.map(PathBuf::from);
     let output_dir = PathBuf::from(output);
-    rs_compiler::compile(&scripts_dir, pack_dir.as_deref(), &output_dir)
+    rs_compiler::compile(&scripts_dir, pack_dir.as_deref(), &output_dir, lint)
+}
+
+fn lint_scripts(
+    source: Option<String>,
+    pack_override: Option<String>,
+    config: &Config,
+) -> Result<(), Box<dyn Error>> {
+    let scripts_dir = source
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config.scripts_dir.clone());
+    let pack_dir = pack_override.map(PathBuf::from);
+    rs_compiler::lint(&scripts_dir, pack_dir.as_deref())
 }

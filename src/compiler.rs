@@ -2034,10 +2034,11 @@ mod tests {
     fn seed_registry() -> SymbolRegistry {
         let mut r = SymbolRegistry::new();
         // Interface 261 = "options", with component 14 = "com_14".
+        // Key uses normalized form (com14) matching what symloader produces.
         r.register_entity_id("options".into(), Type::Interface, 261);
-        r.register_entity_id("com_14".into(), Type::Component, 14);
+        r.register_entity_id("com14".into(), Type::Component, 14);
         r.components
-            .insert("options:com_14".into(), (261 << 16) | 14);
+            .insert("options:com14".into(), (261 << 16) | 14);
         // An npc + obj entity for non-interface trigger tests.
         r.register_entity_id("man".into(), Type::Npc, 1);
         r.register_entity_id("bronze_axe".into(), Type::Obj, 1351);

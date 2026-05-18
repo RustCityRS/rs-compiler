@@ -812,7 +812,8 @@ impl<'a> TypeChecker<'a> {
                                 || self.registry.proc_script_id(name).is_some()
                                 || self.registry.script_id(name).is_some();
                             if !resolved {
-                                self.emit_unresolved_entity_warning(line, name, h);
+                                self.error(line, msg::fmt(msg::GENERIC_UNRESOLVED_SYMBOL, &[name]));
+                                return Some(Type::Error);
                             }
                             return Some(h);
                         }

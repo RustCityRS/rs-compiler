@@ -899,7 +899,16 @@ fn load_entity_ids(registry: &mut SymbolRegistry, path: &Path, entity_type: Type
 
         if is_interface_pack {
             if let Some(key) = component_key {
-                registry.components.insert(key, idx);
+                let normalized_key = if let Some((iface_part, comp_part)) = key.split_once(':') {
+                    format!(
+                        "{}:{}",
+                        iface_part,
+                        crate::symbol::normalize_comp_name(comp_part)
+                    )
+                } else {
+                    key
+                };
+                registry.components.insert(normalized_key, idx);
             }
         }
     }
@@ -1119,5 +1128,156 @@ fn register_engine_constants(registry: &mut SymbolRegistry) {
     ];
     for &(name, id) in locshapes {
         registry.register_entity_id(name.to_string(), Type::LocShape, id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::symbol::SymbolRegistry;
+    use crate::types::Type;
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    fn write_temp_pack(name: &str, content: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-symloader");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        path
+    }
+
+    // ── 647-style pack ─────────────────────────────────────────────────
+    // Format: `<iface_id>=<name>` for roots, `<iface_id>:<comp_id>=<comp_name>`
+
+    #[test]
+    fn load_647_style_registers_components() {
+        let pack = write_temp_pack(
+            "interface_647.pack",
+            "\
+228=multi2\n\
+228:0=com0\n\
+228:1=com1\n\
+228:2=com2\n\
+228:3=com3\n\
+228:6=thin_swords\n\
+228:9=wide_swords\n",
+        );
+        let mut r = SymbolRegistry::new();
+        load_entity_ids(&mut r, &pack, Type::Interface);
+
+        // Root interface registered
+        assert_eq!(r.interface_ids.get("multi2"), Some(&228));
+
+        // Components use normalized keys (com0, not com_0)
+        assert_eq!(r.lookup_component("multi2", "com0"), Some((228 << 16) | 0));
+        assert_eq!(r.lookup_component("multi2", "com2"), Some((228 << 16) | 2));
+        assert_eq!(r.lookup_component("multi2", "com3"), Some((228 << 16) | 3));
+
+        // Named components (no digits) are unaffected by normalization
+        assert_eq!(
+            r.lookup_component("multi2", "thin_swords"),
+            Some((228 << 16) | 6)
+        );
+        assert_eq!(
+            r.lookup_component("multi2", "wide_swords"),
+            Some((228 << 16) | 9)
+        );
+    }
+
+    #[test]
+    fn load_647_style_resolves_225_references() {
+        let pack = write_temp_pack(
+            "interface_647_cross.pack",
+            "\
+228=multi2\n\
+228:0=com0\n\
+228:1=com1\n\
+228:2=com2\n",
+        );
+        let mut r = SymbolRegistry::new();
+        load_entity_ids(&mut r, &pack, Type::Interface);
+
+        // 225-style references (com_0, com_1, com_2) resolve against 647 pack
+        assert_eq!(
+            r.lookup_component("multi2", "com_0"),
+            Some((228 << 16) | 0)
+        );
+        assert_eq!(
+            r.lookup_component("multi2", "com_1"),
+            Some((228 << 16) | 1)
+        );
+        assert_eq!(
+            r.lookup_component("multi2", "com_2"),
+            Some((228 << 16) | 2)
+        );
+    }
+
+    // ── 225-style pack ─────────────────────────────────────────────────
+    // Format: `<flat_id>=<iface_name>` for roots, `<flat_id>=<iface_name>:<comp_name>`
+
+    #[test]
+    fn load_225_style_registers_components() {
+        let pack = write_temp_pack(
+            "interface_225.pack",
+            "\
+2459=multi2\n\
+2460=multi2:com_0\n\
+2461=multi2:com_1\n\
+2462=multi2:com_2\n\
+2463=multi2:com_4\n\
+2464=multi2:com_5\n",
+        );
+        let mut r = SymbolRegistry::new();
+        load_entity_ids(&mut r, &pack, Type::Interface);
+
+        // Root interface registered
+        assert_eq!(r.interface_ids.get("multi2"), Some(&2459));
+
+        // 225 references resolve (com_0 normalized to com0 at registration)
+        assert_eq!(r.lookup_component("multi2", "com_0"), Some(2460));
+        assert_eq!(r.lookup_component("multi2", "com_2"), Some(2462));
+        assert_eq!(r.lookup_component("multi2", "com_5"), Some(2464));
+    }
+
+    #[test]
+    fn load_225_style_resolves_647_references() {
+        let pack = write_temp_pack(
+            "interface_225_cross.pack",
+            "\
+2459=multi2\n\
+2460=multi2:com_0\n\
+2461=multi2:com_1\n\
+2462=multi2:com_2\n",
+        );
+        let mut r = SymbolRegistry::new();
+        load_entity_ids(&mut r, &pack, Type::Interface);
+
+        // 647-style references (com0, com1, com2) resolve against 225 pack
+        assert_eq!(r.lookup_component("multi2", "com0"), Some(2460));
+        assert_eq!(r.lookup_component("multi2", "com1"), Some(2461));
+        assert_eq!(r.lookup_component("multi2", "com2"), Some(2462));
+    }
+
+    // ── Entity type correctness ────────────────────────────────────────
+
+    #[test]
+    fn components_register_as_component_type() {
+        let pack = write_temp_pack(
+            "interface_types.pack",
+            "\
+228=multi2\n\
+228:0=com0\n",
+        );
+        let mut r = SymbolRegistry::new();
+        load_entity_ids(&mut r, &pack, Type::Interface);
+
+        // Root → Interface type, component → Component type
+        assert!(r.lookup_entity_id_typed("multi2", Type::Interface).is_some());
+        assert!(r.lookup_entity_id_typed("com0", Type::Component).is_some());
+        assert!(r.lookup_entity_id_typed("com0", Type::Interface).is_none());
     }
 }
