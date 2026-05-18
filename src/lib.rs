@@ -17,14 +17,36 @@ pub mod typechecker;
 pub mod types;
 pub mod writer;
 
+use std::error::Error;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
+/// Compile scripts and write output. When `lint` is true, also run lint passes
+/// (unused locals, unreachable code) after code generation.
 pub fn compile(
     scripts_dir: &Path,
     pack_dir: Option<&Path>,
     output_dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+    lint: bool,
+) -> Result<(), Box<dyn Error>> {
+    run_pipeline(scripts_dir, pack_dir, Some(output_dir), lint)
+}
+
+/// Run all analysis passes (parse, type-check, codegen, pointer-check, lints)
+/// without writing output. Useful for editor tooling and CI lint gates.
+pub fn lint(
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
+    run_pipeline(scripts_dir, pack_dir, None, true)
+}
+
+fn run_pipeline(
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+    output_dir: Option<&Path>,
+    lint: bool,
+) -> Result<(), Box<dyn Error>> {
     use crate::compiler::Compiler;
     use crate::diagnostics::DiagnosticsCollector;
     use crate::lexer::Lexer;
@@ -471,9 +493,9 @@ pub fn compile(
         diagnostics.merge(pointer_diags);
     }
 
-    // Phase 4.6: Lint passes
-    info!("Phase 4.6: Lint checks...");
-    {
+    // Phase 4.6: Lint passes (optional)
+    if lint {
+        info!("Phase 4.6: Lint checks...");
         let lint_diags = lints::run_lints(&compiled_scripts, Some(&source_cache));
         let lint_warnings = lint_diags.warning_count();
         if lint_warnings > 0 {
@@ -482,11 +504,13 @@ pub fn compile(
         diagnostics.merge(lint_diags);
     }
 
-    // Phase 5: Write output
-    let output = output_dir.display().to_string();
-    info!("Phase 5: Writing output to {}...", output);
-    let writer = ScriptWriter::new(output);
-    writer.write_all(&compiled_scripts)?;
+    // Phase 5: Write output (skipped for lint-only runs)
+    if let Some(out_dir) = output_dir {
+        let output = out_dir.display().to_string();
+        info!("Phase 5: Writing output to {}...", output);
+        let writer = ScriptWriter::new(output);
+        writer.write_all(&compiled_scripts)?;
+    }
 
     diagnostics.print_all();
     info!("Compilation complete!");
@@ -498,7 +522,7 @@ fn collect_files(
     dir: &Path,
     ext: &str,
     out: &mut Vec<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn Error>> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();

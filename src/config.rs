@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize)]
