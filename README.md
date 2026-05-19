@@ -70,14 +70,6 @@ runec lint -s data/src/scripts --pack data/pack
 
 This runs the full pipeline (parse, type-check, codegen, pointer-check, lints) and reports diagnostics. Useful for editor tooling and CI lint gates.
 
-### Updating
-
-Pull the latest changes and rebuild:
-
-```bash
-runec update
-```
-
 ## Development
 
 ### Building from Source

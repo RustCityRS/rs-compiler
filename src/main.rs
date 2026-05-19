@@ -55,8 +55,6 @@ enum Commands {
         #[arg(long)]
         pack: Option<String>,
     },
-    /// Update the RuneScript Compiler to the latest version
-    Update,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -85,56 +83,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             let scripts_dir = PathBuf::from(source);
             let pack_dir = pack.map(PathBuf::from);
             runec::lint(&scripts_dir, pack_dir.as_deref())?;
-        }
-        Commands::Update => {
-            let current_dir = std::env::current_dir()?;
-            let install_script = if cfg!(windows) {
-                "install.ps1"
-            } else {
-                "install.sh"
-            };
-
-            if !current_dir.join(install_script).exists() {
-                println!("Error: Installation script not found.");
-                return Ok(());
-            }
-
-            println!("Updating RuneScript Compiler...");
-
-            let has_git = std::process::Command::new("git")
-                .args(["rev-parse", "--git-dir"])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-
-            let has_remote = if has_git {
-                std::process::Command::new("git")
-                    .args(["remote", "get-url", "origin"])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-            } else {
-                false
-            };
-
-            if has_git && has_remote {
-                println!("Pulling latest changes...");
-                let _ = std::process::Command::new("git")
-                    .args(["pull", "origin", "main"])
-                    .status();
-            }
-
-            println!("Rebuilding...");
-            if cfg!(windows) {
-                std::process::Command::new("powershell")
-                    .args(["-ExecutionPolicy", "Bypass", "-File", install_script])
-                    .status()?;
-            } else {
-                std::process::Command::new("sh")
-                    .arg(install_script)
-                    .status()?;
-            }
-            println!("Update complete!");
         }
     }
 
