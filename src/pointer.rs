@@ -398,7 +398,7 @@ pub fn trigger_pointers(trigger: &str) -> PointerSet {
         "walktrigger" => &[ActivePlayer, PActivePlayer],
 
         // Global triggers
-        "login" | "logout" | "tutorial" => &[ActivePlayer, PActivePlayer],
+        "login" | "logout" | "tutorial" | "switch_window_mode" => &[ActivePlayer, PActivePlayer],
         "advancestat" | "changestat" => &[ActivePlayer, PActivePlayer],
         "mapzone" | "mapzoneexit" | "zone" | "zoneexit" => &[ActivePlayer, PActivePlayer],
 
