@@ -757,18 +757,9 @@ mod tests {
     fn lookup_647_pack_with_225_reference() {
         let r = registry_647_style();
         // Script uses 225 naming: `multi2:com_2` — must still resolve
-        assert_eq!(
-            r.lookup_component("multi2", "com_2"),
-            Some((228 << 16) | 2)
-        );
-        assert_eq!(
-            r.lookup_component("multi2", "com_9"),
-            Some((228 << 16) | 9)
-        );
-        assert_eq!(
-            r.lookup_component("multi2", "com_0"),
-            Some((228 << 16) | 0)
-        );
+        assert_eq!(r.lookup_component("multi2", "com_2"), Some((228 << 16) | 2));
+        assert_eq!(r.lookup_component("multi2", "com_9"), Some((228 << 16) | 9));
+        assert_eq!(r.lookup_component("multi2", "com_0"), Some((228 << 16) | 0));
     }
 
     // ── lookup_component (225 pack style) ──────────────────────────────
