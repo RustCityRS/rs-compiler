@@ -3,3 +3,4 @@ target/*
 2004scape
 2004scape/*
 data/pack/
+.claude/*
