@@ -1,6 +1,5 @@
 pub mod bytecode;
 pub mod compiler;
-pub mod config;
 pub mod diagnostic_messages;
 pub mod diagnostics;
 pub mod error;

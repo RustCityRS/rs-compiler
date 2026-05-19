@@ -1,4 +1,4 @@
-# RuneScript Compiler (RSC)
+# RuneScript Compiler (runec)
 
 A compiler for RuneScript (`.rs2`), the scripting language used by RuneScape's game engine. Compiles source scripts into binary `script.dat`/`script.idx` output consumed by the game server.
 
@@ -21,30 +21,30 @@ chmod +x install.sh
 ./install.sh
 ```
 
-This builds the compiler in release mode and installs it to `~/.rsc/bin` as `rsc`. The install script adds the directory to your `PATH` and creates a shell alias. Restart your terminal after installation.
+This builds the compiler in release mode and installs it to `~/.runec/bin` as `runec`. The install script adds the directory to your `PATH` and creates a shell alias. Restart your terminal after installation.
 
 ## Usage
 
 ### Compiling Scripts
 
 ```bash
-rsc compile -s <source-dir> -o <output-dir>
+runec compile -s <source-dir> -o <output-dir>
 ```
 
 Compiles all `.rs2` files in the source directory and writes `script.dat` and `script.idx` to the output directory.
 
 ```bash
 # Compile with default output (./data/pack/server)
-rsc compile -s data/src/scripts
+runec compile -s data/src/scripts
 
 # Specify both source and output
-rsc compile -s data/src/scripts -o data/pack/server
+runec compile -s data/src/scripts -o data/pack/server
 
 # Provide an explicit pack directory for symbol resolution
-rsc compile -s data/src/scripts -o data/pack/server --pack data/pack
+runec compile -s data/src/scripts -o data/pack/server --pack data/pack
 
 # Compile and run lint passes
-rsc compile -s data/src/scripts -o data/pack/server --lint
+runec compile -s data/src/scripts -o data/pack/server --lint
 ```
 
 The compiler runs the following phases in order:
@@ -62,10 +62,10 @@ The compiler runs the following phases in order:
 Run all analysis passes without writing any output:
 
 ```bash
-rsc lint -s <source-dir>
+runec lint -s <source-dir>
 
 # With explicit pack directory
-rsc lint -s data/src/scripts --pack data/pack
+runec lint -s data/src/scripts --pack data/pack
 ```
 
 This runs the full pipeline (parse, type-check, codegen, pointer-check, lints) and reports diagnostics. Useful for editor tooling and CI lint gates.
@@ -75,17 +75,8 @@ This runs the full pipeline (parse, type-check, codegen, pointer-check, lints) a
 Pull the latest changes and rebuild:
 
 ```bash
-rsc update
+runec update
 ```
-
-### Environment Variables
-
-| Variable | Description |
-|---|---|
-| `RSC_ENV` | Environment name (default: `default`) |
-| `RSC_SCRIPTS_DIR` | Override the scripts source directory |
-| `RSC_INSTALL_DIR` | Override the installation directory |
-| `RUST_LOG` | Set log verbosity (`trace`, `debug`, `info`, `warn`, `error`) |
 
 ## Development
 
@@ -116,7 +107,7 @@ The compiler is also available as a library crate:
 use std::path::Path;
 
 // Compile scripts and write output
-rs_compiler::compile(
+runec::compile(
     Path::new("data/src/scripts"),
     Some(Path::new("data/pack")),
     Path::new("data/pack/server"),
@@ -124,7 +115,7 @@ rs_compiler::compile(
 ).unwrap();
 
 // Lint only (no output written)
-rs_compiler::lint(
+runec::lint(
     Path::new("data/src/scripts"),
     Some(Path::new("data/pack")),
 ).unwrap();

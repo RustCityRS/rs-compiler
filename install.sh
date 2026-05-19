@@ -3,7 +3,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "Building RuneScript Compiler..."
-cargo build --release -p rs-compiler
+cargo build --release -p runec
 
 # Resolve workspace target directory (binary lives at workspace root, not crate root)
 TARGET_DIR="$SCRIPT_DIR/../target/release"
@@ -12,7 +12,7 @@ if [ ! -d "$TARGET_DIR" ]; then
 fi
 
 # Create installation directory
-INSTALL_DIR="$HOME/.rsc"
+INSTALL_DIR="$HOME/.runec"
 mkdir -p "$INSTALL_DIR/bin"
 
 # Function to safely copy the binary
@@ -25,25 +25,25 @@ copy_with_retry() {
 
     while [ $attempt -le $max_retries ]; do
         echo "Installation attempt $attempt..."
-        
+
         # If file exists, try to stop any running processes
         if [ -f "$target" ]; then
-            echo "Stopping existing RSC processes..."
+            echo "Stopping existing runec processes..."
             pkill -f "$target" 2>/dev/null || true
             sleep 1
         fi
-        
+
         # Try to copy
         if cp "$source" "$target" 2>/dev/null; then
             chmod +x "$target"
             return 0
         fi
-        
+
         if [ $attempt -eq $max_retries ]; then
-            echo "Error: Could not install RSC after $max_retries attempts. Please close any running instances and try again."
+            echo "Error: Could not install runec after $max_retries attempts. Please close any running instances and try again."
             return 1
         fi
-        
+
         echo "Installation attempt $attempt failed. Retrying in $retry_wait seconds..."
         sleep $retry_wait
         attempt=$((attempt + 1))
@@ -55,11 +55,11 @@ echo "Installing RuneScript Compiler..."
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
     # Convert Windows path to Unix style for Git Bash
     INSTALL_DIR=$(cygpath -u "$INSTALL_DIR")
-    if ! copy_with_retry "$TARGET_DIR/rs-compiler.exe" "$INSTALL_DIR/bin/rsc.exe"; then
+    if ! copy_with_retry "$TARGET_DIR/runec.exe" "$INSTALL_DIR/bin/runec.exe"; then
         exit 1
     fi
 else
-    if ! copy_with_retry "$TARGET_DIR/rs-compiler" "$INSTALL_DIR/bin/rsc"; then
+    if ! copy_with_retry "$TARGET_DIR/runec" "$INSTALL_DIR/bin/runec"; then
         exit 1
     fi
 fi
@@ -68,27 +68,27 @@ fi
 configure_rc_file() {
     local rc_file="$1"
     echo "Configuring $rc_file..."
-    
+
     # Create file if it doesn't exist
     if [[ ! -f "$rc_file" ]]; then
         touch "$rc_file"
     fi
-    
-    # Remove any existing RSC configurations
+
+    # Remove any existing runec configurations
     sed -i.bak '/# RuneScript Compiler/d' "$rc_file"
-    sed -i.bak '/export PATH=.*\/.rsc\/bin/d' "$rc_file"
-    sed -i.bak '/alias rsc=/d' "$rc_file"
+    sed -i.bak '/export PATH=.*\/.runec\/bin/d' "$rc_file"
+    sed -i.bak '/alias runec=/d' "$rc_file"
     rm -f "${rc_file}.bak"
-    
+
     # Add new configuration
     echo "" >> "$rc_file"
     echo "# RuneScript Compiler" >> "$rc_file"
     echo "export PATH=\"\$PATH:$INSTALL_DIR/bin\"" >> "$rc_file"
-    
+
     if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
-        echo "alias rsc='$INSTALL_DIR/bin/rsc.exe'" >> "$rc_file"
+        echo "alias runec='$INSTALL_DIR/bin/runec.exe'" >> "$rc_file"
     else
-        echo "alias rsc='$INSTALL_DIR/bin/rsc'" >> "$rc_file"
+        echo "alias runec='$INSTALL_DIR/bin/runec'" >> "$rc_file"
     fi
 }
 

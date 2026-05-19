@@ -246,7 +246,7 @@ pub fn generate_script_pack(scripts_dir: &Path, pack_dir: &Path) {
 
     // Save
     if let Err(e) = std::fs::create_dir_all(pack_dir) {
-        warn!(target: "rs_compiler", "Failed to create pack dir: {}", e);
+        warn!(target: "runec", "Failed to create pack dir: {}", e);
         return;
     }
     let mut out = String::new();
@@ -254,9 +254,9 @@ pub fn generate_script_pack(scripts_dir: &Path, pack_dir: &Path) {
         out.push_str(&format!("{}={}\n", id, name));
     }
     if let Err(e) = fs::write(&pack_path, &out) {
-        warn!(target: "rs_compiler", "Failed to write script.pack: {}", e);
+        warn!(target: "runec", "Failed to write script.pack: {}", e);
     } else {
-        info!(target: "rs_compiler", "script.pack: {} entries", id_to_name.len());
+        info!(target: "runec", "script.pack: {} entries", id_to_name.len());
     }
 }
 

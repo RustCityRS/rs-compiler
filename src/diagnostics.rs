@@ -242,15 +242,15 @@ impl DiagnosticsCollector {
                 format!("{}\n{}", msg, help)
             };
             match diag.severity {
-                Severity::Error => error!(target: "rs_compiler", "{}", full),
-                Severity::Warning => warn!(target: "rs_compiler", "{}", full),
-                Severity::Info => info!(target: "rs_compiler", "{}", full),
+                Severity::Error => error!(target: "runec", "{}", full),
+                Severity::Warning => warn!(target: "runec", "{}", full),
+                Severity::Info => info!(target: "runec", "{}", full),
             }
         }
         let errors = self.error_count();
         let warnings = self.warning_count();
         if errors > 0 || warnings > 0 {
-            info!(target: "rs_compiler", "{} error(s), {} warning(s) generated.", errors, warnings);
+            info!(target: "runec", "{} error(s), {} warning(s) generated.", errors, warnings);
         }
     }
 

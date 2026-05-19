@@ -19,8 +19,8 @@
 //!   - EOF token presence
 //!   - error paths for unrecognised chars
 
-use rs_compiler::lexer::Lexer;
-use rs_compiler::token::{Kind, Token};
+use runec::lexer::Lexer;
+use runec::token::{Kind, Token};
 use std::path::PathBuf;
 
 fn lex(src: &str) -> Vec<Token> {

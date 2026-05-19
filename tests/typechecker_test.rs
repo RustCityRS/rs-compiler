@@ -18,12 +18,12 @@
 //!   - condition / switch validation
 //!   - `*` suffix gated to command trigger
 
-use rs_compiler::diagnostics::{Diagnostic, Severity};
-use rs_compiler::lexer::Lexer;
-use rs_compiler::parser::Parser;
-use rs_compiler::symbol::SymbolRegistry;
-use rs_compiler::typechecker::TypeChecker;
-use rs_compiler::types::Type;
+use runec::diagnostics::{Diagnostic, Severity};
+use runec::lexer::Lexer;
+use runec::parser::Parser;
+use runec::symbol::SymbolRegistry;
+use runec::typechecker::TypeChecker;
+use runec::types::Type;
 use std::path::PathBuf;
 
 // ── Test harness ────────────────────────────────────────────────────
@@ -442,7 +442,7 @@ fn errors_carry_source_line() {
 
 #[test]
 fn errors_use_typechecking_phase() {
-    use rs_compiler::diagnostics::Phase;
+    use runec::diagnostics::Phase;
     let res = check(
         "[proc,oops]\n\
          ~not_a_real_proc;\n",

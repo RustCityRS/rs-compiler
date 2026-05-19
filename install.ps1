@@ -2,7 +2,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Build the project
 Write-Host "Building RuneScript Compiler..."
-cargo build --release -p rs-compiler
+cargo build --release -p runec
 
 # Resolve workspace target directory (binary lives at workspace root, not crate root)
 $TargetDir = Join-Path $ScriptDir "..\target\release"
@@ -11,12 +11,12 @@ if (!(Test-Path $TargetDir)) {
 }
 
 # Create installation directory
-$INSTALL_DIR = "$env:USERPROFILE\.rsc"
+$INSTALL_DIR = "$env:USERPROFILE\.runec"
 New-Item -ItemType Directory -Force -Path "$INSTALL_DIR\bin" | Out-Null
 
 # Copy the binary
 Write-Host "Installing RuneScript Compiler..."
-$TARGET = "$INSTALL_DIR\bin\rsc.exe"
+$TARGET = "$INSTALL_DIR\bin\runec.exe"
 $MAX_RETRIES = 3
 $RETRY_WAIT = 2
 
@@ -27,18 +27,18 @@ for ($i = 1; $i -le $MAX_RETRIES; $i++) {
         if (Test-Path $TARGET) {
             $processes = Get-Process | Where-Object {$_.Path -eq $TARGET}
             if ($processes) {
-                Write-Host "Stopping existing RSC processes..."
+                Write-Host "Stopping existing runec processes..."
                 $processes | ForEach-Object { $_.Kill() }
                 Start-Sleep -Seconds 1
             }
         }
-        
-        Copy-Item (Join-Path $TargetDir "rs-compiler.exe") -Destination $TARGET -Force
+
+        Copy-Item (Join-Path $TargetDir "runec.exe") -Destination $TARGET -Force
         break
     }
     catch {
         if ($i -eq $MAX_RETRIES) {
-            Write-Host "Error: Could not install RSC after $MAX_RETRIES attempts. Please close any running instances and try again."
+            Write-Host "Error: Could not install runec after $MAX_RETRIES attempts. Please close any running instances and try again."
             exit 1
         }
         Write-Host "Installation attempt $i failed. Retrying in $RETRY_WAIT seconds..."
@@ -62,10 +62,10 @@ if (!(Test-Path -Path $PROFILE)) {
 }
 
 # Add alias to PowerShell profile
-$ALIAS_LINE = "Set-Alias -Name rsc -Value '$INSTALL_DIR\bin\rsc.exe'"
-if (!(Select-String -Path $PROFILE -Pattern "Set-Alias.*rsc.*" -Quiet)) {
+$ALIAS_LINE = "Set-Alias -Name runec -Value '$INSTALL_DIR\bin\runec.exe'"
+if (!(Select-String -Path $PROFILE -Pattern "Set-Alias.*runec.*" -Quiet)) {
     Add-Content $PROFILE "`n# RuneScript Compiler"
     Add-Content $PROFILE $ALIAS_LINE
 }
 
-Write-Host "Installation complete! Please restart your terminal to use 'rsc' command." 
+Write-Host "Installation complete! Please restart your terminal to use 'runec' command."

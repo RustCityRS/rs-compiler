@@ -1,13 +1,11 @@
 extern crate core;
 
-use crate::config::Config;
 use clap::{Parser as ClapParser, Subcommand};
 use std::error::Error;
 use std::path::PathBuf;
 
 mod bytecode;
 mod compiler;
-mod config;
 mod diagnostic_messages;
 mod diagnostics;
 mod error;
@@ -37,7 +35,7 @@ enum Commands {
     Compile {
         /// Source directory containing .rs2 files
         #[arg(short, long)]
-        source: Option<String>,
+        source: String,
         /// Output directory for compiled scripts
         #[arg(short, long, default_value = "./data/pack/server")]
         output: String,
@@ -52,7 +50,7 @@ enum Commands {
     Lint {
         /// Source directory containing .rs2 files
         #[arg(short, long)]
-        source: Option<String>,
+        source: String,
         /// Pack directory (overrides auto-detection)
         #[arg(long)]
         pack: Option<String>,
@@ -70,7 +68,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     let cli = Cli::parse();
-    let config = Config::load();
 
     match cli.command {
         Commands::Compile {
@@ -79,10 +76,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             pack,
             lint,
         } => {
-            compile_scripts(source, output, pack, lint, &config)?;
+            let scripts_dir = PathBuf::from(source);
+            let pack_dir = pack.map(PathBuf::from);
+            let output_dir = PathBuf::from(output);
+            runec::compile(&scripts_dir, pack_dir.as_deref(), &output_dir, lint)?;
         }
         Commands::Lint { source, pack } => {
-            lint_scripts(source, pack, &config)?;
+            let scripts_dir = PathBuf::from(source);
+            let pack_dir = pack.map(PathBuf::from);
+            runec::lint(&scripts_dir, pack_dir.as_deref())?;
         }
         Commands::Update => {
             let current_dir = std::env::current_dir()?;
@@ -97,10 +99,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 return Ok(());
             }
 
-            println!(
-                "Updating RuneScript Compiler ({} environment)...",
-                config.env_name
-            );
+            println!("Updating RuneScript Compiler...");
 
             let has_git = std::process::Command::new("git")
                 .args(["rev-parse", "--git-dir"])
@@ -129,16 +128,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             if cfg!(windows) {
                 std::process::Command::new("powershell")
                     .args(["-ExecutionPolicy", "Bypass", "-File", install_script])
-                    .env("RSC_ENV", &config.env_name)
-                    .env("RSC_INSTALL_DIR", config.install_dir.to_str().unwrap())
-                    .env("RSC_SCRIPTS_DIR", config.scripts_dir.to_str().unwrap())
                     .status()?;
             } else {
                 std::process::Command::new("sh")
                     .arg(install_script)
-                    .env("RSC_ENV", &config.env_name)
-                    .env("RSC_INSTALL_DIR", config.install_dir.to_str().unwrap())
-                    .env("RSC_SCRIPTS_DIR", config.scripts_dir.to_str().unwrap())
                     .status()?;
             }
             println!("Update complete!");
@@ -146,31 +139,4 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
-}
-
-fn compile_scripts(
-    source: Option<String>,
-    output: String,
-    pack_override: Option<String>,
-    lint: bool,
-    config: &Config,
-) -> Result<(), Box<dyn Error>> {
-    let scripts_dir = source
-        .map(PathBuf::from)
-        .unwrap_or_else(|| config.scripts_dir.clone());
-    let pack_dir = pack_override.map(PathBuf::from);
-    let output_dir = PathBuf::from(output);
-    rs_compiler::compile(&scripts_dir, pack_dir.as_deref(), &output_dir, lint)
-}
-
-fn lint_scripts(
-    source: Option<String>,
-    pack_override: Option<String>,
-    config: &Config,
-) -> Result<(), Box<dyn Error>> {
-    let scripts_dir = source
-        .map(PathBuf::from)
-        .unwrap_or_else(|| config.scripts_dir.clone());
-    let pack_dir = pack_override.map(PathBuf::from);
-    rs_compiler::lint(&scripts_dir, pack_dir.as_deref())
 }
