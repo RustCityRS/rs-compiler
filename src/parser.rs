@@ -472,10 +472,20 @@ impl Parser {
                 )
             })?;
 
-            // Parse $name
+            // Parse $name (optionally prefixed with _ to suppress unused warnings)
+            let underscore_prefix = if self.peek_kind() == Kind::Underscore {
+                self.next();
+                true
+            } else {
+                false
+            };
             self.expect(Kind::LocalVar)?;
             let name_tok = self.next();
-            let name = name_tok.value.clone();
+            let name = if underscore_prefix {
+                format!("_{}", name_tok.value)
+            } else {
+                name_tok.value.clone()
+            };
 
             params.push(ParamDef { param_type, name });
         }
@@ -522,7 +532,7 @@ impl Parser {
             Kind::Switch => self.parse_switch_statement(),
             Kind::Return => self.parse_return_statement(),
             Kind::Case => self.parse_orphan_case(),
-            Kind::LocalVar => self.parse_assignment_or_expression(),
+            Kind::LocalVar | Kind::Underscore => self.parse_assignment_or_expression(),
             Kind::GameVar => self.parse_game_var_assignment(),
             // Dot-prefixed statements: .%var = value (secondary entity game var assignment)
             // or .command(args) (secondary entity command call - expression statement).
@@ -542,10 +552,20 @@ impl Parser {
             )
         })?;
 
-        // Expect $varname
+        // Expect $varname (optionally prefixed with _ to suppress unused warnings)
+        let underscore_prefix = if self.peek_kind() == Kind::Underscore {
+            self.next();
+            true
+        } else {
+            false
+        };
         self.expect(Kind::LocalVar)?;
         let name_tok = self.next();
-        let name = name_tok.value.clone();
+        let name = if underscore_prefix {
+            format!("_{}", name_tok.value)
+        } else {
+            name_tok.value.clone()
+        };
 
         // Check for array declaration: def_int $arr(size)
         if self.peek_kind() == Kind::LParen {
@@ -1213,6 +1233,25 @@ impl Parser {
             Kind::Null => {
                 self.next();
                 Ok(Expr::NullLiteral)
+            }
+
+            Kind::Underscore if self.peek_kind_ahead(1) == Kind::LocalVar => {
+                self.next(); // consume _
+                self.next(); // consume $
+                let name_tok = self.next();
+                let name = format!("_{}", name_tok.value);
+
+                if self.peek_kind() == Kind::LParen {
+                    self.expect(Kind::LParen)?;
+                    let index = self.parse_expression()?;
+                    self.expect(Kind::RParen)?;
+                    return Ok(Expr::ArrayAccess {
+                        name,
+                        index: Box::new(index),
+                    });
+                }
+
+                Ok(Expr::LocalVar(name, self.line()))
             }
 
             Kind::LocalVar => {

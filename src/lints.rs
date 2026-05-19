@@ -141,6 +141,10 @@ fn check_unused_locals(
         let is_array = *is_array;
         let var_name = format!("${}", name);
 
+        if name.starts_with('_') {
+            continue;
+        }
+
         if is_array {
             let slot = array_slot_counter;
             array_slot_counter += 1;
