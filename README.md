@@ -1,88 +1,146 @@
 # RuneScript Compiler (RSC)
 
-A compiler for RuneScript (.rs2), the scripting language used by RuneScape. Part of the rs-server workspace.
+A compiler for RuneScript (`.rs2`), the scripting language used by RuneScape's game engine. Compiles source scripts into binary `script.dat`/`script.idx` output consumed by the game server.
+
+## Prerequisites
+
+- [Rust 1.95+](https://www.rust-lang.org/tools/install)
 
 ## Installation
 
-### Prerequisites
-- [Rust](https://www.rust-lang.org/tools/install)
-
 ### Windows (PowerShell)
+
 ```powershell
-cd rs-compiler
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-### Linux/macOS/Git Bash
+### Linux / macOS / Git Bash
+
 ```bash
-cd rs-compiler
 chmod +x install.sh
 ./install.sh
 ```
 
-The installation script will:
-1. Build the compiler in release mode (`cargo build --release`)
-2. Install it to `~/.rsc/bin` (or `%USERPROFILE%\.rsc\bin` on Windows)
-3. Add the installation directory to your PATH
-4. Create an `rsc` alias
-
-After installation, restart your terminal or source your shell config.
+This builds the compiler in release mode and installs it to `~/.rsc/bin` as `rsc`. The install script adds the directory to your `PATH` and creates a shell alias. Restart your terminal after installation.
 
 ## Usage
 
-### Compile Scripts
+### Compiling Scripts
+
 ```bash
-rsc compile -s content/scripts -o data/pack/server
+rsc compile -s <source-dir> -o <output-dir>
+```
+
+Compiles all `.rs2` files in the source directory and writes `script.dat` and `script.idx` to the output directory.
+
+```bash
+# Compile with default output (./data/pack/server)
+rsc compile -s data/src/scripts
+
+# Specify both source and output
+rsc compile -s data/src/scripts -o data/pack/server
+
+# Provide an explicit pack directory for symbol resolution
+rsc compile -s data/src/scripts -o data/pack/server --pack data/pack
+
+# Compile and run lint passes
+rsc compile -s data/src/scripts -o data/pack/server --lint
+```
+
+The compiler runs the following phases in order:
+
+1. **Parse** -- Lexes and parses all `.rs2` files into an AST
+2. **Symbol registration** -- Registers script names, loads entity pack files (items, NPCs, interfaces, etc.), engine commands, and constants
+3. **Type check** -- Validates types, resolves references, and checks trigger signatures across all scripts
+4. **Code generation** -- Emits bytecode from the AST
+5. **Pointer check** -- Static analysis for active-entity pointer hazards (warnings)
+6. **Lint** *(optional)* -- Detects unused locals and unreachable code (warnings)
+7. **Write output** -- Writes compiled `script.dat` and `script.idx`
+
+### Linting Scripts
+
+Run all analysis passes without writing any output:
+
+```bash
+rsc lint -s <source-dir>
 
 # With explicit pack directory
-rsc compile -s content/scripts -o data/pack/server --pack content/pack
+rsc lint -s data/src/scripts --pack data/pack
 ```
 
-Compilation phases:
-1. **Parsing** - Lexes and parses all .rs2 files
-2. **Symbol registration** - Registers scripts, loads pack files, constants, engine commands
-3. **Type checking** - Validates types across all scripts
-4. **Code generation** - Emits bytecode
-5. **Pointer checking** - Static analysis for active-entity pointer hazards (warnings only)
-6. **Lint checks** - Unused locals, unreachable code (warnings only)
-7. **Write output** - Writes script.dat/script.idx to the output directory
+This runs the full pipeline (parse, type-check, codegen, pointer-check, lints) and reports diagnostics. Useful for editor tooling and CI lint gates.
 
-### Analyze 2004Scape Codebase
-```bash
-rsc 2004
-```
+### Updating
 
-### Update RSC
+Pull the latest changes and rebuild:
+
 ```bash
 rsc update
 ```
 
-### Manage Configuration
+### Configuration
+
+RSC stores its configuration in `~/.rsc/<env>/config.json`. The environment defaults to `default` and can be changed with the `RSC_ENV` environment variable.
+
 ```bash
-rsc config show    # Show current RC file
-rsc config edit    # Open RC file in $EDITOR
-rsc config init    # Initialize a new RC file
-rsc config list    # List environment variables and aliases
+rsc config init    # Create a new RC file with defaults
+rsc config show    # Print the current RC file
+rsc config edit    # Open the RC file in $EDITOR
+rsc config list    # List all environment variables and aliases
 ```
 
-### Get Help
-```bash
-rsc --help
-```
+#### Environment Variables
+
+| Variable | Description |
+|---|---|
+| `RSC_ENV` | Environment name (default: `default`) |
+| `RSC_SCRIPTS_DIR` | Override the scripts source directory |
+| `RSC_INSTALL_DIR` | Override the installation directory |
+| `RUST_LOG` | Set log verbosity (`trace`, `debug`, `info`, `warn`, `error`) |
 
 ## Development
 
-Build from source (from workspace root):
+### Building from Source
+
 ```bash
-cargo build -p rs-compiler
+cargo build
 ```
 
-Run tests:
+### Running Tests
+
 ```bash
-cargo test -p rs-compiler
+cargo test
 ```
 
-Run directly without installing:
+### Running without Installing
+
 ```bash
-cargo run -p rs-compiler -- compile -s content/scripts -o data/pack/server
+cargo run -- compile -s data/src/scripts -o data/pack/server
+cargo run -- lint -s data/src/scripts
 ```
+
+## Library Usage
+
+The compiler is also available as a library crate:
+
+```rust
+use std::path::Path;
+
+// Compile scripts and write output
+rs_compiler::compile(
+    Path::new("data/src/scripts"),
+    Some(Path::new("data/pack")),
+    Path::new("data/pack/server"),
+    true, // run lint passes
+).unwrap();
+
+// Lint only (no output written)
+rs_compiler::lint(
+    Path::new("data/src/scripts"),
+    Some(Path::new("data/pack")),
+).unwrap();
+```
+
+## License
+
+This project is not licensed for redistribution.
