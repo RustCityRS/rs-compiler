@@ -78,18 +78,7 @@ Pull the latest changes and rebuild:
 rsc update
 ```
 
-### Configuration
-
-RSC stores its configuration in `~/.rsc/<env>/config.json`. The environment defaults to `default` and can be changed with the `RSC_ENV` environment variable.
-
-```bash
-rsc config init    # Create a new RC file with defaults
-rsc config show    # Print the current RC file
-rsc config edit    # Open the RC file in $EDITOR
-rsc config list    # List all environment variables and aliases
-```
-
-#### Environment Variables
+### Environment Variables
 
 | Variable | Description |
 |---|---|

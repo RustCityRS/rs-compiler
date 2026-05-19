@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::{self};
+use std::io;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -10,10 +9,6 @@ pub struct Config {
     pub install_dir: PathBuf,
     pub scripts_dir: PathBuf,
     pub env_name: String,
-    #[serde(default)]
-    pub aliases: Vec<String>,
-    #[serde(default)]
-    pub env_vars: HashMap<String, String>,
 }
 
 impl Default for Config {
@@ -47,8 +42,6 @@ impl Default for Config {
             install_dir,
             scripts_dir,
             env_name,
-            aliases: Vec::new(),
-            env_vars: HashMap::new(),
         }
     }
 }
@@ -102,69 +95,6 @@ impl Config {
                 .join(&env_name)
                 .join("config.json")
         }
-    }
-
-    pub fn get_rc_path() -> PathBuf {
-        let env_name = env::var("RSC_ENV").unwrap_or_else(|_| String::from("default"));
-        if cfg!(windows) {
-            PathBuf::from(env::var("USERPROFILE").unwrap_or_else(|_| String::from(".")))
-                .join(".rsc")
-                .join(&env_name)
-                .join("rscrc")
-        } else {
-            PathBuf::from(env::var("HOME").unwrap_or_else(|_| String::from(".")))
-                .join(".rsc")
-                .join(&env_name)
-                .join("rscrc")
-        }
-    }
-
-    pub fn load_rc_file() -> io::Result<String> {
-        let rc_path = Self::get_rc_path();
-        if !rc_path.exists() {
-            let default_rc = format!(
-                "# RuneScript RC File\n\n\
-                # Environment Variables\n\
-                export RSC_DEBUG=false\n\
-                export RSC_SCRIPTS_DIR={}\n\n\
-                # Aliases\n\
-                alias rs-fib='rsc run fib'\n",
-                Self::default().scripts_dir.display()
-            );
-            fs::create_dir_all(rc_path.parent().unwrap())?;
-            fs::write(&rc_path, &default_rc)?;
-            Ok(default_rc)
-        } else {
-            fs::read_to_string(&rc_path)
-        }
-    }
-
-    pub fn save_rc_file(contents: &str) -> io::Result<()> {
-        let rc_path = Self::get_rc_path();
-        fs::create_dir_all(rc_path.parent().unwrap())?;
-        fs::write(&rc_path, contents)
-    }
-
-    pub fn parse_rc_file(contents: &str) -> (Vec<String>, HashMap<String, String>) {
-        let mut aliases = Vec::new();
-        let mut env_vars = HashMap::new();
-
-        for line in contents.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            if line.starts_with("alias ") {
-                aliases.push(line.to_string());
-            } else if line.starts_with("export ") {
-                if let Some((key, value)) = line["export ".len()..].split_once('=') {
-                    env_vars.insert(key.trim().to_string(), value.trim().to_string());
-                }
-            }
-        }
-
-        (aliases, env_vars)
     }
 
     pub fn get_binary_name() -> &'static str {

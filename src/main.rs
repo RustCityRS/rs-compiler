@@ -59,23 +59,6 @@ enum Commands {
     },
     /// Update the RuneScript Compiler to the latest version
     Update,
-    /// Manage RuneScript configuration
-    Config {
-        #[command(subcommand)]
-        command: ConfigCommands,
-    },
-}
-
-#[derive(Subcommand)]
-enum ConfigCommands {
-    /// Edit the RC file for the current environment
-    Edit,
-    /// Show the current RC file contents
-    Show,
-    /// Initialize a new RC file with defaults
-    Init,
-    /// List all environment variables and aliases
-    List,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -160,48 +143,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             println!("Update complete!");
         }
-        Commands::Config { command } => match command {
-            ConfigCommands::Edit => {
-                let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
-                    if cfg!(windows) {
-                        "notepad".into()
-                    } else {
-                        "nano".into()
-                    }
-                });
-                let rc_path = Config::get_rc_path();
-                if !rc_path.exists() {
-                    Config::load_rc_file()?;
-                }
-                std::process::Command::new(editor).arg(rc_path).status()?;
-            }
-            ConfigCommands::Show => {
-                let contents = Config::load_rc_file()?;
-                println!("{}", contents);
-            }
-            ConfigCommands::Init => {
-                let rc_path = Config::get_rc_path();
-                if rc_path.exists() {
-                    println!("RC file already exists at: {}", rc_path.display());
-                } else {
-                    Config::load_rc_file()?;
-                    println!("Initialized new RC file at: {}", rc_path.display());
-                }
-            }
-            ConfigCommands::List => {
-                let contents = Config::load_rc_file()?;
-                let (aliases, env_vars) = Config::parse_rc_file(&contents);
-                println!("Environment: {}", config.env_name);
-                println!("\nEnvironment Variables:");
-                for (key, value) in env_vars {
-                    println!("  {}={}", key, value);
-                }
-                println!("\nAliases:");
-                for alias in aliases {
-                    println!("  {}", alias);
-                }
-            }
-        },
     }
 
     Ok(())
