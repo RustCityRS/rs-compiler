@@ -275,7 +275,7 @@ impl Default for DiagnosticsCollector {
 ///   - for each Suggestion, print a unified-diff-ish window:
 ///       -  <original line>                  (red in terminals)
 ///       +  <replacement line>               (green in terminals)
-///     prefixed with the file path + line range and the suggestion label.
+///          prefixed with the file path + line range and the suggestion label.
 ///   - close with `= note: Applicability: <level>`
 ///
 /// Source text is read lazily from disk; if the read fails we fall back

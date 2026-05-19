@@ -3,7 +3,7 @@ use crate::error::SyntaxError;
 use crate::lexer::Lexer;
 use crate::token::{Kind, Token};
 use crate::types::Type;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ──────────────────────────── AST ────────────────────────────
 
@@ -196,11 +196,11 @@ pub struct Parser {
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<Token>, file_name: &PathBuf) -> Self {
+    pub fn new(tokens: Vec<Token>, file_name: &Path) -> Self {
         Self {
             tokens,
             pos: 0,
-            file_path: file_name.clone(),
+            file_path: file_name.to_path_buf(),
             is_sub_parser: false,
         }
     }
@@ -682,21 +682,21 @@ impl Parser {
                     // Handle component:name compound references in case values.
                     // Pattern: Identifier ':' Identifier (then ':' or ',' as separator)
                     // Only consume if after the second identifier there's ':' or ',' (not expression-start).
-                    if let Expr::Identifier(ref name) = val {
-                        if self.peek_kind() == Kind::Colon {
-                            let after_colon = self.peek_kind_ahead(1);
-                            let after_name = self.peek_kind_ahead(2);
-                            // Form compound if followed by case separator ':' or next case value ','
-                            if matches!(
-                                after_colon,
-                                Kind::Identifier | Kind::Number | Kind::Trigger | Kind::Command
-                            ) && matches!(after_name, Kind::Colon | Kind::Comma)
-                            {
-                                let name = name.clone();
-                                self.next(); // consume ':'
-                                let part = self.next();
-                                val = Expr::Identifier(format!("{}:{}", name, part.value));
-                            }
+                    if let Expr::Identifier(ref name) = val
+                        && self.peek_kind() == Kind::Colon
+                    {
+                        let after_colon = self.peek_kind_ahead(1);
+                        let after_name = self.peek_kind_ahead(2);
+                        // Form compound if followed by case separator ':' or next case value ','
+                        if matches!(
+                            after_colon,
+                            Kind::Identifier | Kind::Number | Kind::Trigger | Kind::Command
+                        ) && matches!(after_name, Kind::Colon | Kind::Comma)
+                        {
+                            let name = name.clone();
+                            self.next(); // consume ':'
+                            let part = self.next();
+                            val = Expr::Identifier(format!("{}:{}", name, part.value));
                         }
                     }
                     values.push(val);
@@ -1492,25 +1492,25 @@ impl Parser {
     /// Parse a single expression from a string slice, returning an Expr.
     /// Used for embedded expressions in string templates like `<tostring($var)>`.
     fn parse_string_embedded_expr(&self, expr_str: &str) -> Expr {
-        if expr_str.starts_with('$') {
-            return Expr::LocalVar(expr_str[1..].to_string(), 0);
+        if let Some(stripped) = expr_str.strip_prefix('$') {
+            return Expr::LocalVar(stripped.to_string(), 0);
         }
-        if expr_str.starts_with('%') {
-            return Expr::GameVar(expr_str[1..].to_string(), 0);
+        if let Some(stripped) = expr_str.strip_prefix('%') {
+            return Expr::GameVar(stripped.to_string(), 0);
         }
-        if expr_str.starts_with('^') {
-            return Expr::ConstantVar(expr_str[1..].to_string(), 0);
+        if let Some(stripped) = expr_str.strip_prefix('^') {
+            return Expr::ConstantVar(stripped.to_string(), 0);
         }
         // Try to parse as a full expression using a sub-parser.
         let dummy_path = self.file_path.clone();
         let mut lexer = Lexer::new(expr_str, &dummy_path);
-        if let Ok(tokens) = lexer.tokenize() {
-            if !tokens.is_empty() {
-                let mut sub = Parser::new(tokens, &dummy_path);
-                sub.is_sub_parser = true;
-                if let Ok(expr) = sub.parse_expression() {
-                    return expr;
-                }
+        if let Ok(tokens) = lexer.tokenize()
+            && !tokens.is_empty()
+        {
+            let mut sub = Parser::new(tokens, &dummy_path);
+            sub.is_sub_parser = true;
+            if let Ok(expr) = sub.parse_expression() {
+                return expr;
             }
         }
         // Fallback: treat as plain identifier
@@ -1520,12 +1520,12 @@ impl Parser {
     fn parse_interpolated_string(&self, raw: &str) -> Expr {
         let mut parts = Vec::new();
         let mut current = String::new();
-        let mut chars = raw.chars().peekable();
+        let chars = raw.chars().peekable();
         let mut depth = 0;
         let mut in_expr = false;
         let mut expr_str = String::new();
 
-        while let Some(ch) = chars.next() {
+        for ch in chars {
             if in_expr {
                 if ch == '>' && depth == 0 {
                     in_expr = false;

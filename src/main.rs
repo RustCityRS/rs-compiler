@@ -1,26 +1,6 @@
-extern crate core;
-
 use clap::{Parser as ClapParser, Subcommand};
 use std::error::Error;
 use std::path::PathBuf;
-
-mod bytecode;
-mod compiler;
-mod diagnostic_messages;
-mod diagnostics;
-mod error;
-mod lexer;
-mod lints;
-mod parser;
-mod pointer;
-mod pointer_checker;
-mod symbol;
-mod symloader;
-mod token;
-mod trigger_table;
-mod typechecker;
-mod types;
-mod writer;
 
 #[derive(ClapParser)]
 #[command(author, version, about = "RuneScript Compiler")]

@@ -184,6 +184,12 @@ pub struct SymbolTable {
     total_long_decls: i32,
 }
 
+impl Default for SymbolTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SymbolTable {
     pub fn new() -> Self {
         SymbolTable {
@@ -446,6 +452,12 @@ pub struct SymbolRegistry {
     next_script_id: i32,
 }
 
+impl Default for SymbolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SymbolRegistry {
     pub fn new() -> Self {
         SymbolRegistry {
@@ -699,7 +711,6 @@ pub(crate) fn normalize_comp_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Type;
 
     // ── normalize_comp_name ────────────────────────────────────────────
 
@@ -759,7 +770,7 @@ mod tests {
         // Script uses 225 naming: `multi2:com_2` — must still resolve
         assert_eq!(r.lookup_component("multi2", "com_2"), Some((228 << 16) | 2));
         assert_eq!(r.lookup_component("multi2", "com_9"), Some((228 << 16) | 9));
-        assert_eq!(r.lookup_component("multi2", "com_0"), Some((228 << 16) | 0));
+        assert_eq!(r.lookup_component("multi2", "com_0"), Some(228 << 16));
     }
 
     // ── lookup_component (225 pack style) ──────────────────────────────

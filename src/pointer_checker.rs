@@ -129,10 +129,10 @@ impl<'a> PointerChecker<'a> {
         // gets p_active_player granted, matching ServerPointerChecker.
         let mut overlay_interfaces = HashSet::new();
         for (name, sym) in &registry.entity_ids {
-            if let SymbolKind::Constant { const_type, .. } = &sym.kind {
-                if *const_type == crate::types::Type::OverlayInterface {
-                    overlay_interfaces.insert(name.to_lowercase().replace(' ', "_"));
-                }
+            if let SymbolKind::Constant { const_type, .. } = &sym.kind
+                && *const_type == crate::types::Type::OverlayInterface
+            {
+                overlay_interfaces.insert(name.to_lowercase().replace(' ', "_"));
             }
         }
 
@@ -450,17 +450,13 @@ impl<'a> PointerChecker<'a> {
                 // Reconstruct path from current back to start
                 let mut path = vec![current];
                 let mut node = current;
-                loop {
-                    if let Some(&(from, start)) = sources.get(&node) {
-                        if from == start && starts.contains(&from) {
-                            path.push(from);
-                            break;
-                        }
+                while let Some(&(from, start)) = sources.get(&node) {
+                    if from == start && starts.contains(&from) {
                         path.push(from);
-                        node = from;
-                    } else {
                         break;
                     }
+                    path.push(from);
+                    node = from;
                 }
                 path.reverse();
                 return Some(path);
@@ -508,17 +504,13 @@ impl<'a> PointerChecker<'a> {
             if end_pred(current) {
                 let mut path = vec![current];
                 let mut node = current;
-                loop {
-                    if let Some(&(from, start)) = sources.get(&node) {
-                        if from == start && starts.contains(&from) {
-                            path.push(from);
-                            break;
-                        }
+                while let Some(&(from, start)) = sources.get(&node) {
+                    if from == start && starts.contains(&from) {
                         path.push(from);
-                        node = from;
-                    } else {
                         break;
                     }
+                    path.push(from);
+                    node = from;
                 }
                 path.reverse();
                 return Some(path);
@@ -627,12 +619,11 @@ impl<'a> PointerChecker<'a> {
                 | Opcode::LongBranchGreaterThanOrEquals
                 | Opcode::ObjBranchEquals
                 | Opcode::ObjBranchNot => {
-                    if let Operand::JumpTarget(target_instr_idx) = &instr.operand {
-                        if let Some(target_node) =
+                    if let Operand::JumpTarget(target_instr_idx) = &instr.operand
+                        && let Some(target_node) =
                             resolve_target_node(*target_instr_idx, instructions, &instr_to_node)
-                        {
-                            add_edge(&mut analysis.nodes, node_idx, target_node);
-                        }
+                    {
+                        add_edge(&mut analysis.nodes, node_idx, target_node);
                     }
                 }
 
@@ -652,13 +643,12 @@ impl<'a> PointerChecker<'a> {
             }
 
             // Add fallthrough edge (next non-LineNumber instruction) for non-terminal instructions
-            if !is_terminal {
-                if let Some(next_order_idx) = order_idx.checked_add(1) {
-                    if next_order_idx < node_order.len() {
-                        let next_node = instr_to_node[&node_order[next_order_idx]];
-                        add_edge(&mut analysis.nodes, node_idx, next_node);
-                    }
-                }
+            if !is_terminal
+                && let Some(next_order_idx) = order_idx.checked_add(1)
+                && next_order_idx < node_order.len()
+            {
+                let next_node = instr_to_node[&node_order[next_order_idx]];
+                add_edge(&mut analysis.nodes, node_idx, next_node);
             }
 
             // For conditional branches: also add fallthrough
@@ -780,12 +770,11 @@ impl<'a> PointerChecker<'a> {
                     .copied()
                     .filter(|&n| {
                         // fallthrough target = not the jump target
-                        if let Operand::JumpTarget(target) = &branch_instr.operand {
-                            if let Some(jump_node) =
+                        if let Operand::JumpTarget(target) = &branch_instr.operand
+                            && let Some(jump_node) =
                                 resolve_target_node(*target, instructions, instr_to_node)
-                            {
-                                return n != jump_node;
-                            }
+                        {
+                            return n != jump_node;
                         }
                         true
                     })
@@ -802,16 +791,15 @@ impl<'a> PointerChecker<'a> {
                 // push_value == 1: pointer is set when the branch IS taken
                 // BranchEquals jumps when equal (value == 1 means "found"),
                 // so the jump target means "found" -> pointer is set.
-                if let Operand::JumpTarget(target) = &branch_instr.operand {
-                    if let Some(jump_target_node) =
+                if let Operand::JumpTarget(target) = &branch_instr.operand
+                    && let Some(jump_target_node) =
                         resolve_target_node(*target, instructions, instr_to_node)
-                    {
-                        // Remove edge: branch -> jump_target
-                        remove_edge(&mut analysis.nodes, branch_node_idx, jump_target_node);
-                        // Add: branch -> ptr_node -> jump_target
-                        add_edge(&mut analysis.nodes, branch_node_idx, ptr_node_idx);
-                        add_edge(&mut analysis.nodes, ptr_node_idx, jump_target_node);
-                    }
+                {
+                    // Remove edge: branch -> jump_target
+                    remove_edge(&mut analysis.nodes, branch_node_idx, jump_target_node);
+                    // Add: branch -> ptr_node -> jump_target
+                    add_edge(&mut analysis.nodes, branch_node_idx, ptr_node_idx);
+                    add_edge(&mut analysis.nodes, ptr_node_idx, jump_target_node);
                 }
             }
         }
@@ -846,10 +834,10 @@ impl<'a> PointerChecker<'a> {
             match instr.opcode {
                 Opcode::Command => {
                     let cmd_name = self.resolve_command_name(instr);
-                    if let Some(name) = cmd_name {
-                        if let Some(holder) = self.cmd_pointers.get(&name).cloned() {
-                            self.apply_holder(analysis, node_idx, &holder);
-                        }
+                    if let Some(name) = cmd_name
+                        && let Some(holder) = self.cmd_pointers.get(&name).cloned()
+                    {
+                        self.apply_holder(analysis, node_idx, &holder);
                     }
                 }
 
@@ -1220,38 +1208,33 @@ impl<'a> PointerChecker<'a> {
 
         // (1) Caller rewrite: insert the captured pointer as an argument
         // to the @label/~proc call on `caller_line`.
-        if let Some(src) = cache.get(caller_source_path) {
-            if let Some(line_text) = nth_source_line(src, caller_line) {
-                if let Some(rewritten) =
-                    rewrite_call_site_arg(line_text, arrow, &callee_short, ptr_cmd)
-                {
-                    suggestions.push(Suggestion {
-                        file: PathBuf::from(caller_source_path),
-                        line_range: (caller_line, caller_line),
-                        replacement: rewritten,
-                        label: Some(format!("at the call site (pass `{ptr_cmd}` as an arg)")),
-                    });
-                }
-            }
+        if let Some(src) = cache.get(caller_source_path)
+            && let Some(line_text) = nth_source_line(src, caller_line)
+            && let Some(rewritten) = rewrite_call_site_arg(line_text, arrow, &callee_short, ptr_cmd)
+        {
+            suggestions.push(Suggestion {
+                file: PathBuf::from(caller_source_path),
+                line_range: (caller_line, caller_line),
+                replacement: rewritten,
+                label: Some(format!("at the call site (pass `{ptr_cmd}` as an arg)")),
+            });
         }
 
         // (2) Callee rewrite: append `<ty> <name>` to the header's param list.
-        if let Some(src) = cache.get(&callee_source) {
-            if let Some(header_text) = nth_source_line(src, callee_header_line) {
-                if let Some(rewritten) =
-                    rewrite_header_add_param(header_text, &callee_short, param_type, &param_name)
-                {
-                    suggestions.push(Suggestion {
-                        file: PathBuf::from(&callee_source),
-                        line_range: (callee_header_line, callee_header_line),
-                        replacement: rewritten,
-                        label: Some(format!(
-                            "at the `{}` header (add `{} {}`)",
-                            callee_short, param_type, param_name
-                        )),
-                    });
-                }
-            }
+        if let Some(src) = cache.get(&callee_source)
+            && let Some(header_text) = nth_source_line(src, callee_header_line)
+            && let Some(rewritten) =
+                rewrite_header_add_param(header_text, &callee_short, param_type, &param_name)
+        {
+            suggestions.push(Suggestion {
+                file: PathBuf::from(&callee_source),
+                line_range: (callee_header_line, callee_header_line),
+                replacement: rewritten,
+                label: Some(format!(
+                    "at the `{}` header (add `{} {}`)",
+                    callee_short, param_type, param_name
+                )),
+            });
         }
 
         Some(Help {
@@ -1570,10 +1553,10 @@ fn remove_edge(nodes: &mut [CfgNode], from: usize, to: usize) {
 /// the nearest `LineNumber` instruction. Returns 0 if none found.
 fn resolve_line(instructions: &[Instruction], instr_idx: usize) -> usize {
     for i in (0..=instr_idx).rev() {
-        if instructions[i].opcode == Opcode::LineNumber {
-            if let Operand::Int(line) = instructions[i].operand {
-                return line as usize;
-            }
+        if instructions[i].opcode == Opcode::LineNumber
+            && let Operand::Int(line) = instructions[i].operand
+        {
+            return line as usize;
         }
     }
     0
@@ -2040,7 +2023,7 @@ mod tests {
         // opcode + operand.
         let secondary_varn = Instruction::new(
             Opcode::PushVarn,
-            Operand::Int((1 << 16) | 0), // .%var_id 0, secondary
+            Operand::Int(1 << 16), // .%var_id 0, secondary
         );
 
         // Proc reads a secondary NPC var and returns.

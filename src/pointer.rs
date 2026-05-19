@@ -96,12 +96,10 @@ impl PointerType {
     /// ".active_player", "p_active_player").
     pub fn from_name(name: &str) -> Option<PointerType> {
         let lower = name.to_lowercase();
-        for &ptr in &Self::ALL {
-            if ptr.representation() == lower {
-                return Some(ptr);
-            }
-        }
-        None
+        Self::ALL
+            .iter()
+            .find(|&&ptr| ptr.representation() == lower)
+            .copied()
     }
 }
 
@@ -443,20 +441,22 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
                    corrupt2: &[PointerType],
                    conditional: bool| {
         // Primary entry
-        let mut holder = PointerHolder::default();
-        holder.required = require.iter().copied().collect();
-        holder.set = set.iter().copied().collect();
-        holder.corrupted = corrupt.iter().copied().collect();
-        holder.conditional_set = conditional;
+        let holder = PointerHolder {
+            required: require.iter().copied().collect(),
+            set: set.iter().copied().collect(),
+            corrupted: corrupt.iter().copied().collect(),
+            conditional_set: conditional,
+        };
         map.insert(name.to_lowercase(), holder);
 
         // Secondary entry (dot-prefixed) if any require2/set2/corrupt2 are specified
         if !require2.is_empty() || !set2.is_empty() || !corrupt2.is_empty() {
-            let mut holder2 = PointerHolder::default();
-            holder2.required = require2.iter().copied().collect();
-            holder2.set = set2.iter().copied().collect();
-            holder2.corrupted = corrupt2.iter().copied().collect();
-            holder2.conditional_set = conditional;
+            let holder2 = PointerHolder {
+                required: require2.iter().copied().collect(),
+                set: set2.iter().copied().collect(),
+                corrupted: corrupt2.iter().copied().collect(),
+                conditional_set: conditional,
+            };
             map.insert(format!(".{}", name.to_lowercase()), holder2);
         }
     };

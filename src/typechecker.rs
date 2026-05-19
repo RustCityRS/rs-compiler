@@ -3,7 +3,7 @@ use crate::diagnostics::{DiagnosticsCollector, Phase};
 use crate::parser::*;
 use crate::symbol::{SymbolKind, SymbolRegistry, SymbolTable};
 use crate::types::{BaseVarType, Type};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const LITERAL_TYPES: &[Type] = &[
     Type::Int,
@@ -33,8 +33,8 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    pub fn check_file(&mut self, file: &ScriptFile, file_path: &PathBuf) {
-        self.file_path = file_path.clone();
+    pub fn check_file(&mut self, file: &ScriptFile, file_path: &Path) {
+        self.file_path = file_path.to_path_buf();
         for script in &file.scripts {
             self.check_script(script);
         }
@@ -84,13 +84,11 @@ impl<'a> TypeChecker<'a> {
         // Most AP/OP/event triggers don't allow parameters (default in TS).
         // PROC, LABEL, DEBUGPROC, QUEUE, SOFTTIMER, TIMER all allow parameters.
         match trigger {
-            "walktrigger" | "login" | "logout" => {
-                if !script.params.is_empty() {
-                    self.error(
-                        script.line,
-                        msg::fmt(msg::SCRIPT_TRIGGER_NO_PARAMETERS, &[trigger]),
-                    );
-                }
+            "walktrigger" | "login" | "logout" if !script.params.is_empty() => {
+                self.error(
+                    script.line,
+                    msg::fmt(msg::SCRIPT_TRIGGER_NO_PARAMETERS, &[trigger]),
+                );
             }
             _ => {}
         }
@@ -113,29 +111,30 @@ impl<'a> TypeChecker<'a> {
         // Triggers that don't allow return values (TS: allowReturns=false default).
         // Only PROC and LOGOUT have allowReturns=true.
         match trigger {
-            "debugproc" | "label" | "queue" | "softtimer" | "timer" | "walktrigger" | "login" => {
-                if !script.return_types.is_empty() {
-                    self.error(
-                        script.line,
-                        msg::fmt(msg::SCRIPT_TRIGGER_NO_RETURNS, &[trigger]),
-                    );
-                }
+            "debugproc" | "label" | "queue" | "softtimer" | "timer" | "walktrigger" | "login"
+                if !script.return_types.is_empty() =>
+            {
+                self.error(
+                    script.line,
+                    msg::fmt(msg::SCRIPT_TRIGGER_NO_RETURNS, &[trigger]),
+                );
             }
             _ => {}
         }
 
         // Triggers with required return types
-        if let Some(expected_returns) = self.trigger_expected_returns(trigger) {
-            if script.return_types != expected_returns && !expected_returns.is_empty() {
-                let expected: Vec<&str> = expected_returns.iter().map(|t| t.name()).collect();
-                self.error(
-                    script.line,
-                    msg::fmt(
-                        msg::SCRIPT_TRIGGER_EXPECTED_RETURNS,
-                        &[trigger, &expected.join(", ")],
-                    ),
-                );
-            }
+        if let Some(expected_returns) = self.trigger_expected_returns(trigger)
+            && script.return_types != expected_returns
+            && !expected_returns.is_empty()
+        {
+            let expected: Vec<&str> = expected_returns.iter().map(|t| t.name()).collect();
+            self.error(
+                script.line,
+                msg::fmt(
+                    msg::SCRIPT_TRIGGER_EXPECTED_RETURNS,
+                    &[trigger, &expected.join(", ")],
+                ),
+            );
         }
 
         // Subject validation
@@ -167,13 +166,13 @@ impl<'a> TypeChecker<'a> {
 
             // Triggers that only allow global subjects
             "login" | "logout" | "mapenter" | "mapleave" | "map_enter" | "worldinit"
-            | "worldshutdown" => {
-                if subject != "_" && !subject.is_empty() {
-                    self.error(
-                        script.line,
-                        msg::fmt(msg::SCRIPT_SUBJECT_ONLY_GLOBAL, &[trigger]),
-                    );
-                }
+            | "worldshutdown"
+                if subject != "_" && !subject.is_empty() =>
+            {
+                self.error(
+                    script.line,
+                    msg::fmt(msg::SCRIPT_SUBJECT_ONLY_GLOBAL, &[trigger]),
+                );
             }
 
             // Proc/label/queue: no spaces, no global-only constraint
@@ -266,10 +265,10 @@ impl<'a> TypeChecker<'a> {
 
                 if let Some(init_expr) = value {
                     let expr_type = self.infer_expr_type(init_expr, locals, *line, Some(*var_type));
-                    if let Some(et) = expr_type {
-                        if !self.types_compatible(et, *var_type) {
-                            self.emit_type_mismatch(*line, et, *var_type);
-                        }
+                    if let Some(et) = expr_type
+                        && !self.types_compatible(et, *var_type)
+                    {
+                        self.emit_type_mismatch(*line, et, *var_type);
                     }
                 }
                 locals.define_local(name.clone(), *var_type, false);
@@ -300,10 +299,10 @@ impl<'a> TypeChecker<'a> {
                 }
 
                 let size_type = self.infer_expr_type(size, locals, *line, Some(Type::Int));
-                if let Some(st) = size_type {
-                    if !self.types_compatible(st, Type::Int) {
-                        self.emit_type_mismatch(*line, st, Type::Int);
-                    }
+                if let Some(st) = size_type
+                    && !self.types_compatible(st, Type::Int)
+                {
+                    self.emit_type_mismatch(*line, st, Type::Int);
                 }
                 locals.define_local(name.clone(), *element_type, true);
             }
@@ -315,10 +314,10 @@ impl<'a> TypeChecker<'a> {
             } => {
                 let target_type = self.infer_expr_type(target, locals, *line, None);
                 let value_type = self.infer_expr_type(value, locals, *line, target_type);
-                if let (Some(tt), Some(vt)) = (target_type, value_type) {
-                    if !self.types_compatible(vt, tt) {
-                        self.emit_type_mismatch(*line, vt, tt);
-                    }
+                if let (Some(tt), Some(vt)) = (target_type, value_type)
+                    && !self.types_compatible(vt, tt)
+                {
+                    self.emit_type_mismatch(*line, vt, tt);
                 }
             }
 
@@ -374,10 +373,11 @@ impl<'a> TypeChecker<'a> {
                 }
 
                 let expr_type = self.infer_expr_type(expr, locals, *line, Some(switch_ty));
-                if let Some(et) = expr_type {
-                    if switch_ty != Type::Error && !self.types_compatible(et, switch_ty) {
-                        self.emit_type_mismatch(*line, et, switch_ty);
-                    }
+                if let Some(et) = expr_type
+                    && switch_ty != Type::Error
+                    && !self.types_compatible(et, switch_ty)
+                {
+                    self.emit_type_mismatch(*line, et, switch_ty);
                 }
 
                 // SWITCH_DUPLICATE_DEFAULT: the parser only stores one default block,
@@ -416,22 +416,22 @@ impl<'a> TypeChecker<'a> {
                 for (i, val) in values.iter().enumerate() {
                     let hint = script_returns.get(i).copied();
                     let val_type = self.infer_expr_type(val, locals, *line, hint);
-                    if let Some(vt) = val_type {
-                        if let Some(expected) = hint {
-                            if !self.types_compatible(vt, expected) {
-                                self.emit_type_mismatch(*line, vt, expected);
-                            }
-                        }
+                    if let Some(vt) = val_type
+                        && let Some(expected) = hint
+                        && !self.types_compatible(vt, expected)
+                    {
+                        self.emit_type_mismatch(*line, vt, expected);
                     }
                 }
             }
 
             Statement::Expression { expr, line } => {
                 let expr_type = self.infer_expr_type(expr, locals, *line, None);
-                if let Some(et) = expr_type {
-                    if et != Type::Error && !self.expression_has_side_effects(expr) {
-                        self.warning(*line, msg::EXPRESSION_STATEMENT_NO_SIDE_EFFECT.to_string());
-                    }
+                if let Some(et) = expr_type
+                    && et != Type::Error
+                    && !self.expression_has_side_effects(expr)
+                {
+                    self.warning(*line, msg::EXPRESSION_STATEMENT_NO_SIDE_EFFECT.to_string());
                 }
             }
             Statement::OrphanCase { case, line } => {
@@ -452,11 +452,11 @@ impl<'a> TypeChecker<'a> {
                     | BinOp::Lt
                     | BinOp::Gt
                     | BinOp::LtEq
-                    | BinOp::GtEq => {
-                        if self.is_condition_expr(lhs) || self.is_condition_expr(rhs) {
-                            self.error(line, msg::CONDITION_NOT_VALID.to_string());
-                            return;
-                        }
+                    | BinOp::GtEq
+                        if (self.is_condition_expr(lhs) || self.is_condition_expr(rhs)) =>
+                    {
+                        self.error(line, msg::CONDITION_NOT_VALID.to_string());
+                        return;
                     }
                     _ => {}
                 }
@@ -467,41 +467,31 @@ impl<'a> TypeChecker<'a> {
 
                 match op {
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
-                        if let Some(ref lt) = lt {
-                            if lt.base_type() == BaseVarType::String
-                                && *lt != Type::Error
-                                && *lt != Type::Any
-                            {
-                                self.error(
-                                    line,
-                                    msg::fmt(msg::ARITHMETIC_INVALID_TYPE, &[lt.name()]),
-                                );
-                            }
+                        if let Some(ref lt) = lt
+                            && lt.base_type() == BaseVarType::String
+                            && *lt != Type::Error
+                            && *lt != Type::Any
+                        {
+                            self.error(line, msg::fmt(msg::ARITHMETIC_INVALID_TYPE, &[lt.name()]));
                         }
-                        if let Some(ref rt) = rt {
-                            if rt.base_type() == BaseVarType::String
-                                && *rt != Type::Error
-                                && *rt != Type::Any
-                            {
-                                self.error(
-                                    line,
-                                    msg::fmt(msg::ARITHMETIC_INVALID_TYPE, &[rt.name()]),
-                                );
-                            }
+                        if let Some(ref rt) = rt
+                            && rt.base_type() == BaseVarType::String
+                            && *rt != Type::Error
+                            && *rt != Type::Any
+                        {
+                            self.error(line, msg::fmt(msg::ARITHMETIC_INVALID_TYPE, &[rt.name()]));
                         }
                     }
                     BinOp::Eq | BinOp::NotEq => {
-                        if let (Some(lt), Some(rt)) = (&lt, &rt) {
-                            if *lt == Type::String && *rt == Type::String {
-                                let op_str = if *op == BinOp::Eq { "=" } else { "!" };
-                                self.error(
-                                    line,
-                                    msg::fmt(
-                                        msg::BINOP_INVALID_TYPES,
-                                        &[op_str, lt.name(), rt.name()],
-                                    ),
-                                );
-                            }
+                        if let (Some(lt), Some(rt)) = (&lt, &rt)
+                            && *lt == Type::String
+                            && *rt == Type::String
+                        {
+                            let op_str = if *op == BinOp::Eq { "=" } else { "!" };
+                            self.error(
+                                line,
+                                msg::fmt(msg::BINOP_INVALID_TYPES, &[op_str, lt.name(), rt.name()]),
+                            );
                         }
                     }
                     _ => {}
@@ -552,10 +542,11 @@ impl<'a> TypeChecker<'a> {
                 self.warning(line, msg::SWITCH_CASE_NOT_CONSTANT.to_string());
             }
             let val_type = self.infer_expr_type(val, locals, line, Some(switch_ty));
-            if let Some(vt) = val_type {
-                if switch_ty != Type::Error && !self.types_compatible(vt, switch_ty) {
-                    self.emit_type_mismatch(line, vt, switch_ty);
-                }
+            if let Some(vt) = val_type
+                && switch_ty != Type::Error
+                && !self.types_compatible(vt, switch_ty)
+            {
+                self.emit_type_mismatch(line, vt, switch_ty);
             }
         }
         self.check_block(&case.body, locals, return_types);
@@ -591,43 +582,45 @@ impl<'a> TypeChecker<'a> {
                 // Matching TS visitStringLiteral: if hint is a non-literal type,
                 // the string is treated as a symbol reference (e.g. "sailing journey"
                 // with hint=midi resolves to a midi entity).
-                if let Some(h) = hint {
-                    if !is_literal_type(h) && h != Type::Error && h != Type::Any {
-                        // Verify the name resolves against the registry.
-                        // If it doesn't, surface a warning so silent
-                        // fallthrough to `push_string` at codegen doesn't
-                        // produce a runtime bug.
-                        //
-                        // Mirror the identifier-path resolution cascade:
-                        //   1. typed entity table (strict)
-                        //   2. untyped entity table (subtype tolerance,
-                        //      e.g. obj ⊂ namedobj)
-                        //   3. proc/script registries (for proc/label/
-                        //      queue/timer/walktrigger hints)
-                        let typed_ok = self.registry.lookup_entity_id_typed(s, h).is_some();
-                        let untyped_ok = self.registry.lookup_entity_id(s).is_some();
-                        let script_ok = self.registry.proc_script_id(s).is_some()
-                            || self.registry.script_id(s).is_some();
-                        if !typed_ok && !untyped_ok && !script_ok {
-                            self.emit_unresolved_entity_warning(line, s, h);
-                        } else if is_valid_bare_ident(s) {
-                            // The string literal resolves AND its name is a
-                            // legal bare identifier — recommend the bare form
-                            // for clarity.
-                            self.emit_prefer_bare_ident_warning(line, s, h);
-                        }
-                        return Some(h);
+                if let Some(h) = hint
+                    && !is_literal_type(h)
+                    && h != Type::Error
+                    && h != Type::Any
+                {
+                    // Verify the name resolves against the registry.
+                    // If it doesn't, surface a warning so silent
+                    // fallthrough to `push_string` at codegen doesn't
+                    // produce a runtime bug.
+                    //
+                    // Mirror the identifier-path resolution cascade:
+                    //   1. typed entity table (strict)
+                    //   2. untyped entity table (subtype tolerance,
+                    //      e.g. obj ⊂ namedobj)
+                    //   3. proc/script registries (for proc/label/
+                    //      queue/timer/walktrigger hints)
+                    let typed_ok = self.registry.lookup_entity_id_typed(s, h).is_some();
+                    let untyped_ok = self.registry.lookup_entity_id(s).is_some();
+                    let script_ok = self.registry.proc_script_id(s).is_some()
+                        || self.registry.script_id(s).is_some();
+                    if !typed_ok && !untyped_ok && !script_ok {
+                        self.emit_unresolved_entity_warning(line, s, h);
+                    } else if is_valid_bare_ident(s) {
+                        // The string literal resolves AND its name is a
+                        // legal bare identifier — recommend the bare form
+                        // for clarity.
+                        self.emit_prefer_bare_ident_warning(line, s, h);
                     }
+                    return Some(h);
                 }
                 Some(Type::String)
             }
             Expr::BoolLiteral(_) => Some(Type::Boolean),
             Expr::NullLiteral => {
                 // Matching TS visitNullLiteral: use hint if provided
-                if let Some(h) = hint {
-                    if h != Type::Error {
-                        return Some(h);
-                    }
+                if let Some(h) = hint
+                    && h != Type::Error
+                {
+                    return Some(h);
                 }
                 Some(Type::Int)
             }
@@ -674,10 +667,10 @@ impl<'a> TypeChecker<'a> {
                             }
                             let idx_type =
                                 self.infer_expr_type(index, locals, line, Some(Type::Int));
-                            if let Some(it) = idx_type {
-                                if !self.types_compatible(it, Type::Int) {
-                                    self.emit_type_mismatch(line, it, Type::Int);
-                                }
+                            if let Some(it) = idx_type
+                                && !self.types_compatible(it, Type::Int)
+                            {
+                                self.emit_type_mismatch(line, it, Type::Int);
                             }
                             Some(*var_type)
                         }
@@ -723,12 +716,12 @@ impl<'a> TypeChecker<'a> {
             Expr::Identifier(name) => {
                 // Type-aware resolution: if hint is provided and there's a typed entity match, use it.
                 // This mirrors codegen's compile_expr_hinted (compiler.rs:1079).
-                if let Some(h) = hint {
-                    if h != Type::Error && h != Type::Any {
-                        if self.registry.lookup_entity_id_typed(name, h).is_some() {
-                            return Some(h);
-                        }
-                    }
+                if let Some(h) = hint
+                    && h != Type::Error
+                    && h != Type::Any
+                    && self.registry.lookup_entity_id_typed(name, h).is_some()
+                {
+                    return Some(h);
                 }
 
                 // Fallback: constants → entity IDs → commands → type chars
@@ -837,45 +830,41 @@ impl<'a> TypeChecker<'a> {
                     // descending (which would fire spurious "unresolved"
                     // warnings on each half), check if the combined name
                     // resolves as a single entity and short-circuit.
-                    if matches!(op, BinOp::Add) {
-                        if let (Expr::Identifier(lname), Expr::Identifier(rname)) =
+                    if matches!(op, BinOp::Add)
+                        && let (Expr::Identifier(lname), Expr::Identifier(rname)) =
                             (lhs.as_ref(), rhs.as_ref())
-                        {
-                            let combined = format!("{}+{}", lname, rname);
-                            if let Some(h) = hint {
-                                if self.registry.lookup_entity_id_typed(&combined, h).is_some()
-                                    || self.registry.lookup_entity_id(&combined).is_some()
-                                {
-                                    return Some(h);
-                                }
-                            } else if self.registry.lookup_entity_id(&combined).is_some() {
-                                if let Some(sym) = self.registry.lookup_entity_id(&combined) {
-                                    if let SymbolKind::Constant { const_type, .. } = &sym.kind {
-                                        return Some(*const_type);
-                                    }
-                                }
+                    {
+                        let combined = format!("{}+{}", lname, rname);
+                        if let Some(h) = hint {
+                            if self.registry.lookup_entity_id_typed(&combined, h).is_some()
+                                || self.registry.lookup_entity_id(&combined).is_some()
+                            {
+                                return Some(h);
                             }
+                        } else if self.registry.lookup_entity_id(&combined).is_some()
+                            && let Some(sym) = self.registry.lookup_entity_id(&combined)
+                            && let SymbolKind::Constant { const_type, .. } = &sym.kind
+                        {
+                            return Some(*const_type);
                         }
                     }
 
                     let expected = hint.unwrap_or(Type::Int);
                     let lt = self.infer_expr_type(lhs, locals, line, Some(expected));
                     let rt = self.infer_expr_type(rhs, locals, line, Some(expected));
-                    if let Some(ref lt) = lt {
-                        if lt.base_type() == BaseVarType::String
-                            && *lt != Type::Error
-                            && *lt != Type::Any
-                        {
-                            self.error(line, msg::fmt(msg::ARITHMETIC_INVALID_TYPE, &[lt.name()]));
-                        }
+                    if let Some(ref lt) = lt
+                        && lt.base_type() == BaseVarType::String
+                        && *lt != Type::Error
+                        && *lt != Type::Any
+                    {
+                        self.error(line, msg::fmt(msg::ARITHMETIC_INVALID_TYPE, &[lt.name()]));
                     }
-                    if let Some(ref rt) = rt {
-                        if rt.base_type() == BaseVarType::String
-                            && *rt != Type::Error
-                            && *rt != Type::Any
-                        {
-                            self.error(line, msg::fmt(msg::ARITHMETIC_INVALID_TYPE, &[rt.name()]));
-                        }
+                    if let Some(ref rt) = rt
+                        && rt.base_type() == BaseVarType::String
+                        && *rt != Type::Error
+                        && *rt != Type::Any
+                    {
+                        self.error(line, msg::fmt(msg::ARITHMETIC_INVALID_TYPE, &[rt.name()]));
                     }
                     if matches!(lt, Some(Type::Long)) || matches!(rt, Some(Type::Long)) {
                         Some(Type::Long)
@@ -899,13 +888,12 @@ impl<'a> TypeChecker<'a> {
             Expr::Calc(inner) => {
                 let expected = hint.unwrap_or(Type::Int);
                 let inner_type = self.infer_expr_type(inner, locals, line, Some(expected));
-                if let Some(ref it) = inner_type {
-                    if it.base_type() == BaseVarType::String
-                        && *it != Type::Error
-                        && *it != Type::Any
-                    {
-                        self.error(line, msg::fmt(msg::ARITHMETIC_INVALID_TYPE, &[it.name()]));
-                    }
+                if let Some(ref it) = inner_type
+                    && it.base_type() == BaseVarType::String
+                    && *it != Type::Error
+                    && *it != Type::Any
+                {
+                    self.error(line, msg::fmt(msg::ARITHMETIC_INVALID_TYPE, &[it.name()]));
                 }
                 inner_type
             }
@@ -1161,17 +1149,17 @@ impl<'a> TypeChecker<'a> {
         }
 
         for (i, (expected, actual)) in expected_types.iter().zip(actual_types.iter()).enumerate() {
-            if let Some(actual_ty) = actual {
-                if !self.types_compatible(*actual_ty, *expected) {
-                    self.error(
-                        line,
-                        msg::fmt(
-                            msg::GENERIC_TYPE_MISMATCH,
-                            &[actual_ty.name(), expected.name()],
-                        ),
-                    );
-                    let _ = i;
-                }
+            if let Some(actual_ty) = actual
+                && !self.types_compatible(*actual_ty, *expected)
+            {
+                self.error(
+                    line,
+                    msg::fmt(
+                        msg::GENERIC_TYPE_MISMATCH,
+                        &[actual_ty.name(), expected.name()],
+                    ),
+                );
+                let _ = i;
             }
         }
     }

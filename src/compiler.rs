@@ -396,6 +396,7 @@ impl Compiler {
         }
     }
 
+    #[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
     fn compile_if(
         &mut self,
         condition: &Expr,
@@ -489,15 +490,14 @@ impl Compiler {
 
             match arg {
                 Expr::ConstantVar(cname, _) => {
-                    if let Some(sym) = self.registry.lookup_constant(cname) {
-                        if let SymbolKind::Constant {
+                    if let Some(sym) = self.registry.lookup_constant(cname)
+                        && let SymbolKind::Constant {
                             string_value: Some(_),
                             ..
                         } = &sym.kind
-                        {
-                            count += 1;
-                            continue;
-                        }
+                    {
+                        count += 1;
+                        continue;
                     }
                     break;
                 }
@@ -521,8 +521,8 @@ impl Compiler {
         out: &mut CompiledScript,
         locals: &mut SymbolTable,
     ) {
-        let (lookup_name, cmd_index) = if name.starts_with('.') {
-            (&name[1..], 1u8)
+        let (lookup_name, cmd_index) = if let Some(stripped) = name.strip_prefix('.') {
+            (stripped, 1u8)
         } else {
             (name, 0u8)
         };
@@ -539,24 +539,23 @@ impl Compiler {
             if i < args_start {
                 continue;
             }
-            if let Some(&al) = arg_lines.get(i) {
-                if al > 0 {
-                    Self::emit_line(al, out);
-                }
+            if let Some(&al) = arg_lines.get(i)
+                && al > 0
+            {
+                Self::emit_line(al, out);
             }
-            if i == 0 {
-                if let Some(trigger) = script_trigger {
-                    if let Expr::Identifier(script_name) = arg {
-                        let script_id = self
-                            .registry
-                            .script_id_for_trigger(trigger, script_name)
-                            .or_else(|| self.registry.proc_script_id(script_name))
-                            .or_else(|| self.registry.script_id(script_name))
-                            .unwrap_or(-1);
-                        out.push(Instruction::push_int(script_id));
-                        continue;
-                    }
-                }
+            if i == 0
+                && let Some(trigger) = script_trigger
+                && let Expr::Identifier(script_name) = arg
+            {
+                let script_id = self
+                    .registry
+                    .script_id_for_trigger(trigger, script_name)
+                    .or_else(|| self.registry.proc_script_id(script_name))
+                    .or_else(|| self.registry.script_id(script_name))
+                    .unwrap_or(-1);
+                out.push(Instruction::push_int(script_id));
+                continue;
             }
             let hint = param_types.get(i).copied();
             self.compile_expr_hinted(arg, out, locals, hint);
@@ -691,6 +690,7 @@ impl Compiler {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_switch(
         &mut self,
         switch_type: &str,
@@ -736,10 +736,10 @@ impl Compiler {
         //     [end_pos]
 
         let mut end_jumps = Vec::new();
-        let default_branch_pos; // position of the no-match Branch (when default is not first)
+        // position of the no-match Branch (when default is not first)
         let default_first = default_index == 0 && default.is_some();
 
-        if default_first {
+        let default_branch_pos = if default_first {
             // Default body at sw_pos+1 (direct fall-through, no Branch needed at sw_pos+1)
             if let Some(default_stmts) = default {
                 for s in default_stmts {
@@ -749,13 +749,13 @@ impl Compiler {
                 out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
                 end_jumps.push(jump_pos);
             }
-            default_branch_pos = None;
+            None
         } else {
             // Branch at sw_pos+1 (to skip cases and reach default, or to end if no default)
             let pos = out.len();
             out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
-            default_branch_pos = Some(pos);
-        }
+            Some(pos)
+        };
 
         // Compile case bodies in source order, inserting default at its original position
         let mut case_positions: Vec<(Vec<i32>, usize)> = Vec::new();
@@ -782,33 +782,30 @@ impl Compiler {
                     values.push(*n);
                 } else if let Expr::ConstantVar(cname, _) = val {
                     // Resolve constant to integer for switch case value
-                    if let Some(sym) = self.registry.constants.get(cname) {
-                        if let SymbolKind::Constant {
+                    if let Some(sym) = self.registry.constants.get(cname)
+                        && let SymbolKind::Constant {
                             int_value: Some(value),
                             ..
                         } = &sym.kind
-                        {
-                            values.push(*value);
-                        }
+                    {
+                        values.push(*value);
                     }
                 } else if let Expr::Identifier(ident) = val {
                     // Component reference: interface:component → packed hash
                     let mut resolved = false;
-                    if let Some((iface_name, comp_name)) = ident.split_once(':') {
-                        if let Some(packed) = self.registry.lookup_component(iface_name, comp_name)
-                        {
-                            values.push(packed);
-                            resolved = true;
-                        }
+                    if let Some((iface_name, comp_name)) = ident.split_once(':')
+                        && let Some(packed) = self.registry.lookup_component(iface_name, comp_name)
+                    {
+                        values.push(packed);
+                        resolved = true;
                     }
                     // Use switch type hint for type-aware resolution
-                    if !resolved {
-                        if let Some(hint) = case_type_hint {
-                            if let Some(id) = self.registry.lookup_entity_id_typed(ident, hint) {
-                                values.push(id);
-                                resolved = true;
-                            }
-                        }
+                    if !resolved
+                        && let Some(hint) = case_type_hint
+                        && let Some(id) = self.registry.lookup_entity_id_typed(ident, hint)
+                    {
+                        values.push(id);
+                        resolved = true;
                     }
                     if !resolved {
                         if let Some(sym) = self.registry.entity_ids.get(ident.as_str()) {
@@ -819,14 +816,13 @@ impl Compiler {
                             {
                                 values.push(*value);
                             }
-                        } else if let Some(sym) = self.registry.constants.get(ident.as_str()) {
-                            if let SymbolKind::Constant {
+                        } else if let Some(sym) = self.registry.constants.get(ident.as_str())
+                            && let SymbolKind::Constant {
                                 int_value: Some(value),
                                 ..
                             } = &sym.kind
-                            {
-                                values.push(*value);
-                            }
+                        {
+                            values.push(*value);
                         }
                     }
                 } else if let Expr::BinaryOp {
@@ -846,14 +842,12 @@ impl Compiler {
                                 values.push(id);
                             }
                         } else if let Some(sym) = self.registry.lookup_entity_id(&combined).cloned()
-                        {
-                            if let SymbolKind::Constant {
+                            && let SymbolKind::Constant {
                                 int_value: Some(id),
                                 ..
                             } = &sym.kind
-                            {
-                                values.push(*id);
-                            }
+                        {
+                            values.push(*id);
                         }
                     }
                 } else if let Expr::CoordLiteral(v) = val {
@@ -935,23 +929,23 @@ impl Compiler {
             }
 
             Expr::StringLiteral(s) => {
-                if let Some(h) = type_hint {
-                    if h.base_type() == BaseVarType::Integer && h != Type::Int && h != Type::Boolean
+                if let Some(h) = type_hint
+                    && h.base_type() == BaseVarType::Integer
+                    && h != Type::Int
+                    && h != Type::Boolean
+                {
+                    if let Some(id) = self.registry.lookup_entity_id_typed(s, h) {
+                        out.push(Instruction::push_int(id));
+                        return;
+                    }
+                    if let Some(sym) = self.registry.lookup_entity_id(s)
+                        && let SymbolKind::Constant {
+                            int_value: Some(id),
+                            ..
+                        } = &sym.kind
                     {
-                        if let Some(id) = self.registry.lookup_entity_id_typed(s, h) {
-                            out.push(Instruction::push_int(id));
-                            return;
-                        }
-                        if let Some(sym) = self.registry.lookup_entity_id(s) {
-                            if let SymbolKind::Constant {
-                                int_value: Some(id),
-                                ..
-                            } = &sym.kind
-                            {
-                                out.push(Instruction::push_int(*id));
-                                return;
-                            }
-                        }
+                        out.push(Instruction::push_int(*id));
+                        return;
                     }
                 }
                 out.push(Instruction::push_string(s.clone()));
@@ -1005,66 +999,64 @@ impl Compiler {
             Expr::GameVar(name, _var_line) => {
                 // Dot-prefixed game vars (e.g. .%tradepartner) address secondary entity.
                 // Encoding: (1 << 16) | var_id in the operand.
-                let (lookup_name, secondary) = if name.starts_with('.') {
-                    (&name[1..], true)
+                let (lookup_name, secondary) = if let Some(stripped) = name.strip_prefix('.') {
+                    (stripped, true)
                 } else {
                     (name.as_str(), false)
                 };
-                if let Some(sym) = self.registry.lookup_game_var(lookup_name).cloned() {
-                    if let SymbolKind::GameVar {
+                if let Some(sym) = self.registry.lookup_game_var(lookup_name).cloned()
+                    && let SymbolKind::GameVar {
                         var_id, category, ..
                     } = &sym.kind
-                    {
-                        let opcode = match category.as_str() {
-                            "varp" => Opcode::PushVarp,
-                            "varn" => Opcode::PushVarn,
-                            "vars" => Opcode::PushVars,
-                            "varbit" => Opcode::PushVarbit,
-                            _ => Opcode::PushVarp,
-                        };
-                        let encoded_id = if secondary {
-                            (1 << 16) | *var_id
-                        } else {
-                            *var_id
-                        };
-                        out.push(Instruction::new(opcode, Operand::Int(encoded_id)));
-                    }
+                {
+                    let opcode = match category.as_str() {
+                        "varp" => Opcode::PushVarp,
+                        "varn" => Opcode::PushVarn,
+                        "vars" => Opcode::PushVars,
+                        "varbit" => Opcode::PushVarbit,
+                        _ => Opcode::PushVarp,
+                    };
+                    let encoded_id = if secondary {
+                        (1 << 16) | *var_id
+                    } else {
+                        *var_id
+                    };
+                    out.push(Instruction::new(opcode, Operand::Int(encoded_id)));
                 }
             }
 
             Expr::ConstantVar(name, const_line) => {
-                if let Some(sym) = self.registry.lookup_constant(name).cloned() {
-                    if let SymbolKind::Constant {
+                if let Some(sym) = self.registry.lookup_constant(name).cloned()
+                    && let SymbolKind::Constant {
                         int_value,
                         string_value,
                         ..
                     } = &sym.kind
-                    {
-                        if let Some(v) = int_value {
-                            out.push(Instruction::push_int(*v));
-                        } else if let Some(s) = string_value {
-                            // String constants: emit line - 1 to match Java compiler.
-                            // The Java type checker resolves ^constant to a StringLiteral
-                            // with NodeSourceLocation(line - 1, col - 1), converting from
-                            // 1-based ANTLR lines to a 0-based offset. Integer constants
-                            // are re-parsed via ANTLR with the offset, so they keep the
-                            // original line (1 + (line-1) = line).
-                            if *const_line > 0 {
-                                Self::emit_line(*const_line - 1, out);
-                            }
-                            out.push(Instruction::push_string(s.clone()));
+                {
+                    if let Some(v) = int_value {
+                        out.push(Instruction::push_int(*v));
+                    } else if let Some(s) = string_value {
+                        // String constants: emit line - 1 to match Java compiler.
+                        // The Java type checker resolves ^constant to a StringLiteral
+                        // with NodeSourceLocation(line - 1, col - 1), converting from
+                        // 1-based ANTLR lines to a 0-based offset. Integer constants
+                        // are re-parsed via ANTLR with the offset, so they keep the
+                        // original line (1 + (line-1) = line).
+                        if *const_line > 0 {
+                            Self::emit_line(*const_line - 1, out);
                         }
+                        out.push(Instruction::push_string(s.clone()));
                     }
                 }
             }
 
             Expr::Identifier(name) => {
                 // Component reference: interface_name:component_name → (iface_id << 16) | comp_id
-                if let Some((iface_name, comp_name)) = name.split_once(':') {
-                    if let Some(packed) = self.registry.lookup_component(iface_name, comp_name) {
-                        out.push(Instruction::push_int(packed));
-                        return;
-                    }
+                if let Some((iface_name, comp_name)) = name.split_once(':')
+                    && let Some(packed) = self.registry.lookup_component(iface_name, comp_name)
+                {
+                    out.push(Instruction::push_int(packed));
+                    return;
                 }
 
                 // Resolution order: entity IDs (stat/npc/loc/etc.) > constants (.constant)
@@ -1103,28 +1095,27 @@ impl Compiler {
                         return;
                     }
                 }
-                if let Some(sym) = self.registry.lookup_entity_id(name).cloned() {
-                    if let SymbolKind::Constant {
+                if let Some(sym) = self.registry.lookup_entity_id(name).cloned()
+                    && let SymbolKind::Constant {
                         const_type,
                         int_value,
                         string_value,
                     } = &sym.kind
-                    {
-                        // Param entities should NOT shadow type name identifiers unless
-                        // we have a Param-typed hint. This allows "namedobj" etc. to resolve
-                        // to their type chars in enum(int, namedobj, ...) contexts.
-                        let skip_for_type_char = *const_type == Type::Param
-                            && type_hint != Some(Type::Param)
-                            && self.registry.type_chars.contains_key(name);
-                        if !skip_for_type_char {
-                            if let Some(v) = int_value {
-                                out.push(Instruction::push_int(*v));
-                            } else if let Some(s) = string_value {
-                                out.push(Instruction::push_string(s.clone()));
-                            }
-                            // If skip_for_type_char, fall through to commands/type_chars below
-                            return;
+                {
+                    // Param entities should NOT shadow type name identifiers unless
+                    // we have a Param-typed hint. This allows "namedobj" etc. to resolve
+                    // to their type chars in enum(int, namedobj, ...) contexts.
+                    let skip_for_type_char = *const_type == Type::Param
+                        && type_hint != Some(Type::Param)
+                        && self.registry.type_chars.contains_key(name);
+                    if !skip_for_type_char {
+                        if let Some(v) = int_value {
+                            out.push(Instruction::push_int(*v));
+                        } else if let Some(s) = string_value {
+                            out.push(Instruction::push_string(s.clone()));
                         }
+                        // If skip_for_type_char, fall through to commands/type_chars below
+                        return;
                     }
                 }
                 // Note: we fall through here only if entity lookup found a Param-type entity
@@ -1142,14 +1133,14 @@ impl Compiler {
                             out.push(Instruction::push_string(s.clone()));
                         }
                     }
-                } else if {
-                    let lookup = if name.starts_with('.') {
-                        &name[1..]
+                } else {
+                    let (lookup, idx) = if let Some(stripped) = name.strip_prefix('.') {
+                        (stripped, 1u8)
                     } else {
-                        name.as_str()
+                        (name.as_str(), 0u8)
                     };
-                    let idx = if name.starts_with('.') { 1u8 } else { 0u8 };
-                    if let Some(sym) = self.registry.lookup_command(lookup).cloned() {
+                    let resolved = if let Some(sym) = self.registry.lookup_command(lookup).cloned()
+                    {
                         if let SymbolKind::Command { opcode, .. } = &sym.kind {
                             let encoded = opcode | ((idx as i32) << 16);
                             out.push(Instruction::new(Opcode::Command, Operand::Int(encoded)));
@@ -1157,37 +1148,33 @@ impl Compiler {
                         true
                     } else {
                         false
+                    };
+                    if !resolved {
+                        if let Some(sym) = self.registry.lookup_game_var(name).cloned()
+                            && let SymbolKind::GameVar {
+                                var_id, category, ..
+                            } = &sym.kind
+                        {
+                            let push_op = match category.as_str() {
+                                "varp" => Opcode::PushVarp,
+                                "varn" => Opcode::PushVarn,
+                                "vars" => Opcode::PushVars,
+                                "varbit" => Opcode::PushVarbit,
+                                _ => Opcode::PushVarp,
+                            };
+                            out.push(Instruction::new(push_op, Operand::Int(*var_id)));
+                        } else if let Some(&type_char) = self.registry.type_chars.get(name) {
+                            out.push(Instruction::push_int(type_char));
+                        } else if let Some(script_id) = self
+                            .registry
+                            .proc_script_id(name)
+                            .or_else(|| self.registry.script_id(name))
+                        {
+                            out.push(Instruction::push_int(script_id));
+                        } else {
+                            out.push(Instruction::push_int(-1));
+                        }
                     }
-                } {
-                    // handled above
-                } else if let Some(sym) = self.registry.lookup_game_var(name).cloned() {
-                    if let SymbolKind::GameVar {
-                        var_id, category, ..
-                    } = &sym.kind
-                    {
-                        let push_op = match category.as_str() {
-                            "varp" => Opcode::PushVarp,
-                            "varn" => Opcode::PushVarn,
-                            "vars" => Opcode::PushVars,
-                            "varbit" => Opcode::PushVarbit,
-                            _ => Opcode::PushVarp,
-                        };
-                        out.push(Instruction::new(push_op, Operand::Int(*var_id)));
-                    }
-                } else if let Some(&type_char) = self.registry.type_chars.get(name) {
-                    // Type name identifier (e.g., "namedobj", "int", "coord") used as type arg.
-                    // Checked after commands so that commands like `coord` take priority.
-                    out.push(Instruction::push_int(type_char));
-                } else if let Some(script_id) = self
-                    .registry
-                    .proc_script_id(name)
-                    .or_else(|| self.registry.script_id(name))
-                {
-                    // Script name used as argument (e.g., gosub(script_name))
-                    out.push(Instruction::push_int(script_id));
-                } else {
-                    // Unknown identifier - push -1 as fallback
-                    out.push(Instruction::push_int(-1));
                 }
             }
 
@@ -1209,21 +1196,19 @@ impl Compiler {
                 // Handle entity names that contain '+' (e.g. "cheese+tom_batta").
                 // The parser splits these into BinaryOp::Add, but they should resolve
                 // as a single entity identifier.
-                if matches!(op, BinOp::Add) {
-                    if let (Expr::Identifier(lhs_name), Expr::Identifier(rhs_name)) =
+                if matches!(op, BinOp::Add)
+                    && let (Expr::Identifier(lhs_name), Expr::Identifier(rhs_name)) =
                         (lhs.as_ref(), rhs.as_ref())
+                {
+                    let combined = format!("{}+{}", lhs_name, rhs_name);
+                    if let Some(sym) = self.registry.lookup_entity_id(&combined).cloned()
+                        && let SymbolKind::Constant {
+                            int_value: Some(id),
+                            ..
+                        } = &sym.kind
                     {
-                        let combined = format!("{}+{}", lhs_name, rhs_name);
-                        if let Some(sym) = self.registry.lookup_entity_id(&combined).cloned() {
-                            if let SymbolKind::Constant {
-                                int_value: Some(id),
-                                ..
-                            } = &sym.kind
-                            {
-                                out.push(Instruction::push_int(*id));
-                                return;
-                            }
-                        }
+                        out.push(Instruction::push_int(*id));
+                        return;
                     }
                 }
 
@@ -1357,8 +1342,8 @@ impl Compiler {
                 call_line,
             } => {
                 // Dot-prefixed commands address the secondary active entity (operand = 1).
-                let (lookup_name, cmd_index) = if name.starts_with('.') {
-                    (&name[1..], 1u8)
+                let (lookup_name, cmd_index) = if let Some(stripped) = name.strip_prefix('.') {
+                    (stripped, 1u8)
                 } else {
                     (name.as_str(), 0u8)
                 };
@@ -1379,24 +1364,24 @@ impl Compiler {
                 // Compile arguments, with special handling for the script-name first arg.
                 for (i, arg) in args.iter().enumerate() {
                     // Emit LineNumber before each arg to track multi-line calls.
-                    if let Some(&al) = arg_lines.get(i) {
-                        if al > 0 {
-                            Self::emit_line(al, out);
-                        }
+                    if let Some(&al) = arg_lines.get(i)
+                        && al > 0
+                    {
+                        Self::emit_line(al, out);
                     }
-                    if i == 0 {
-                        if let Some(trigger) = script_trigger {
-                            // First arg is a script name identifier: resolve to trigger-specific ID.
-                            if let Expr::Identifier(script_name) = arg {
-                                let script_id = self
-                                    .registry
-                                    .script_id_for_trigger(trigger, script_name)
-                                    .or_else(|| self.registry.proc_script_id(script_name))
-                                    .or_else(|| self.registry.script_id(script_name))
-                                    .unwrap_or(-1);
-                                out.push(Instruction::push_int(script_id));
-                                continue;
-                            }
+                    if i == 0
+                        && let Some(trigger) = script_trigger
+                    {
+                        // First arg is a script name identifier: resolve to trigger-specific ID.
+                        if let Expr::Identifier(script_name) = arg {
+                            let script_id = self
+                                .registry
+                                .script_id_for_trigger(trigger, script_name)
+                                .or_else(|| self.registry.proc_script_id(script_name))
+                                .or_else(|| self.registry.script_id(script_name))
+                                .unwrap_or(-1);
+                            out.push(Instruction::push_int(script_id));
+                            continue;
                         }
                     }
                     // For 'enum' command, args 0 and 1 are input/output type chars.
@@ -1410,13 +1395,11 @@ impl Compiler {
                         || lookup_name == "db_find_with_count"
                         || lookup_name == "param")
                         && (i == 0 || i == 1)
+                        && let Expr::Identifier(n) = arg
+                        && let Some(&tc) = self.registry.type_chars.get(n.as_str())
                     {
-                        if let Expr::Identifier(n) = arg {
-                            if let Some(&tc) = self.registry.type_chars.get(n.as_str()) {
-                                out.push(Instruction::push_int(tc));
-                                continue;
-                            }
-                        }
+                        out.push(Instruction::push_int(tc));
+                        continue;
                     }
                     let hint = param_types.get(i).copied();
                     self.compile_expr_hinted(arg, out, locals, hint);
@@ -1497,10 +1480,10 @@ impl Compiler {
                     })
                     .unwrap_or_default();
                 for (i, arg) in args.iter().enumerate() {
-                    if let Some(&al) = arg_lines.get(i) {
-                        if al > 0 {
-                            Self::emit_line(al, out);
-                        }
+                    if let Some(&al) = arg_lines.get(i)
+                        && al > 0
+                    {
+                        Self::emit_line(al, out);
                     }
                     let hint = param_types.get(i).copied();
                     self.compile_expr_hinted(arg, out, locals, hint);
@@ -1541,10 +1524,10 @@ impl Compiler {
                     })
                     .unwrap_or_default();
                 for (i, arg) in args.iter().enumerate() {
-                    if let Some(&al) = arg_lines.get(i) {
-                        if al > 0 {
-                            Self::emit_line(al, out);
-                        }
+                    if let Some(&al) = arg_lines.get(i)
+                        && al > 0
+                    {
+                        Self::emit_line(al, out);
                     }
                     let hint = param_types.get(i).copied();
                     self.compile_expr_hinted(arg, out, locals, hint);
@@ -1613,30 +1596,29 @@ impl Compiler {
             Expr::GameVar(name, _var_line) => {
                 // Dot-prefixed game vars (e.g. .%tradepartner) address secondary entity.
                 // Encoding: (1 << 16) | var_id in the operand.
-                let (lookup_name, secondary) = if name.starts_with('.') {
-                    (&name[1..], true)
+                let (lookup_name, secondary) = if let Some(stripped) = name.strip_prefix('.') {
+                    (stripped, true)
                 } else {
                     (name.as_str(), false)
                 };
-                if let Some(sym) = self.registry.lookup_game_var(lookup_name).cloned() {
-                    if let SymbolKind::GameVar {
+                if let Some(sym) = self.registry.lookup_game_var(lookup_name).cloned()
+                    && let SymbolKind::GameVar {
                         var_id, category, ..
                     } = &sym.kind
-                    {
-                        let opcode = match category.as_str() {
-                            "varp" => Opcode::PopVarp,
-                            "varn" => Opcode::PopVarn,
-                            "vars" => Opcode::PopVars,
-                            "varbit" => Opcode::PopVarbit,
-                            _ => Opcode::PopVarp,
-                        };
-                        let encoded_id = if secondary {
-                            (1 << 16) | *var_id
-                        } else {
-                            *var_id
-                        };
-                        out.push(Instruction::new(opcode, Operand::Int(encoded_id)));
-                    }
+                {
+                    let opcode = match category.as_str() {
+                        "varp" => Opcode::PopVarp,
+                        "varn" => Opcode::PopVarn,
+                        "vars" => Opcode::PopVars,
+                        "varbit" => Opcode::PopVarbit,
+                        _ => Opcode::PopVarp,
+                    };
+                    let encoded_id = if secondary {
+                        (1 << 16) | *var_id
+                    } else {
+                        *var_id
+                    };
+                    out.push(Instruction::new(opcode, Operand::Int(encoded_id)));
                 }
             }
 
@@ -1656,10 +1638,10 @@ impl Compiler {
                 // Multi-return: pop return values in reverse order (last target = top of stack)
                 for (i, target) in targets.iter().enumerate().rev() {
                     // Emit LineNumber for each target's source line
-                    if let Some(&tl) = target_lines.get(i) {
-                        if tl > 0 {
-                            Self::emit_line(tl, out);
-                        }
+                    if let Some(&tl) = target_lines.get(i)
+                        && tl > 0
+                    {
+                        Self::emit_line(tl, out);
                     }
                     self.compile_store(target, out, locals);
                 }
@@ -1719,52 +1701,49 @@ impl Compiler {
                 }
             }
             Expr::GameVar(name, _var_line) => {
-                if let Some(sym) = self.registry.lookup_game_var(name) {
-                    if let SymbolKind::GameVar { var_type, .. } = &sym.kind {
-                        return self.type_to_type_char(*var_type);
-                    }
+                if let Some(sym) = self.registry.lookup_game_var(name)
+                    && let SymbolKind::GameVar { var_type, .. } = &sym.kind
+                {
+                    return self.type_to_type_char(*var_type);
                 }
                 'i'
             }
             Expr::CommandCall { name, .. } => {
                 let lookup = name.trim_start_matches('.');
-                if let Some(sym) = self.registry.lookup_command(lookup) {
-                    if let SymbolKind::Command { return_types, .. } = &sym.kind {
-                        if let Some(rt) = return_types.first() {
-                            return self.type_to_type_char(*rt);
-                        }
-                    }
+                if let Some(sym) = self.registry.lookup_command(lookup)
+                    && let SymbolKind::Command { return_types, .. } = &sym.kind
+                    && let Some(rt) = return_types.first()
+                {
+                    return self.type_to_type_char(*rt);
                 }
                 // Unknown or void command - check known command types
                 Self::known_command_type_char(lookup)
             }
             Expr::ProcCall { name, .. } => {
-                if let Some(sym) = self.registry.lookup_script(name) {
-                    if let SymbolKind::Script { return_types, .. } = &sym.kind {
-                        if let Some(rt) = return_types.first() {
-                            return self.type_to_type_char(*rt);
-                        }
-                    }
+                if let Some(sym) = self.registry.lookup_script(name)
+                    && let SymbolKind::Script { return_types, .. } = &sym.kind
+                    && let Some(rt) = return_types.first()
+                {
+                    return self.type_to_type_char(*rt);
                 }
                 'i'
             }
             Expr::Identifier(name) => {
                 // Bare identifier (no parens) - might be a zero-arg command like `uid`
                 let lookup = name.trim_start_matches('.');
-                if let Some(sym) = self.registry.lookup_command(lookup) {
-                    if let SymbolKind::Command { return_types, .. } = &sym.kind {
-                        if let Some(rt) = return_types.first() {
-                            return self.type_to_type_char(*rt);
-                        }
-                    }
+                if let Some(sym) = self.registry.lookup_command(lookup)
+                    && let SymbolKind::Command { return_types, .. } = &sym.kind
+                    && let Some(rt) = return_types.first()
+                {
+                    return self.type_to_type_char(*rt);
                 }
                 Self::known_command_type_char(lookup)
             }
             Expr::ConstantVar(name, _) => {
-                if let Some(sym) = self.registry.lookup_constant(name) {
-                    if let SymbolKind::Constant { const_type, .. } = &sym.kind {
-                        return self.type_to_type_char(*const_type);
-                    }
+                if let Some(sym) = self.registry.lookup_constant(name)
+                    && let SymbolKind::Constant { const_type, .. } = &sym.kind
+                {
+                    return self.type_to_type_char(*const_type);
                 }
                 'i'
             }
@@ -1789,15 +1768,15 @@ impl Compiler {
                 }
             }
             Expr::GameVar(name, _var_line) => {
-                let lookup_name = if name.starts_with('.') {
-                    &name[1..]
+                let lookup_name = if let Some(stripped) = name.strip_prefix('.') {
+                    stripped
                 } else {
                     name.as_str()
                 };
-                if let Some(sym) = self.registry.lookup_game_var(lookup_name) {
-                    if let SymbolKind::GameVar { var_type, .. } = &sym.kind {
-                        return Some(*var_type);
-                    }
+                if let Some(sym) = self.registry.lookup_game_var(lookup_name)
+                    && let SymbolKind::GameVar { var_type, .. } = &sym.kind
+                {
+                    return Some(*var_type);
                 }
                 None
             }
@@ -1820,34 +1799,34 @@ impl Compiler {
                 }
             }
             Expr::GameVar(name, _var_line) => {
-                let lookup_name = if name.starts_with('.') {
-                    &name[1..]
+                let lookup_name = if let Some(stripped) = name.strip_prefix('.') {
+                    stripped
                 } else {
                     name.as_str()
                 };
-                if let Some(sym) = self.registry.lookup_game_var(lookup_name) {
-                    if let SymbolKind::GameVar { var_type, .. } = &sym.kind {
-                        return Some(*var_type);
-                    }
+                if let Some(sym) = self.registry.lookup_game_var(lookup_name)
+                    && let SymbolKind::GameVar { var_type, .. } = &sym.kind
+                {
+                    return Some(*var_type);
                 }
                 None
             }
             Expr::CommandCall { name, .. } => {
                 let lookup = name.trim_start_matches('.');
-                if let Some(sym) = self.registry.lookup_command(lookup) {
-                    if let SymbolKind::Command { return_types, .. } = &sym.kind {
-                        return return_types.first().copied();
-                    }
+                if let Some(sym) = self.registry.lookup_command(lookup)
+                    && let SymbolKind::Command { return_types, .. } = &sym.kind
+                {
+                    return return_types.first().copied();
                 }
                 None
             }
             Expr::Identifier(name) => {
                 // Zero-arg commands used without parens (e.g. `loc_category`)
                 let lookup = name.trim_start_matches('.');
-                if let Some(sym) = self.registry.lookup_command(lookup) {
-                    if let SymbolKind::Command { return_types, .. } = &sym.kind {
-                        return return_types.first().copied();
-                    }
+                if let Some(sym) = self.registry.lookup_command(lookup)
+                    && let SymbolKind::Command { return_types, .. } = &sym.kind
+                {
+                    return return_types.first().copied();
                 }
                 None
             }
@@ -1863,10 +1842,10 @@ impl Compiler {
                 // Use the type_chars map for more precise type chars
                 // (e.g., namedobj='O', playeruid='p')
                 for (name, &tc) in &self.registry.type_chars {
-                    if let Some(from_type) = Type::from_name(name) {
-                        if from_type == t {
-                            return (tc as u8) as char;
-                        }
+                    if let Some(from_type) = Type::from_name(name)
+                        && from_type == t
+                    {
+                        return (tc as u8) as char;
                     }
                 }
                 'i'
@@ -1949,11 +1928,11 @@ impl Compiler {
         // Coordinate-based triggers: parse "level_bx_by" format
         if matches!(trigger, "mapzone" | "mapzoneexit") {
             let parts: Vec<&str> = entity_name.splitn(4, '_').collect();
-            if parts.len() >= 3 {
-                if let (Ok(bx), Ok(by)) = (parts[1].parse::<i64>(), parts[2].parse::<i64>()) {
-                    let entity_id: i64 = ((bx & 3) << 20) | (by << 6);
-                    return (entity_id * 1024 + 512 + trigger_byte) as i32;
-                }
+            if parts.len() >= 3
+                && let (Ok(bx), Ok(by)) = (parts[1].parse::<i64>(), parts[2].parse::<i64>())
+            {
+                let entity_id: i64 = ((bx & 3) << 20) | (by << 6);
+                return (entity_id * 1024 + 512 + trigger_byte) as i32;
             }
             return -1;
         }
@@ -1961,16 +1940,16 @@ impl Compiler {
         // Coordinate-based triggers: parse "level_bx_by_lx_lz" format
         if matches!(trigger, "zone" | "zoneexit") {
             let parts: Vec<&str> = entity_name.splitn(6, '_').collect();
-            if parts.len() >= 5 {
-                if let (Ok(bx), Ok(by), Ok(lx), Ok(lz)) = (
+            if parts.len() >= 5
+                && let (Ok(bx), Ok(by), Ok(lx), Ok(lz)) = (
                     parts[1].parse::<i64>(),
                     parts[2].parse::<i64>(),
                     parts[3].parse::<i64>(),
                     parts[4].parse::<i64>(),
-                ) {
-                    let entity_id: i64 = ((bx & 3) << 20) | (by << 6) | (lx << 14) | lz;
-                    return (entity_id * 1024 + 512 + trigger_byte) as i32;
-                }
+                )
+            {
+                let entity_id: i64 = ((bx & 3) << 20) | (by << 6) | (lx << 14) | lz;
+                return (entity_id * 1024 + 512 + trigger_byte) as i32;
             }
             return -1;
         }
@@ -1981,8 +1960,7 @@ impl Compiler {
         //
         // NOTE: the bare `_` (pure wildcard) case is handled earlier in
         // this function (entity_name == "_" → returns just trigger_byte).
-        if entity_name.starts_with('_') {
-            let cat_name = &entity_name[1..];
+        if let Some(cat_name) = entity_name.strip_prefix('_') {
             if let Some(sym) = registry.lookup_entity_id_typed(cat_name, Type::Category) {
                 return (sym as i64 * 1024 + 256 + trigger_byte) as i32;
             }
@@ -2003,21 +1981,20 @@ impl Compiler {
         // Type-aware entity lookup so that e.g. "potato" resolves to loc_id
         // for [oploc2,potato] rather than the obj_id that has higher flat
         // priority. Trigger → entity-type routing lives in trigger_table.
-        if let Some(entity_type) = crate::trigger_table::subject_type(trigger) {
-            if let Some(entity_id) = registry.lookup_entity_id_typed(entity_name, entity_type) {
-                return (entity_id as i64 * 1024 + 512 + trigger_byte) as i32;
-            }
+        if let Some(entity_type) = crate::trigger_table::subject_type(trigger)
+            && let Some(entity_id) = registry.lookup_entity_id_typed(entity_name, entity_type)
+        {
+            return (entity_id as i64 * 1024 + 512 + trigger_byte) as i32;
         }
 
         // Fallback: flat entity_ids lookup
-        if let Some(sym) = registry.lookup_entity_id(entity_name) {
-            if let crate::symbol::SymbolKind::Constant {
+        if let Some(sym) = registry.lookup_entity_id(entity_name)
+            && let crate::symbol::SymbolKind::Constant {
                 int_value: Some(entity_id),
                 ..
             } = &sym.kind
-            {
-                return (*entity_id as i64 * 1024 + 512 + trigger_byte) as i32;
-            }
+        {
+            return (*entity_id as i64 * 1024 + 512 + trigger_byte) as i32;
         }
         -1
     }

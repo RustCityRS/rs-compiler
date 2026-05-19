@@ -69,42 +69,40 @@ pub fn load_engine_command_params(registry: &mut SymbolRegistry, engine_rs2: &Pa
             .command_param_types
             .insert(name.clone(), param_types.clone());
 
-        if let Some(sym) = registry.commands.get_mut(&name) {
-            if let SymbolKind::Command {
+        if let Some(sym) = registry.commands.get_mut(&name)
+            && let SymbolKind::Command {
                 param_types: ref mut pt,
                 ..
             } = sym.kind
-            {
-                *pt = param_types;
-            }
+        {
+            *pt = param_types;
         }
 
         // Parse return types from the second parenthesized group: `(param_types)(return_types)`
         let after_params = &after_bracket[params_end + 1..];
-        if let Some(ret_start) = after_params.find('(') {
-            if let Some(ret_end) = after_params[ret_start + 1..].find(')') {
-                let ret_str = &after_params[ret_start + 1..ret_start + 1 + ret_end];
-                let mut return_types: Vec<Type> = Vec::new();
-                for ret in ret_str.split(',') {
-                    let ret = ret.trim();
-                    if ret.is_empty() {
-                        continue;
-                    }
-                    if let Some(t) = Type::from_name(ret) {
-                        return_types.push(t);
-                    }
+        if let Some(ret_start) = after_params.find('(')
+            && let Some(ret_end) = after_params[ret_start + 1..].find(')')
+        {
+            let ret_str = &after_params[ret_start + 1..ret_start + 1 + ret_end];
+            let mut return_types: Vec<Type> = Vec::new();
+            for ret in ret_str.split(',') {
+                let ret = ret.trim();
+                if ret.is_empty() {
+                    continue;
                 }
-                if !return_types.is_empty() {
-                    // Update the command's return types in the registry
-                    if let Some(sym) = registry.commands.get_mut(&name) {
-                        if let SymbolKind::Command {
-                            return_types: ref mut rt,
-                            ..
-                        } = sym.kind
-                        {
-                            *rt = return_types;
-                        }
-                    }
+                if let Some(t) = Type::from_name(ret) {
+                    return_types.push(t);
+                }
+            }
+            if !return_types.is_empty() {
+                // Update the command's return types in the registry
+                if let Some(sym) = registry.commands.get_mut(&name)
+                    && let SymbolKind::Command {
+                        return_types: ref mut rt,
+                        ..
+                    } = sym.kind
+                {
+                    *rt = return_types;
                 }
             }
         }
@@ -121,12 +119,11 @@ pub fn patch_command_return_types(registry: &mut SymbolRegistry) {
         ("db_listall_with_count", vec![Type::Int]),
     ];
     for (name, ret_types) in patches {
-        if let Some(sym) = registry.commands.get_mut(*name) {
-            if let SymbolKind::Command { return_types, .. } = &mut sym.kind {
-                if return_types.is_empty() {
-                    *return_types = ret_types.clone();
-                }
-            }
+        if let Some(sym) = registry.commands.get_mut(*name)
+            && let SymbolKind::Command { return_types, .. } = &mut sym.kind
+            && return_types.is_empty()
+        {
+            *return_types = ret_types.clone();
         }
     }
 }
@@ -189,14 +186,14 @@ pub fn generate_script_pack(scripts_dir: &Path, pack_dir: &Path) {
             if line.is_empty() {
                 continue;
             }
-            if let Some((id_str, name)) = line.split_once('=') {
-                if let Ok(id) = id_str.parse::<i32>() {
-                    let name = name.trim().to_string();
-                    name_to_id.insert(name.clone(), id);
-                    id_to_name.insert(id, name);
-                    if id >= max_id {
-                        max_id = id + 1;
-                    }
+            if let Some((id_str, name)) = line.split_once('=')
+                && let Ok(id) = id_str.parse::<i32>()
+            {
+                let name = name.trim().to_string();
+                name_to_id.insert(name.clone(), id);
+                id_to_name.insert(id, name);
+                if id >= max_id {
+                    max_id = id + 1;
                 }
             }
         }
@@ -722,25 +719,23 @@ pub fn load_game_var_types(registry: &mut SymbolRegistry, scripts_dir: &Path) {
                 let Some(name) = current_name.as_ref() else {
                     continue;
                 };
-                if let Some((k, v)) = line.split_once('=') {
-                    if k.trim() == "type" {
-                        let type_name = v.trim();
-                        if let Some(ty) = Type::from_name(type_name) {
-                            if let Some(sym) = registry.game_vars.get_mut(name) {
-                                if let crate::symbol::SymbolKind::GameVar { var_type, .. } =
-                                    &mut sym.kind
-                                {
-                                    *var_type = ty;
-                                }
-                            }
-                            let dot_name = format!(".{}", name);
-                            if let Some(sym) = registry.game_vars.get_mut(&dot_name) {
-                                if let crate::symbol::SymbolKind::GameVar { var_type, .. } =
-                                    &mut sym.kind
-                                {
-                                    *var_type = ty;
-                                }
-                            }
+                if let Some((k, v)) = line.split_once('=')
+                    && k.trim() == "type"
+                {
+                    let type_name = v.trim();
+                    if let Some(ty) = Type::from_name(type_name) {
+                        if let Some(sym) = registry.game_vars.get_mut(name)
+                            && let crate::symbol::SymbolKind::GameVar { var_type, .. } =
+                                &mut sym.kind
+                        {
+                            *var_type = ty;
+                        }
+                        let dot_name = format!(".{}", name);
+                        if let Some(sym) = registry.game_vars.get_mut(&dot_name)
+                            && let crate::symbol::SymbolKind::GameVar { var_type, .. } =
+                                &mut sym.kind
+                        {
+                            *var_type = ty;
                         }
                     }
                 }
@@ -822,11 +817,13 @@ fn load_entity_ids(registry: &mut SymbolRegistry, path: &Path, entity_type: Type
             continue;
         }
 
-        if is_interface_pack && !id_str.contains(':') && !name.contains(':') {
-            if let Ok(id) = id_str.parse::<i32>() {
-                registry.interface_ids.insert(name.to_string(), id);
-                iface_id_to_name.insert(id, name.to_string());
-            }
+        if is_interface_pack
+            && !id_str.contains(':')
+            && !name.contains(':')
+            && let Ok(id) = id_str.parse::<i32>()
+        {
+            registry.interface_ids.insert(name.to_string(), id);
+            iface_id_to_name.insert(id, name.to_string());
         }
     }
 
@@ -897,19 +894,17 @@ fn load_entity_ids(registry: &mut SymbolRegistry, path: &Path, entity_type: Type
         let normalized = register_name.to_lowercase().replace(' ', "_");
         registry.register_entity_id(normalized, actual_type, idx);
 
-        if is_interface_pack {
-            if let Some(key) = component_key {
-                let normalized_key = if let Some((iface_part, comp_part)) = key.split_once(':') {
-                    format!(
-                        "{}:{}",
-                        iface_part,
-                        crate::symbol::normalize_comp_name(comp_part)
-                    )
-                } else {
-                    key
-                };
-                registry.components.insert(normalized_key, idx);
-            }
+        if is_interface_pack && let Some(key) = component_key {
+            let normalized_key = if let Some((iface_part, comp_part)) = key.split_once(':') {
+                format!(
+                    "{}:{}",
+                    iface_part,
+                    crate::symbol::normalize_comp_name(comp_part)
+                )
+            } else {
+                key
+            };
+            registry.components.insert(normalized_key, idx);
         }
     }
 }
@@ -1173,7 +1168,7 @@ mod tests {
         assert_eq!(r.interface_ids.get("multi2"), Some(&228));
 
         // Components use normalized keys (com0, not com_0)
-        assert_eq!(r.lookup_component("multi2", "com0"), Some((228 << 16) | 0));
+        assert_eq!(r.lookup_component("multi2", "com0"), Some(228 << 16));
         assert_eq!(r.lookup_component("multi2", "com2"), Some((228 << 16) | 2));
         assert_eq!(r.lookup_component("multi2", "com3"), Some((228 << 16) | 3));
 
@@ -1202,7 +1197,7 @@ mod tests {
         load_entity_ids(&mut r, &pack, Type::Interface);
 
         // 225-style references (com_0, com_1, com_2) resolve against 647 pack
-        assert_eq!(r.lookup_component("multi2", "com_0"), Some((228 << 16) | 0));
+        assert_eq!(r.lookup_component("multi2", "com_0"), Some(228 << 16));
         assert_eq!(r.lookup_component("multi2", "com_1"), Some((228 << 16) | 1));
         assert_eq!(r.lookup_component("multi2", "com_2"), Some((228 << 16) | 2));
     }

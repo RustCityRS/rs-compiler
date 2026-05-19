@@ -287,25 +287,22 @@ pub fn encode_script(script: &CompiledScript) -> Vec<u8> {
     // Second pass: convert absolute jump targets to relative offsets.
     // Relative offset = target_final_idx - (current_final_idx + 1).
     for (i, fi) in final_instrs.iter_mut().enumerate() {
-        match &fi.op {
-            ResolvedOp::Large(v) => {
-                // Check if this is a branch opcode (jump target stored as absolute idx)
-                let is_branch = matches!(
-                    fi.opcode,
-                    6 | 7 | 8 | 9 | 10 | 31 | 32 | 68 | 69 | 70 | 71 | 72 | 73 | 86 | 87
-                );
-                if is_branch {
-                    let abs_target = *v as usize;
-                    let final_target = if abs_target < orig_to_final.len() {
-                        orig_to_final[abs_target]
-                    } else {
-                        total // out of bounds → point to end
-                    };
-                    let relative = final_target as i32 - (i as i32 + 1);
-                    fi.op = ResolvedOp::Large(relative);
-                }
+        if let ResolvedOp::Large(v) = &fi.op {
+            // Check if this is a branch opcode (jump target stored as absolute idx)
+            let is_branch = matches!(
+                fi.opcode,
+                6 | 7 | 8 | 9 | 10 | 31 | 32 | 68 | 69 | 70 | 71 | 72 | 73 | 86 | 87
+            );
+            if is_branch {
+                let abs_target = *v as usize;
+                let final_target = if abs_target < orig_to_final.len() {
+                    orig_to_final[abs_target]
+                } else {
+                    total // out of bounds → point to end
+                };
+                let relative = final_target as i32 - (i as i32 + 1);
+                fi.op = ResolvedOp::Large(relative);
             }
-            _ => {}
         }
     }
 
@@ -520,6 +517,12 @@ impl ScriptWriter {
 
 pub struct PackBuffer {
     pub scripts: HashMap<String, Vec<u8>>,
+}
+
+impl Default for PackBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PackBuffer {

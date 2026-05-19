@@ -77,9 +77,7 @@ impl<'a> Lexer<'a> {
                     value.push('<');
                 }
                 Some(b'>') => {
-                    if interp_depth > 0 {
-                        interp_depth -= 1;
-                    }
+                    interp_depth = interp_depth.saturating_sub(1);
                     value.push('>');
                 }
                 Some(b'\\') => match self.advance() {
@@ -108,7 +106,7 @@ impl<'a> Lexer<'a> {
                         // Start of multi-byte UTF-8: decode properly
                         let mut bytes = vec![ch];
                         while let Some(&next) = self.source.get(self.pos) {
-                            if next >= 0x80 && next < 0xC0 {
+                            if (0x80..0xC0).contains(&next) {
                                 bytes.push(next);
                                 self.pos += 1;
                                 self.col += 1;
@@ -216,9 +214,7 @@ impl<'a> Lexer<'a> {
         let number = String::from_utf8_lossy(&self.source[start..self.pos]).to_string();
         // Strip the L suffix from the value
         let value = if is_long {
-            number
-                .trim_end_matches(|c| c == 'L' || c == 'l')
-                .to_string()
+            number.trim_end_matches(['L', 'l']).to_string()
         } else {
             number
         };
@@ -537,7 +533,7 @@ impl<'a> Lexer<'a> {
                     // Could be standalone underscore or start of identifier
                     if self
                         .peek_ahead(1)
-                        .map_or(false, |c| c.is_ascii_alphanumeric() || c == b'_')
+                        .is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_')
                     {
                         let ident = self.read_identifier();
                         let kind = self.classify_identifier(&ident);
@@ -584,7 +580,7 @@ impl<'a> Lexer<'a> {
                     };
                     // Check if this number is immediately followed by more identifier chars
                     // (e.g., "2dose1strength" or "0_48_48_newbiefishing") → lex as Identifier
-                    let next_is_ident = self.peek().map_or(false, |c| c.is_ascii_alphabetic());
+                    let next_is_ident = self.peek().is_some_and(|c| c.is_ascii_alphabetic());
                     if !is_long && next_is_ident {
                         // Number immediately followed by letters — treat as identifier
                         let mut ident = value;
@@ -602,7 +598,7 @@ impl<'a> Lexer<'a> {
                             if self.peek() == Some(b'_') {
                                 self.advance(); // consume _
                                 coord.push('_');
-                                if self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                                if self.peek().is_some_and(|c| c.is_ascii_digit()) {
                                     let (part, part_long) = self.read_number();
                                     if part_long {
                                         is_coord = false;
@@ -623,7 +619,7 @@ impl<'a> Lexer<'a> {
                         if is_coord
                             && !self
                                 .peek()
-                                .map_or(false, |c| c == b'_' || c.is_ascii_alphanumeric())
+                                .is_some_and(|c| c == b'_' || c.is_ascii_alphanumeric())
                         {
                             tokens.push(self.token(
                                 Kind::CoordLiteral,

@@ -354,10 +354,10 @@ fn check_unreachable_code(
             | Opcode::LongBranchGreaterThanOrEquals
             | Opcode::ObjBranchEquals
             | Opcode::ObjBranchNot => {
-                if let Operand::JumpTarget(target) = &instr.operand {
-                    if let Some(tnode) = resolve_target(*target, instrs, &instr_to_node) {
-                        next[order_idx].push(tnode);
-                    }
+                if let Operand::JumpTarget(target) = &instr.operand
+                    && let Some(tnode) = resolve_target(*target, instrs, &instr_to_node)
+                {
+                    next[order_idx].push(tnode);
                 }
             }
             Opcode::Switch => {
@@ -429,24 +429,22 @@ fn emit_unreachable(
     diagnostics: &mut DiagnosticsCollector,
     line: usize,
 ) {
-    let message = format!(
-        "Unreachable code: this line cannot be executed because control \
+    let message = "Unreachable code: this line cannot be executed because control \
          flow never reaches it (a preceding `return`, `@jump`, or \
          unconditional branch prevents fallthrough)."
-    );
+        .to_string();
 
     let mut suggestions: Vec<Suggestion> = Vec::new();
-    if let Some(cache) = source_cache {
-        if let Some(src) = cache.get(&script.source_path) {
-            if nth_source_line(src, line).is_some() {
-                suggestions.push(Suggestion {
-                    file: PathBuf::from(&script.source_path),
-                    line_range: (line, line),
-                    replacement: String::new(), // recommend removal
-                    label: Some("remove the unreachable statement".to_string()),
-                });
-            }
-        }
+    if let Some(cache) = source_cache
+        && let Some(src) = cache.get(&script.source_path)
+        && nth_source_line(src, line).is_some()
+    {
+        suggestions.push(Suggestion {
+            file: PathBuf::from(&script.source_path),
+            line_range: (line, line),
+            replacement: String::new(), // recommend removal
+            label: Some("remove the unreachable statement".to_string()),
+        });
     }
 
     let help = Help {
@@ -476,10 +474,10 @@ fn emit_unreachable(
 
 fn resolve_line(instructions: &[Instruction], instr_idx: usize) -> usize {
     for i in (0..=instr_idx).rev() {
-        if instructions[i].opcode == Opcode::LineNumber {
-            if let Operand::Int(line) = instructions[i].operand {
-                return line as usize;
-            }
+        if instructions[i].opcode == Opcode::LineNumber
+            && let Operand::Int(line) = instructions[i].operand
+        {
+            return line as usize;
         }
     }
     0
@@ -566,7 +564,7 @@ mod tests {
             Instruction::simple(Opcode::Return),
         ];
 
-        let scripts = vec![script];
+        let scripts = [script];
         let mut diags = DiagnosticsCollector::new();
         check_unused_locals(&scripts[0], None, &mut diags);
 

@@ -1,6 +1,5 @@
 /// Diagnostic message templates matching the reference RuneScriptTS compiler.
 /// Use `fmt` to substitute `%s` placeholders with arguments.
-
 // Internal compiler errors
 pub const UNSUPPORTED_SYMBOLTYPE_TO_TYPE: &str =
     "Internal compiler error: Unsupported SymbolType -> Type conversion: %s";
