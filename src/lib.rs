@@ -34,10 +34,7 @@ pub fn compile(
 
 /// Run all analysis passes (parse, type-check, codegen, pointer-check, lints)
 /// without writing output. Useful for editor tooling and CI lint gates.
-pub fn lint(
-    scripts_dir: &Path,
-    pack_dir: Option<&Path>,
-) -> Result<(), Box<dyn Error>> {
+pub fn lint(scripts_dir: &Path, pack_dir: Option<&Path>) -> Result<(), Box<dyn Error>> {
     run_pipeline(scripts_dir, pack_dir, None, true)
 }
 
@@ -518,11 +515,7 @@ fn run_pipeline(
     Ok(())
 }
 
-fn collect_files(
-    dir: &Path,
-    ext: &str,
-    out: &mut Vec<PathBuf>,
-) -> Result<(), Box<dyn Error>> {
+fn collect_files(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) -> Result<(), Box<dyn Error>> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();

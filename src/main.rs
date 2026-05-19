@@ -85,7 +85,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
-    
+
     let cli = Cli::parse();
     let config = Config::load();
 

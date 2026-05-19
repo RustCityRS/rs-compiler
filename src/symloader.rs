@@ -1202,18 +1202,9 @@ mod tests {
         load_entity_ids(&mut r, &pack, Type::Interface);
 
         // 225-style references (com_0, com_1, com_2) resolve against 647 pack
-        assert_eq!(
-            r.lookup_component("multi2", "com_0"),
-            Some((228 << 16) | 0)
-        );
-        assert_eq!(
-            r.lookup_component("multi2", "com_1"),
-            Some((228 << 16) | 1)
-        );
-        assert_eq!(
-            r.lookup_component("multi2", "com_2"),
-            Some((228 << 16) | 2)
-        );
+        assert_eq!(r.lookup_component("multi2", "com_0"), Some((228 << 16) | 0));
+        assert_eq!(r.lookup_component("multi2", "com_1"), Some((228 << 16) | 1));
+        assert_eq!(r.lookup_component("multi2", "com_2"), Some((228 << 16) | 2));
     }
 
     // ── 225-style pack ─────────────────────────────────────────────────
@@ -1276,7 +1267,10 @@ mod tests {
         load_entity_ids(&mut r, &pack, Type::Interface);
 
         // Root → Interface type, component → Component type
-        assert!(r.lookup_entity_id_typed("multi2", Type::Interface).is_some());
+        assert!(
+            r.lookup_entity_id_typed("multi2", Type::Interface)
+                .is_some()
+        );
         assert!(r.lookup_entity_id_typed("com0", Type::Component).is_some());
         assert!(r.lookup_entity_id_typed("com0", Type::Interface).is_none());
     }
