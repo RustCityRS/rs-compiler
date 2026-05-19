@@ -115,4 +115,4 @@ runec::lint(
 
 ## License
 
-This project is not licensed for redistribution.
+This project is licensed under the [MIT License](LICENSE).
