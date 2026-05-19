@@ -22,20 +22,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            archive: tar.gz
             asset: runec-linux-x86_64.tar.gz
             use-cross: false
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            archive: tar.gz
             asset: runec-linux-aarch64.tar.gz
             use-cross: true
+          # macOS
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            asset: runec-macos-x86_64.tar.gz
+            use-cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            asset: runec-macos-aarch64.tar.gz
+            use-cross: false
+          # Windows
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            archive: zip
             asset: runec-windows-x86_64.zip
+            use-cross: false
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            asset: runec-windows-aarch64.zip
             use-cross: false
     steps:
       - uses: actions/checkout@v4
