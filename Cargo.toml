@@ -1,11 +1,18 @@
 [package]
-name = "runec"
+name = "rs-runec"
 version = "0.0.8"
 edition = "2024"
 rust-version = "1.95.0"
-authors = ["Tyler Telis <xlitersps@gmail.com>"]
-description = "A compiler for RuneScript, the scripting language used by RuneScape"
+authors = ["Tyler Telis <xlitersps@gmail.com>", "RustCityRS <https://github.com/RustCityRS>"]
+description = "A RuneScript 2 Compiler and Linter Built Entirely in Rust"
 license = "MIT"
+repository = "https://github.com/RustCityRS/rs-compiler"
+homepage = "https://github.com/RustCityRS/rs-compiler"
+readme = "README.md"
+include = ["src/**/*", "LICENSE.md", "README.md"]
+
+[lib]
+name = "runec"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
