@@ -187,179 +187,6 @@ fn run_pipeline(
     {
         use crate::diagnostic_messages as msg;
 
-        let valid_triggers: std::collections::HashSet<&str> = [
-            "proc",
-            "label",
-            "debugproc",
-            "command",
-            "opnpc1",
-            "opnpc2",
-            "opnpc3",
-            "opnpc4",
-            "opnpc5",
-            "opnpct",
-            "opnpcu",
-            "apnpc1",
-            "apnpc2",
-            "apnpc3",
-            "apnpc4",
-            "apnpc5",
-            "apnpct",
-            "apnpcu",
-            "oploc1",
-            "oploc2",
-            "oploc3",
-            "oploc4",
-            "oploc5",
-            "oploct",
-            "oplocu",
-            "aploc1",
-            "aploc2",
-            "aploc3",
-            "aploc4",
-            "aploc5",
-            "aploct",
-            "aplocu",
-            "opobj1",
-            "opobj2",
-            "opobj3",
-            "opobj4",
-            "opobj5",
-            "opobjt",
-            "opobju",
-            "apobj1",
-            "apobj2",
-            "apobj3",
-            "apobj4",
-            "apobj5",
-            "apobjt",
-            "apobju",
-            "opplayer1",
-            "opplayer2",
-            "opplayer3",
-            "opplayer4",
-            "opplayer5",
-            "opplayert",
-            "opplayeru",
-            "applayer1",
-            "applayer2",
-            "applayer3",
-            "applayer4",
-            "applayer5",
-            "applayert",
-            "applayeru",
-            "opheld1",
-            "opheld2",
-            "opheld3",
-            "opheld4",
-            "opheld5",
-            "opheld6",
-            "opheld7",
-            "opheld8",
-            "opheldt",
-            "opheldu",
-            "ai_opnpc1",
-            "ai_opnpc2",
-            "ai_opnpc3",
-            "ai_opnpc4",
-            "ai_opnpc5",
-            "ai_apnpc1",
-            "ai_apnpc2",
-            "ai_apnpc3",
-            "ai_apnpc4",
-            "ai_apnpc5",
-            "ai_oploc1",
-            "ai_oploc2",
-            "ai_oploc3",
-            "ai_oploc4",
-            "ai_oploc5",
-            "ai_aploc1",
-            "ai_aploc2",
-            "ai_aploc3",
-            "ai_aploc4",
-            "ai_aploc5",
-            "ai_opobj1",
-            "ai_opobj2",
-            "ai_opobj3",
-            "ai_opobj4",
-            "ai_opobj5",
-            "ai_apobj1",
-            "ai_apobj2",
-            "ai_apobj3",
-            "ai_apobj4",
-            "ai_apobj5",
-            "ai_opplayer1",
-            "ai_opplayer2",
-            "ai_opplayer3",
-            "ai_opplayer4",
-            "ai_opplayer5",
-            "ai_applayer1",
-            "ai_applayer2",
-            "ai_applayer3",
-            "ai_applayer4",
-            "ai_applayer5",
-            "ai_queue1",
-            "ai_queue2",
-            "ai_queue3",
-            "ai_queue4",
-            "ai_queue5",
-            "ai_queue6",
-            "ai_queue7",
-            "ai_queue8",
-            "ai_queue9",
-            "ai_queue10",
-            "ai_queue11",
-            "ai_queue12",
-            "ai_queue13",
-            "ai_queue14",
-            "ai_queue15",
-            "ai_queue16",
-            "ai_queue17",
-            "ai_queue18",
-            "ai_queue19",
-            "ai_queue20",
-            "ai_timer",
-            "ai_spawn",
-            "ai_despawn",
-            "if_button",
-            "if_button1",
-            "if_button2",
-            "if_button3",
-            "if_button4",
-            "if_button5",
-            "if_buttond",
-            "if_close",
-            "inv_button1",
-            "inv_button2",
-            "inv_button3",
-            "inv_button4",
-            "inv_button5",
-            "inv_buttond",
-            "login",
-            "logout",
-            "switch_window_mode",
-            "timer",
-            "softtimer",
-            "queue",
-            "walktrigger",
-            "mapzone",
-            "mapzoneexit",
-            "zone",
-            "zoneexit",
-            "tutorial",
-            "advancestat",
-            "changestat",
-        ]
-        .iter()
-        .copied()
-        .collect();
-
-        let returns_allowed: std::collections::HashSet<&str> =
-            ["proc", "clientscript", "command", "logout"]
-                .iter()
-                .copied()
-                .collect();
-
         let mut registered_scripts: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
@@ -369,7 +196,7 @@ fn run_pipeline(
                     continue;
                 }
 
-                if !valid_triggers.contains(script.trigger.as_str()) {
+                if !trigger_table::is_valid_trigger(&script.trigger) {
                     diagnostics.warning(
                         path.clone(),
                         script.line,
@@ -391,7 +218,7 @@ fn run_pipeline(
                 }
 
                 if !script.return_types.is_empty()
-                    && !returns_allowed.contains(script.trigger.as_str())
+                    && !trigger_table::allows_returns(&script.trigger)
                 {
                     diagnostics.warning(
                         path.clone(),
@@ -435,10 +262,7 @@ fn run_pipeline(
     info!("Phase 3: Type checking {} files...", all_files.len());
     {
         let mut type_checker = TypeChecker::new(&registry);
-        for (i, (path, file)) in all_files.iter().enumerate() {
-            if (i + 1) % 50 == 0 || i + 1 == all_files.len() {
-                info!("  Type checking: {}/{} files...", i + 1, all_files.len());
-            }
+        for (path, file) in all_files.iter() {
             type_checker.check_file(file, path);
         }
         diagnostics.merge(type_checker.diagnostics);

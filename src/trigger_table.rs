@@ -283,6 +283,32 @@ const fn flat_no_validate(name: &'static str, byte: u8) -> TriggerInfo {
     }
 }
 
+// ── Name-keyed triggers ─────────────────────────────────────────────
+//
+// Triggers dispatched by script name (no byte discriminant). These are
+// valid trigger keywords but don't participate in lookup-key hashing.
+
+const NAME_KEYED_TRIGGERS: &[&str] = &[
+    "proc",
+    "label",
+    "debugproc",
+    "command",
+    "clientscript",
+    "walktrigger",
+    "queue",
+    "timer",
+    "softtimer",
+];
+
+// Rev-647 extensions: valid triggers whose byte discriminants are not
+// yet standardized in the reference implementation.
+const EXTENDED_TRIGGERS: &[&str] = &[
+    "opheld6",
+    "opheld7",
+    "opheld8",
+    "switch_window_mode",
+];
+
 // ── Public lookup API ────────────────────────────────────────────────
 
 fn table() -> &'static HashMap<&'static str, TriggerInfo> {
@@ -308,6 +334,16 @@ pub fn validates_subject(name: &str) -> bool {
 
 pub fn is_button(name: &str) -> bool {
     lookup(name).map(|t| t.is_button).unwrap_or(false)
+}
+
+pub fn is_valid_trigger(name: &str) -> bool {
+    lookup(name).is_some()
+        || NAME_KEYED_TRIGGERS.contains(&name)
+        || EXTENDED_TRIGGERS.contains(&name)
+}
+
+pub fn allows_returns(name: &str) -> bool {
+    matches!(name, "proc" | "clientscript" | "command" | "logout")
 }
 
 #[cfg(test)]
@@ -392,5 +428,67 @@ mod tests {
         assert!(validates_subject("opnpc1"));
         assert!(validates_subject("opheld1"));
         assert!(validates_subject("tutorial"));
+    }
+
+    #[test]
+    fn is_valid_trigger_byte_keyed() {
+        assert!(is_valid_trigger("opnpc1"));
+        assert!(is_valid_trigger("opheld1"));
+        assert!(is_valid_trigger("if_button"));
+        assert!(is_valid_trigger("login"));
+        assert!(is_valid_trigger("ai_queue1"));
+        assert!(is_valid_trigger("ai_despawn"));
+    }
+
+    #[test]
+    fn is_valid_trigger_name_keyed() {
+        assert!(is_valid_trigger("proc"));
+        assert!(is_valid_trigger("label"));
+        assert!(is_valid_trigger("debugproc"));
+        assert!(is_valid_trigger("command"));
+        assert!(is_valid_trigger("clientscript"));
+        assert!(is_valid_trigger("walktrigger"));
+        assert!(is_valid_trigger("queue"));
+        assert!(is_valid_trigger("timer"));
+        assert!(is_valid_trigger("softtimer"));
+    }
+
+    #[test]
+    fn is_valid_trigger_extended() {
+        assert!(is_valid_trigger("opheld6"));
+        assert!(is_valid_trigger("opheld7"));
+        assert!(is_valid_trigger("opheld8"));
+        assert!(is_valid_trigger("switch_window_mode"));
+    }
+
+    #[test]
+    fn is_valid_trigger_unknown_rejected() {
+        assert!(!is_valid_trigger("not_a_real_trigger"));
+        assert!(!is_valid_trigger(""));
+        assert!(!is_valid_trigger("procc"));
+    }
+
+    #[test]
+    fn allows_returns_matches_lib_set() {
+        assert!(allows_returns("proc"));
+        assert!(allows_returns("clientscript"));
+        assert!(allows_returns("command"));
+        assert!(allows_returns("logout"));
+        assert!(!allows_returns("label"));
+        assert!(!allows_returns("debugproc"));
+        assert!(!allows_returns("queue"));
+        assert!(!allows_returns("timer"));
+        assert!(!allows_returns("softtimer"));
+        assert!(!allows_returns("walktrigger"));
+        assert!(!allows_returns("login"));
+        assert!(!allows_returns("opnpc1"));
+    }
+
+    #[test]
+    fn name_keyed_triggers_have_no_byte() {
+        assert_eq!(byte("proc"), None);
+        assert_eq!(byte("label"), None);
+        assert_eq!(byte("command"), None);
+        assert_eq!(byte("walktrigger"), None);
     }
 }
