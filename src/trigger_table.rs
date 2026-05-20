@@ -302,12 +302,7 @@ const NAME_KEYED_TRIGGERS: &[&str] = &[
 
 // Rev-647 extensions: valid triggers whose byte discriminants are not
 // yet standardized in the reference implementation.
-const EXTENDED_TRIGGERS: &[&str] = &[
-    "opheld6",
-    "opheld7",
-    "opheld8",
-    "switch_window_mode",
-];
+const EXTENDED_TRIGGERS: &[&str] = &["opheld6", "opheld7", "opheld8", "switch_window_mode"];
 
 // ── Public lookup API ────────────────────────────────────────────────
 
