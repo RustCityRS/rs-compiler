@@ -16,12 +16,6 @@ pub mod typechecker;
 pub mod types;
 pub mod writer;
 
-use std::collections::HashMap;
-use std::error::Error;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
-use tracing::info;
 use crate::bytecode::CompiledScript;
 use crate::compiler::Compiler;
 use crate::diagnostics::DiagnosticsCollector;
@@ -30,6 +24,12 @@ use crate::parser::{Parser, ScriptFile};
 use crate::symbol::SymbolRegistry;
 use crate::typechecker::TypeChecker;
 use crate::writer::ScriptWriter;
+use std::collections::HashMap;
+use std::error::Error;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use tracing::info;
 
 /// Compile scripts and write output. When `lint` is true, also run lint passes
 /// (unused locals, unreachable code) after code generation.
@@ -191,16 +191,28 @@ fn run_pipeline(
 
     // Phase 4.5: Pointer checking & lints
     info!("Phase 4.5: Pointer checking...");
-    check_pointers(lint, &mut diagnostics, &mut source_cache, &codegen, &compiled_scripts);
+    check_pointers(
+        lint,
+        &mut diagnostics,
+        &mut source_cache,
+        &codegen,
+        &compiled_scripts,
+    );
 
     Ok((compiled_scripts, diagnostics))
 }
 
-fn check_pointers(lint: bool, diagnostics: &mut DiagnosticsCollector, source_cache: &mut HashMap<String, Rc<String>>, codegen: &Compiler, compiled_scripts: &Vec<CompiledScript>) {
+fn check_pointers(
+    lint: bool,
+    diagnostics: &mut DiagnosticsCollector,
+    source_cache: &mut HashMap<String, Rc<String>>,
+    codegen: &Compiler,
+    compiled_scripts: &[CompiledScript],
+) {
     {
         use crate::pointer_checker::PointerChecker;
-        let mut checker = PointerChecker::new(&compiled_scripts, &codegen.registry);
-        checker.set_source_cache(&source_cache);
+        let mut checker = PointerChecker::new(compiled_scripts, &codegen.registry);
+        checker.set_source_cache(source_cache);
         let pointer_diags = checker.run();
         let ptr_warnings = pointer_diags.warning_count();
         if ptr_warnings > 0 {
@@ -212,7 +224,7 @@ fn check_pointers(lint: bool, diagnostics: &mut DiagnosticsCollector, source_cac
     // Phase 4.6: Lint passes (optional)
     if lint {
         info!("Phase 4.6: Lint checks...");
-        let lint_diags = lints::run_lints(&compiled_scripts, Some(&source_cache));
+        let lint_diags = lints::run_lints(compiled_scripts, Some(source_cache));
         let lint_warnings = lint_diags.warning_count();
         if lint_warnings > 0 {
             info!("  Lints: {} warning(s)", lint_warnings);
@@ -221,7 +233,10 @@ fn check_pointers(lint: bool, diagnostics: &mut DiagnosticsCollector, source_cac
     }
 }
 
-fn codegen(all_files: &mut Vec<(PathBuf, ScriptFile)>, registry: SymbolRegistry) -> (Compiler, Vec<CompiledScript>) {
+fn codegen(
+    all_files: &mut [(PathBuf, ScriptFile)],
+    registry: SymbolRegistry,
+) -> (Compiler, Vec<CompiledScript>) {
     let mut codegen = Compiler::new(registry);
     let mut compiled_scripts = Vec::new();
     for (path, file) in all_files {
@@ -243,15 +258,24 @@ fn codegen(all_files: &mut Vec<(PathBuf, ScriptFile)>, registry: SymbolRegistry)
     (codegen, compiled_scripts)
 }
 
-fn run_type_checker(diagnostics: &mut DiagnosticsCollector, all_files: &mut Vec<(PathBuf, ScriptFile)>, registry: &SymbolRegistry) {
-    let mut type_checker = TypeChecker::new(&registry);
+fn run_type_checker(
+    diagnostics: &mut DiagnosticsCollector,
+    all_files: &mut [(PathBuf, ScriptFile)],
+    registry: &SymbolRegistry,
+) {
+    let mut type_checker = TypeChecker::new(registry);
     for (path, file) in all_files.iter() {
         type_checker.check_file(file, path);
     }
     diagnostics.merge(type_checker.diagnostics);
 }
 
-fn register_scripts(scripts_dir: &Path, pack_dir: Option<&Path>, diagnostics: &mut DiagnosticsCollector, all_files: &mut Vec<(PathBuf, ScriptFile)>) -> SymbolRegistry {
+fn register_scripts(
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+    diagnostics: &mut DiagnosticsCollector,
+    all_files: &mut Vec<(PathBuf, ScriptFile)>,
+) -> SymbolRegistry {
     let mut registry = SymbolRegistry::new();
 
     let resolved_pack_dir = pack_dir
