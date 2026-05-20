@@ -16,9 +16,38 @@ pub mod typechecker;
 pub mod types;
 pub mod writer;
 
+use std::collections::HashMap;
 use std::error::Error;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use tracing::info;
+use crate::bytecode::CompiledScript;
+use crate::compiler::Compiler;
+use crate::diagnostics::DiagnosticsCollector;
+use crate::lexer::Lexer;
+use crate::parser::{Parser, ScriptFile};
+use crate::symbol::SymbolRegistry;
+use crate::typechecker::TypeChecker;
+use crate::writer::ScriptWriter;
+
+/// Compile scripts and write output. When `lint` is true, also run lint passes
+/// (unused locals, unreachable code) after code generation.
+pub fn compile_memory(
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+    lint: bool,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
+    let (compiled_scripts, diagnostics) = run_pipeline(scripts_dir, pack_dir, lint)?;
+
+    info!("Phase 5: Writing output to memory...");
+    let writer = ScriptWriter::new("".into());
+
+    diagnostics.print_all();
+    info!("Compilation complete!");
+
+    Ok(writer.build_all(&compiled_scripts)?)
+}
 
 /// Compile scripts and write output. When `lint` is true, also run lint passes
 /// (unused locals, unreachable code) after code generation.
@@ -28,30 +57,38 @@ pub fn compile(
     output_dir: &Path,
     lint: bool,
 ) -> Result<(), Box<dyn Error>> {
-    run_pipeline(scripts_dir, pack_dir, Some(output_dir), lint)
+    let (compiled_scripts, diagnostics) = run_pipeline(scripts_dir, pack_dir, lint)?;
+
+    let output = output_dir.display().to_string();
+    info!("Phase 5: Writing output to {}...", output);
+    let writer = ScriptWriter::new(output);
+    writer.write_all(&compiled_scripts)?;
+
+    diagnostics.print_all();
+    info!("Compilation complete!");
+
+    Ok(())
 }
 
 /// Run all analysis passes (parse, type-check, codegen, pointer-check, lints)
 /// without writing output. Useful for editor tooling and CI lint gates.
 pub fn lint(scripts_dir: &Path, pack_dir: Option<&Path>) -> Result<(), Box<dyn Error>> {
-    run_pipeline(scripts_dir, pack_dir, None, true)
+    let (_, diagnostics) = run_pipeline(scripts_dir, pack_dir, true)?;
+
+    diagnostics.print_all();
+    info!("Compilation complete!");
+
+    Ok(())
 }
 
+/// Runs the full compilation pipeline (parse, register, type-check, codegen,
+/// pointer-check, and optional lint passes), returning the compiled scripts
+/// and accumulated diagnostics for the caller to handle output.
 fn run_pipeline(
     scripts_dir: &Path,
     pack_dir: Option<&Path>,
-    output_dir: Option<&Path>,
     lint: bool,
-) -> Result<(), Box<dyn Error>> {
-    use crate::compiler::Compiler;
-    use crate::diagnostics::DiagnosticsCollector;
-    use crate::lexer::Lexer;
-    use crate::parser::Parser;
-    use crate::symbol::SymbolRegistry;
-    use crate::typechecker::TypeChecker;
-    use crate::writer::ScriptWriter;
-    use std::fs;
-
+) -> Result<(Vec<CompiledScript>, DiagnosticsCollector), Box<dyn Error>> {
     if !scripts_dir.exists() || !scripts_dir.is_dir() {
         return Err(Box::new(error::CompilerError::FileNotFound(
             scripts_dir.display().to_string(),
@@ -68,8 +105,7 @@ fn run_pipeline(
     // Phase 1: Parse all files
     info!("Phase 1: Parsing...");
     let mut all_files = Vec::new();
-    let mut source_cache: std::collections::HashMap<String, std::rc::Rc<String>> =
-        std::collections::HashMap::new();
+    let mut source_cache: HashMap<String, Rc<String>> = HashMap::new();
     for path in &rs2_files {
         let source_code = fs::read_to_string(path)?;
         let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -78,7 +114,7 @@ fn run_pipeline(
             key = key[4..].to_string();
         }
         key = key.replace("\\Content\\", "\\content\\");
-        source_cache.insert(key, std::rc::Rc::new(source_code.clone()));
+        source_cache.insert(key, Rc::new(source_code.clone()));
 
         let tokens = match Lexer::new(&source_code, path).tokenize() {
             Ok(t) => t,
@@ -117,6 +153,105 @@ fn run_pipeline(
 
     // Phase 2: Register all scripts
     info!("Phase 2: Registering scripts...");
+    let registry = register_scripts(scripts_dir, pack_dir, &mut diagnostics, &mut all_files);
+    info!("  Registered {} scripts", registry.scripts.len());
+
+    for (path, file) in &all_files {
+        for script in &file.scripts {
+            if let Some(msg) =
+                Compiler::validate_trigger_subject(&script.trigger, &script.name, &registry)
+            {
+                diagnostics.warning(
+                    path.clone(),
+                    script.line,
+                    0,
+                    msg,
+                    crate::diagnostics::Phase::SymbolRegistration,
+                );
+            }
+        }
+    }
+
+    // Phase 3: Type checking
+    info!("Phase 3: Type checking {} files...", all_files.len());
+    run_type_checker(&mut diagnostics, &mut all_files, &registry);
+
+    if diagnostics.has_errors() {
+        diagnostics.print_all();
+        return Err(Box::new(error::CompilerError::TypeError(
+            "Type checking failed".to_string(),
+        )));
+    }
+
+    // Phase 4: Code generation
+    info!("Phase 4: Code generation...");
+    let (codegen, mut compiled_scripts) = codegen(&mut all_files, registry);
+    info!("  Generated {} compiled scripts", compiled_scripts.len());
+    compiled_scripts.sort_by_key(|s| s.id);
+
+    // Phase 4.5: Pointer checking & lints
+    info!("Phase 4.5: Pointer checking...");
+    check_pointers(lint, &mut diagnostics, &mut source_cache, &codegen, &compiled_scripts);
+
+    Ok((compiled_scripts, diagnostics))
+}
+
+fn check_pointers(lint: bool, diagnostics: &mut DiagnosticsCollector, source_cache: &mut HashMap<String, Rc<String>>, codegen: &Compiler, compiled_scripts: &Vec<CompiledScript>) {
+    {
+        use crate::pointer_checker::PointerChecker;
+        let mut checker = PointerChecker::new(&compiled_scripts, &codegen.registry);
+        checker.set_source_cache(&source_cache);
+        let pointer_diags = checker.run();
+        let ptr_warnings = pointer_diags.warning_count();
+        if ptr_warnings > 0 {
+            info!("  Pointer check: {} warning(s)", ptr_warnings);
+        }
+        diagnostics.merge(pointer_diags);
+    }
+
+    // Phase 4.6: Lint passes (optional)
+    if lint {
+        info!("Phase 4.6: Lint checks...");
+        let lint_diags = lints::run_lints(&compiled_scripts, Some(&source_cache));
+        let lint_warnings = lint_diags.warning_count();
+        if lint_warnings > 0 {
+            info!("  Lints: {} warning(s)", lint_warnings);
+        }
+        diagnostics.merge(lint_diags);
+    }
+}
+
+fn codegen(all_files: &mut Vec<(PathBuf, ScriptFile)>, registry: SymbolRegistry) -> (Compiler, Vec<CompiledScript>) {
+    let mut codegen = Compiler::new(registry);
+    let mut compiled_scripts = Vec::new();
+    for (path, file) in all_files {
+        for script in &file.scripts {
+            if script.trigger == "command" {
+                continue;
+            }
+            let mut compiled = codegen.compile_script(script);
+            let canonical = fs::canonicalize(path.clone()).unwrap_or_else(|_| path.to_path_buf());
+            let mut source_path = canonical.to_string_lossy().into_owned();
+            if source_path.starts_with("\\\\?\\") {
+                source_path = source_path[4..].to_string();
+            }
+            source_path = source_path.replace("\\Content\\", "\\content\\");
+            compiled.source_path = source_path;
+            compiled_scripts.push(compiled);
+        }
+    }
+    (codegen, compiled_scripts)
+}
+
+fn run_type_checker(diagnostics: &mut DiagnosticsCollector, all_files: &mut Vec<(PathBuf, ScriptFile)>, registry: &SymbolRegistry) {
+    let mut type_checker = TypeChecker::new(&registry);
+    for (path, file) in all_files.iter() {
+        type_checker.check_file(file, path);
+    }
+    diagnostics.merge(type_checker.diagnostics);
+}
+
+fn register_scripts(scripts_dir: &Path, pack_dir: Option<&Path>, diagnostics: &mut DiagnosticsCollector, all_files: &mut Vec<(PathBuf, ScriptFile)>) -> SymbolRegistry {
     let mut registry = SymbolRegistry::new();
 
     let resolved_pack_dir = pack_dir
@@ -150,6 +285,7 @@ fn run_pipeline(
     }
 
     symloader::load_constant_files(&mut registry, scripts_dir);
+
     info!(
         "  Loaded {} constants from .constant files",
         registry.constants.len()
@@ -169,6 +305,7 @@ fn run_pipeline(
     }
 
     let engine_rs2 = scripts_dir.join("engine.rs2");
+
     if engine_rs2.exists() {
         crate::symloader::load_engine_command_params(&mut registry, &engine_rs2);
     } else {
@@ -182,6 +319,7 @@ fn run_pipeline(
             }
         }
     }
+
     crate::symloader::patch_command_return_types(&mut registry);
 
     {
@@ -190,7 +328,7 @@ fn run_pipeline(
         let mut registered_scripts: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
-        for (path, file) in &all_files {
+        for (path, file) in all_files {
             for script in &file.scripts {
                 if script.trigger == "command" {
                     continue;
@@ -240,102 +378,7 @@ fn run_pipeline(
             }
         }
     }
-    info!("  Registered {} scripts", registry.scripts.len());
-
-    for (path, file) in &all_files {
-        for script in &file.scripts {
-            if let Some(msg) =
-                Compiler::validate_trigger_subject(&script.trigger, &script.name, &registry)
-            {
-                diagnostics.warning(
-                    path.clone(),
-                    script.line,
-                    0,
-                    msg,
-                    crate::diagnostics::Phase::SymbolRegistration,
-                );
-            }
-        }
-    }
-
-    // Phase 3: Type checking
-    info!("Phase 3: Type checking {} files...", all_files.len());
-    {
-        let mut type_checker = TypeChecker::new(&registry);
-        for (path, file) in all_files.iter() {
-            type_checker.check_file(file, path);
-        }
-        diagnostics.merge(type_checker.diagnostics);
-    }
-
-    if diagnostics.has_errors() {
-        diagnostics.print_all();
-        return Err(Box::new(error::CompilerError::TypeError(
-            "Type checking failed".to_string(),
-        )));
-    }
-
-    // Phase 4: Code generation
-    info!("Phase 4: Code generation...");
-    let mut codegen = Compiler::new(registry);
-    let mut compiled_scripts = Vec::new();
-    for (path, file) in &all_files {
-        for script in &file.scripts {
-            if script.trigger == "command" {
-                continue;
-            }
-            let mut compiled = codegen.compile_script(script);
-            let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-            let mut source_path = canonical.to_string_lossy().into_owned();
-            if source_path.starts_with("\\\\?\\") {
-                source_path = source_path[4..].to_string();
-            }
-            source_path = source_path.replace("\\Content\\", "\\content\\");
-            compiled.source_path = source_path;
-            compiled_scripts.push(compiled);
-        }
-    }
-    info!("  Generated {} compiled scripts", compiled_scripts.len());
-
-    compiled_scripts.sort_by_key(|s| s.id);
-
-    // Phase 4.5: Pointer checking
-    info!("Phase 4.5: Pointer checking...");
-    {
-        use crate::pointer_checker::PointerChecker;
-        let mut checker = PointerChecker::new(&compiled_scripts, &codegen.registry);
-        checker.set_source_cache(&source_cache);
-        let pointer_diags = checker.run();
-        let ptr_warnings = pointer_diags.warning_count();
-        if ptr_warnings > 0 {
-            info!("  Pointer check: {} warning(s)", ptr_warnings);
-        }
-        diagnostics.merge(pointer_diags);
-    }
-
-    // Phase 4.6: Lint passes (optional)
-    if lint {
-        info!("Phase 4.6: Lint checks...");
-        let lint_diags = lints::run_lints(&compiled_scripts, Some(&source_cache));
-        let lint_warnings = lint_diags.warning_count();
-        if lint_warnings > 0 {
-            info!("  Lints: {} warning(s)", lint_warnings);
-        }
-        diagnostics.merge(lint_diags);
-    }
-
-    // Phase 5: Write output (skipped for lint-only runs)
-    if let Some(out_dir) = output_dir {
-        let output = out_dir.display().to_string();
-        info!("Phase 5: Writing output to {}...", output);
-        let writer = ScriptWriter::new(output);
-        writer.write_all(&compiled_scripts)?;
-    }
-
-    diagnostics.print_all();
-    info!("Compilation complete!");
-
-    Ok(())
+    registry
 }
 
 fn collect_files(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) -> Result<(), Box<dyn Error>> {
