@@ -93,7 +93,22 @@ cargo run -- lint -s data/src/scripts
 
 ## Library Usage
 
-The compiler is also available as a library crate:
+The compiler is also available as a library crate on [crates.io](https://crates.io/crates/rs-runec).
+
+### Installation
+
+```bash
+cargo add rs-runec
+```
+
+Or add it to your `Cargo.toml` manually:
+
+```toml
+[dependencies]
+rs-runec = "0.0.8"
+```
+
+### Example
 
 ```rust
 use std::path::Path;
