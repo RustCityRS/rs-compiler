@@ -511,6 +511,70 @@ impl ScriptWriter {
 
         Ok(())
     }
+
+    pub fn build_all(&self, scripts: &[CompiledScript]) -> io::Result<(Vec<u8>, Vec<u8>)> {
+        // Max id determines the sparse slot count. Scripts with id < 0
+        // are stray (unresolved) and would collide at slot 0 — drop them
+        // explicitly rather than let them mask a valid id.
+        let max_id = scripts.iter().map(|s| s.id).max().unwrap_or(-1);
+        let slot_count = if max_id < 0 { 0 } else { (max_id + 1) as usize };
+
+        // Index scripts by id. Later writes at the same id overwrite
+        // earlier ones (matches Java compiler's last-wins behaviour when
+        // two declarations share an id — typically a compile-time bug,
+        // but we preserve the shape).
+        let mut by_id: Vec<Option<&CompiledScript>> = vec![None; slot_count];
+        for s in scripts {
+            if s.id >= 0 && (s.id as usize) < slot_count {
+                by_id[s.id as usize] = Some(s);
+            }
+        }
+
+        // Encode each occupied slot once. Empty slots emit zero bytes.
+        let encoded: Vec<Vec<u8>> = by_id
+            .iter()
+            .map(|opt| opt.map(encode_script).unwrap_or_default())
+            .collect();
+
+        let mut dat: Vec<u8> = Vec::new();
+        dat.extend_from_slice(&(slot_count as u32).to_be_bytes());
+        dat.extend_from_slice(&COMPILER_VERSION.to_be_bytes());
+        for bytes in &encoded {
+            dat.extend_from_slice(bytes);
+        }
+
+        let mut idx: Vec<u8> = Vec::new();
+        idx.extend_from_slice(&(slot_count as u32).to_be_bytes());
+        for bytes in &encoded {
+            idx.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        }
+
+        // // Build script.dat
+        // let dat_path = Path::new(&self.output_dir).join("script.dat");
+        // {
+        //     let mut dat: Vec<u8> = Vec::new();
+        //     // Header: count (u32) + version (i32)
+        //     dat.extend_from_slice(&(slot_count as u32).to_be_bytes());
+        //     dat.extend_from_slice(&COMPILER_VERSION.to_be_bytes());
+        //     for bytes in &encoded {
+        //         dat.extend_from_slice(bytes);
+        //     }
+        //     fs::write(&dat_path, dat)?;
+        // }
+        //
+        // // Build script.idx
+        // let idx_path = Path::new(&self.output_dir).join("script.idx");
+        // {
+        //     let mut idx: Vec<u8> = Vec::new();
+        //     idx.extend_from_slice(&(slot_count as u32).to_be_bytes());
+        //     for bytes in &encoded {
+        //         idx.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        //     }
+        //     fs::write(&idx_path, idx)?;
+        // }
+
+        Ok((dat, idx))
+    }
 }
 
 // ── PackBuffer (in-memory, for testing) ────────────────────────────────────
