@@ -139,16 +139,13 @@ fn check_unused_locals(
         } = entry;
         let is_param = *is_param;
         let is_array = *is_array;
+        let suppress = name.starts_with('_');
         let var_name = format!("${}", name);
-
-        if name.starts_with('_') {
-            continue;
-        }
 
         if is_array {
             let slot = array_slot_counter;
             array_slot_counter += 1;
-            if array_touched.contains(&slot) {
+            if suppress || array_touched.contains(&slot) {
                 continue;
             }
             let line = array_first_def_line
@@ -175,7 +172,7 @@ fn check_unused_locals(
             BaseVarType::Integer => {
                 let slot = int_slot_counter;
                 int_slot_counter += 1;
-                if int_reads.contains(&slot) {
+                if suppress || int_reads.contains(&slot) {
                     continue;
                 }
                 let line = int_first_write_line
@@ -195,7 +192,7 @@ fn check_unused_locals(
             BaseVarType::String => {
                 let slot = string_slot_counter;
                 string_slot_counter += 1;
-                if string_reads.contains(&slot) {
+                if suppress || string_reads.contains(&slot) {
                     continue;
                 }
                 let line = string_first_write_line
@@ -215,7 +212,7 @@ fn check_unused_locals(
             BaseVarType::Long => {
                 let slot = long_slot_counter;
                 long_slot_counter += 1;
-                if long_reads.contains(&slot) {
+                if suppress || long_reads.contains(&slot) {
                     continue;
                 }
                 let line = long_first_write_line
