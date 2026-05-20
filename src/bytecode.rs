@@ -275,6 +275,3 @@ impl CompiledScript {
         self.instructions[index].operand = Operand::JumpTarget(target);
     }
 }
-
-// Keep backward-compatible aliases for the transition
-pub type ByteCode = CompiledScript;

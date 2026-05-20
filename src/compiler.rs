@@ -86,6 +86,24 @@ impl Compiler {
         ));
     }
 
+    fn emit_comparison_value(
+        branch_opcode: Opcode,
+        fallthrough_value: i32,
+        branch_value: i32,
+        out: &mut CompiledScript,
+    ) {
+        let branch_pos = out.len();
+        out.push(Instruction::new(branch_opcode, Operand::JumpTarget(0)));
+        out.push(Instruction::push_int(fallthrough_value));
+        let jump_pos = out.len();
+        out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
+        let branch_target = out.len();
+        out.push(Instruction::push_int(branch_value));
+        let end_pos = out.len();
+        out.patch_jump(branch_pos, branch_target);
+        out.patch_jump(jump_pos, end_pos);
+    }
+
     fn compile_statement(
         &mut self,
         stmt: &Statement,
@@ -1237,85 +1255,28 @@ impl Compiler {
                     BinOp::Mod => Opcode::Modulo,
                     BinOp::BitAnd => Opcode::And,
                     BinOp::BitOr => Opcode::Or,
-                    // Comparison ops used in expression context (not condition)
-                    // need to produce a boolean value on the stack
                     BinOp::Eq => {
-                        // a == b: branch_equals to push 1, else push 0
-                        let branch_pos = out.len();
-                        out.push(Instruction::branch_equals(0));
-                        out.push(Instruction::push_int(0));
-                        let jump_pos = out.len();
-                        out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
-                        let true_pos = out.len();
-                        out.push(Instruction::push_int(1));
-                        let end_pos = out.len();
-                        out.patch_jump(branch_pos, true_pos);
-                        out.patch_jump(jump_pos, end_pos);
+                        Self::emit_comparison_value(Opcode::BranchEquals, 0, 1, out);
                         return;
                     }
                     BinOp::NotEq => {
-                        let branch_pos = out.len();
-                        out.push(Instruction::branch_equals(0));
-                        out.push(Instruction::push_int(1));
-                        let jump_pos = out.len();
-                        out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
-                        let false_pos = out.len();
-                        out.push(Instruction::push_int(0));
-                        let end_pos = out.len();
-                        out.patch_jump(branch_pos, false_pos);
-                        out.patch_jump(jump_pos, end_pos);
+                        Self::emit_comparison_value(Opcode::BranchEquals, 1, 0, out);
                         return;
                     }
                     BinOp::Lt => {
-                        let branch_pos = out.len();
-                        out.push(Instruction::branch_less_than(0));
-                        out.push(Instruction::push_int(0));
-                        let jump_pos = out.len();
-                        out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
-                        let true_pos = out.len();
-                        out.push(Instruction::push_int(1));
-                        let end_pos = out.len();
-                        out.patch_jump(branch_pos, true_pos);
-                        out.patch_jump(jump_pos, end_pos);
+                        Self::emit_comparison_value(Opcode::BranchLessThan, 0, 1, out);
                         return;
                     }
                     BinOp::Gt => {
-                        let branch_pos = out.len();
-                        out.push(Instruction::branch_greater_than(0));
-                        out.push(Instruction::push_int(0));
-                        let jump_pos = out.len();
-                        out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
-                        let true_pos = out.len();
-                        out.push(Instruction::push_int(1));
-                        let end_pos = out.len();
-                        out.patch_jump(branch_pos, true_pos);
-                        out.patch_jump(jump_pos, end_pos);
+                        Self::emit_comparison_value(Opcode::BranchGreaterThan, 0, 1, out);
                         return;
                     }
                     BinOp::LtEq => {
-                        let branch_pos = out.len();
-                        out.push(Instruction::branch_less_than_or_equals(0));
-                        out.push(Instruction::push_int(0));
-                        let jump_pos = out.len();
-                        out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
-                        let true_pos = out.len();
-                        out.push(Instruction::push_int(1));
-                        let end_pos = out.len();
-                        out.patch_jump(branch_pos, true_pos);
-                        out.patch_jump(jump_pos, end_pos);
+                        Self::emit_comparison_value(Opcode::BranchLessThanOrEquals, 0, 1, out);
                         return;
                     }
                     BinOp::GtEq => {
-                        let branch_pos = out.len();
-                        out.push(Instruction::branch_greater_than_or_equals(0));
-                        out.push(Instruction::push_int(0));
-                        let jump_pos = out.len();
-                        out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
-                        let true_pos = out.len();
-                        out.push(Instruction::push_int(1));
-                        let end_pos = out.len();
-                        out.patch_jump(branch_pos, true_pos);
-                        out.patch_jump(jump_pos, end_pos);
+                        Self::emit_comparison_value(Opcode::BranchGreaterThanOrEquals, 0, 1, out);
                         return;
                     }
                 };
