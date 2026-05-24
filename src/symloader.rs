@@ -350,6 +350,51 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) {
 
     // Load pre-assigned script IDs LAST so they are available before script registration.
     load_script_pack(registry, &pack_dir.join("script.pack"));
+
+    // Load clientscript.pack: CS2 scripts the server references by name via
+    // runclientscript(). They are never compiled as RS2, so register them
+    // directly into the resolution maps. Safe no-op if file doesn't exist.
+    load_clientscript_pack(registry, &pack_dir.join("clientscript.pack"));
+}
+
+/// Load clientscript.pack: `id=[clientscript,name]` — registers CS2 script IDs
+/// directly so server-side RS2 can reference them by name
+/// (e.g. `runclientscript(playerdesign4_open_name_entry)` resolves to 3943).
+fn load_clientscript_pack(registry: &mut SymbolRegistry, path: &Path) {
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (id_str, rest) = match line.split_once('=') {
+            Some(pair) => pair,
+            None => continue,
+        };
+        let id: i32 = match id_str.parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let rest = rest.trim();
+        if !rest.starts_with('[') || !rest.ends_with(']') {
+            continue;
+        }
+        let inner = &rest[1..rest.len() - 1];
+        let (_trigger, name) = match inner.split_once(',') {
+            Some(pair) => pair,
+            None => continue,
+        };
+        if name.is_empty() {
+            continue;
+        }
+        registry.script_ids.insert(name.to_string(), id);
+        registry
+            .trigger_script_ids
+            .insert(format!("clientscript:{}", name), id);
+    }
 }
 
 /// Load a game var pack file: `id=name`
