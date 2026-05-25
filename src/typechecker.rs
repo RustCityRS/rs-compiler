@@ -924,12 +924,16 @@ impl<'a> TypeChecker<'a> {
                     .collect();
 
                 let is_variadic = lookup_name.ends_with('*');
-                let cmd_sym = self.registry.lookup_command(lookup_name).cloned().or_else(|| {
-                    lookup_name.strip_suffix('*').and_then(|base| {
-                        let vararg_name = format!("{}vararg", base);
-                        self.registry.lookup_command(&vararg_name).cloned()
-                    })
-                });
+                let cmd_sym = self
+                    .registry
+                    .lookup_command(lookup_name)
+                    .cloned()
+                    .or_else(|| {
+                        lookup_name.strip_suffix('*').and_then(|base| {
+                            let vararg_name = format!("{}vararg", base);
+                            self.registry.lookup_command(&vararg_name).cloned()
+                        })
+                    });
                 if let Some(sym) = cmd_sym {
                     if let SymbolKind::Command {
                         param_types: cmd_params,
