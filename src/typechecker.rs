@@ -923,21 +923,30 @@ impl<'a> TypeChecker<'a> {
                     })
                     .collect();
 
-                if let Some(sym) = self.registry.lookup_command(lookup_name).cloned() {
+                let is_variadic = lookup_name.ends_with('*');
+                let cmd_sym = self.registry.lookup_command(lookup_name).cloned().or_else(|| {
+                    lookup_name.strip_suffix('*').and_then(|base| {
+                        let vararg_name = format!("{}vararg", base);
+                        self.registry.lookup_command(&vararg_name).cloned()
+                    })
+                });
+                if let Some(sym) = cmd_sym {
                     if let SymbolKind::Command {
                         param_types: cmd_params,
                         return_types,
                         ..
                     } = &sym.kind
                     {
-                        self.check_call_arguments(
-                            name,
-                            cmd_params,
-                            &arg_types,
-                            args,
-                            *call_line,
-                            CallKind::Command,
-                        );
+                        if !is_variadic {
+                            self.check_call_arguments(
+                                name,
+                                cmd_params,
+                                &arg_types,
+                                args,
+                                *call_line,
+                                CallKind::Command,
+                            );
+                        }
                         return return_types.first().copied();
                     }
                 } else {
