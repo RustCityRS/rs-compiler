@@ -1,6 +1,6 @@
 [package]
 name = "rs-runec"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.95.0"
 authors = ["Tyler Telis <xlitersps@gmail.com>", "RustCityRS <https://github.com/RustCityRS>"]
