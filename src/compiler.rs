@@ -1406,7 +1406,19 @@ impl Compiler {
                 }
 
                 // Look up command opcode and emit.
-                if let Some(sym) = self.registry.lookup_command(lookup_name).cloned() {
+                // For variadic variants (name*), also check the "namevararg" form
+                // used in command.pack.
+                let cmd_sym = self
+                    .registry
+                    .lookup_command(lookup_name)
+                    .or_else(|| {
+                        lookup_name.strip_suffix('*').and_then(|base| {
+                            let vararg_name = format!("{}vararg", base);
+                            self.registry.lookup_command(&vararg_name)
+                        })
+                    })
+                    .cloned();
+                if let Some(sym) = cmd_sym {
                     if let SymbolKind::Command { opcode, .. } = &sym.kind {
                         let encoded = (*opcode) | ((cmd_index as i32) << 16);
                         out.push(Instruction::new(Opcode::Command, Operand::Int(encoded)));
@@ -1635,6 +1647,8 @@ impl Compiler {
             "longqueue*" => Some(3),
             // settimer/softtimer are always variadic (no separate * variant)
             "settimer" | "softtimer" => Some(2),
+            // runclientscript* has 1 fixed arg (script_id) + variadic params
+            "runclientscript*" => Some(1),
             _ => None,
         }
     }
