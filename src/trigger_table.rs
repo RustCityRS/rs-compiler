@@ -170,6 +170,12 @@ const TRIGGERS: &[TriggerInfo] = &[
     obj("opheld5", 144),
     obj("opheldu", 145),
     obj("opheldt", 146),
+    // Rev-647 extensions: ops 6-10 for inventory items (Drop=op8, etc.)
+    obj("opheld6", 168),
+    obj("opheld7", 169),
+    obj("opheld8", 170),
+    obj("opheld9", 171),
+    obj("opheld10", 172),
     // ── Interface / button triggers ──────────────────────────────────
     iface("if_button", 147, true),
     iface("if_close", 148, false),
@@ -302,7 +308,7 @@ const NAME_KEYED_TRIGGERS: &[&str] = &[
 
 // Rev-647 extensions: valid triggers whose byte discriminants are not
 // yet standardized in the reference implementation.
-const EXTENDED_TRIGGERS: &[&str] = &["opheld6", "opheld7", "opheld8", "switch_window_mode"];
+const EXTENDED_TRIGGERS: &[&str] = &["switch_window_mode"];
 
 // ── Public lookup API ────────────────────────────────────────────────
 
