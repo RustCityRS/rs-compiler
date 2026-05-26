@@ -375,7 +375,7 @@ pub fn trigger_pointers(trigger: &str) -> PointerSet {
         }
 
         // Interface button trigger
-        "if_button" => &[ActivePlayer, LastCom],
+        "if_button" => &[ActivePlayer, LastCom, LastSlot, LastItem],
 
         // Interface close trigger
         "if_close" => &[ActivePlayer],
