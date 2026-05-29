@@ -286,10 +286,11 @@ impl<'a> Lexer<'a> {
             | "apnpc5" | "aploc" | "aploc1" | "aploc2" | "aploc3" | "aploc4" | "aploc5"
             | "apobj" | "apobj1" | "apobj2" | "apobj3" | "apobj4" | "apobj5" | "applayer"
             | "applayer1" | "applayer2" | "applayer3" | "applayer4" | "applayer5" | "if_button"
-            | "if_close" | "login" | "logout" | "inv_button1" | "inv_button2" | "inv_button3"
-            | "inv_button4" | "inv_button5" | "inv_button6" | "inv_button7" | "inv_button8"
-            | "inv_button9" | "inv_button10" | "inv_buttond" | "mapzone" | "maplength"
-            | "mapenter" => Kind::Trigger,
+            | "if_close" | "if_button1" | "if_button2" | "if_button3" | "if_button4"
+            | "if_button5" | "if_button6" | "if_button7" | "if_button8" | "if_button9"
+            | "if_button10" | "if_buttond" | "login" | "logout" | "inv_button1" | "inv_button2"
+            | "inv_button3" | "inv_button4" | "inv_button5" | "inv_buttond" | "mapzone"
+            | "maplength" | "mapenter" => Kind::Trigger,
 
             "if" => Kind::If,
             "else" => Kind::Else,
@@ -380,7 +381,12 @@ impl<'a> Lexer<'a> {
                 }
                 b'#' => {
                     self.advance();
-                    tokens.push(self.token(Kind::Hash, "#".into(), start_line, start_col));
+                    while let Some(c) = self.peek() {
+                        if c == b'\n' {
+                            break;
+                        }
+                        self.advance();
+                    }
                 }
 
                 b'.' => {

@@ -70,6 +70,7 @@ pub const BINOP_TUPLE_TYPE: &str =
 
 // Call expression specific
 pub const COMMAND_REFERENCE_UNRESOLVED: &str = "'%s' cannot be resolved to a command.";
+pub const COMMAND_BARE_REQUIRES_ARGS: &str = "Command '%s' takes arguments but is used here as a bare value, which compiles to its opcode (an integer), not its result. Did you mean to call it, e.g. `%s(...)`?";
 pub const COMMAND_NOARGS_EXPECTED: &str = "'%s' is expected to have no arguments but has '%s'.";
 pub const PROC_REFERENCE_UNRESOLVED: &str = "'~%s' cannot be resolved to a proc.";
 pub const PROC_NOARGS_EXPECTED: &str = "'~%s' is expected to have no arguments but has '%s'.";
@@ -138,6 +139,10 @@ pub const UNRESOLVED_ENTITY_REF: &str = "`%s` does not resolve to a known `%s` â
 // identifier (no spaces or other quote-forcing chars). Prefer the bare
 // form for clarity.
 pub const PREFER_BARE_IDENT: &str = "`\"%s\"` resolves to a `%s` entity; the bare identifier form is preferred when the name has no spaces.";
+
+pub const TEST_PROC_FROM_PRODUCTION: &str = "Cannot call test proc '~%s' from production code. Move the call below #testscript or move the proc above it.";
+pub const TEST_LABEL_FROM_PRODUCTION: &str = "Cannot jump to test label '@%s' from production code. Move the jump below #testscript or move the label above it.";
+pub const TEST_COMMAND_FROM_PRODUCTION: &str = "Cannot use test command '%s' from production code. Test commands are only available below #testscript.";
 
 /// Format a diagnostic message template by replacing `%s` placeholders with arguments.
 pub fn fmt(template: &str, args: &[&str]) -> String {

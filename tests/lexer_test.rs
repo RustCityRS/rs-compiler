@@ -69,7 +69,7 @@ fn eof_is_always_last_token() {
 
 #[test]
 fn all_single_char_delimiters() {
-    let toks = lex("[](){};,:&|!#.~@");
+    let toks = lex("[](){};,:&|!.~@");
     let expected = vec![
         Kind::LBracket,
         Kind::RBracket,
@@ -83,7 +83,6 @@ fn all_single_char_delimiters() {
         Kind::LogicalAnd,
         Kind::LogicalOr,
         Kind::Not,
-        Kind::Hash,
         Kind::Dot,
         Kind::ScriptCall,
         Kind::JumpCall,

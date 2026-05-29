@@ -50,6 +50,12 @@ impl CheckResult {
         self.errors().iter().any(|d| d.message.contains(needle))
     }
 
+    fn has_warning_containing(&self, needle: &str) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Warning && d.message.contains(needle))
+    }
+
     /// Pretty-print all diagnostics — used in assertion messages so a
     /// failing test points straight at what fired.
     fn dump(&self) -> String {
@@ -79,7 +85,11 @@ fn seed_mes(reg: &mut SymbolRegistry) {
 /// typechecker against the parsed file. Returns the typechecker's
 /// diagnostics. Lexer / parser failures fail the test outright — those
 /// have their own integration tests.
-fn check_with_registry(src: &str, mut registry: SymbolRegistry) -> CheckResult {
+fn run_check(
+    src: &str,
+    mut registry: SymbolRegistry,
+    testscript_line: Option<usize>,
+) -> CheckResult {
     let path = PathBuf::from("test.rs2");
     let tokens = Lexer::new(src, &path)
         .tokenize()
@@ -104,14 +114,34 @@ fn check_with_registry(src: &str, mut registry: SymbolRegistry) -> CheckResult {
     }
 
     let mut tc = TypeChecker::new(&registry);
-    tc.check_file(&file, &path);
+    tc.check_file_with_test_boundary(&file, &path, testscript_line);
     CheckResult {
         diagnostics: tc.diagnostics.diagnostics().to_vec(),
     }
 }
 
+/// Check in **production** context (no `#testscript` boundary). The lenient
+/// type rules apply: integer-base named types are mutually interchangeable and
+/// command arg counts are not strictly enforced — matching pre-test-framework
+/// (and engine reference) behaviour.
+fn check_with_registry(src: &str, registry: SymbolRegistry) -> CheckResult {
+    run_check(src, registry, None)
+}
+
 fn check(src: &str) -> CheckResult {
     check_with_registry(src, empty_registry())
+}
+
+/// Check as a **test script** (as if the whole fragment sits below a
+/// `#testscript` boundary). The strict assertion-framework rules apply: exact
+/// named types (no integer-base widening) and strict command arg counts, which
+/// `assert_eq` and friends rely on.
+fn check_test_with_registry(src: &str, registry: SymbolRegistry) -> CheckResult {
+    run_check(src, registry, Some(0))
+}
+
+fn check_test(src: &str) -> CheckResult {
+    check_test_with_registry(src, empty_registry())
 }
 
 // ── Happy path ──────────────────────────────────────────────────────
@@ -251,6 +281,44 @@ fn jump_call_resolves_when_label_exists() {
         res.error_count(),
         0,
         "expected no errors when label target exists, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn jump_to_test_label_from_production_errors() {
+    // A test-section label (below #testscript) jumped to from production code
+    // must be rejected, like test commands.
+    let mut reg = empty_registry();
+    reg.register_script("test_foo".into(), "label".into(), vec![], vec![]);
+    reg.mark_test_script("label", "test_foo");
+    let res = check_with_registry(
+        "[proc,prod]\n\
+         @test_foo;\n",
+        reg,
+    );
+    assert!(
+        res.has_error_containing("test label") || res.has_error_containing("production"),
+        "expected test-label-from-production error, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn jump_to_test_label_from_test_is_ok() {
+    // Calling a test label from another test label is fine — but the harness
+    // treats everything as production (no boundary), so we assert the inverse:
+    // an *unmarked* label jumped to from production does NOT error.
+    let mut reg = empty_registry();
+    reg.register_script("helper".into(), "label".into(), vec![], vec![]);
+    let res = check_with_registry(
+        "[proc,prod]\n\
+         @helper;\n",
+        reg,
+    );
+    assert!(
+        !res.has_error_containing("production"),
+        "non-test label should be callable from production, got:\n{}",
         res.dump()
     );
 }
@@ -456,4 +524,396 @@ fn errors_use_typechecking_phase() {
             err.message
         );
     }
+}
+
+// ── Named-type / int strict type checking ──────────────────────────
+
+#[test]
+fn int_literal_adopts_named_type_hint() {
+    let res = check(
+        "[proc,hint_test]\n\
+         def_stat $s = 5;\n\
+         def_npc_mode $m = 0;\n",
+    );
+    assert_eq!(
+        res.error_count(),
+        0,
+        "literals should adopt hint type, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn namedobj_assignable_to_obj() {
+    let mut reg = empty_registry();
+    reg.register_command("obj_test".into(), 2000, vec![Type::Obj], vec![]);
+    let res = check_with_registry(
+        "[proc,namedobj_ok]\n\
+         def_namedobj $n = 0;\n\
+         obj_test($n);\n",
+        reg,
+    );
+    assert_eq!(
+        res.error_count(),
+        0,
+        "namedobj should be assignable to obj, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn named_type_to_int_errors() {
+    // Strict named-type rules are #testscript-only; check as a test script.
+    let res = check_test(
+        "[proc,cross_type]\n\
+         def_stat $s = 0;\n\
+         def_int $x = $s;\n",
+    );
+    assert!(
+        res.has_error_containing("Type mismatch"),
+        "named type should not narrow to int, got:\n{}",
+        res.dump()
+    );
+}
+
+/// Regression lock: the narrowing that errors under `#testscript` must be
+/// *accepted* in a production script (integer-base interchangeability). This is
+/// what keeps 225/647 content compiling — losing it regressed 177 scripts.
+#[test]
+fn named_type_to_int_lenient_in_production() {
+    let res = check(
+        "[proc,cross_type]\n\
+         def_stat $s = 0;\n\
+         def_int $x = $s;\n",
+    );
+    assert_eq!(
+        res.error_count(),
+        0,
+        "production allows integer-base interchangeability, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn int_widens_to_named_type() {
+    let res = check(
+        "[proc,cross_type]\n\
+         def_int $x = 5;\n\
+         def_stat $s = $x;\n",
+    );
+    assert_eq!(
+        res.error_count(),
+        0,
+        "int should widen to stat, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn npc_mode_to_stat_errors() {
+    let mut reg = empty_registry();
+    reg.register_command("boost_stat".into(), 2001, vec![Type::Stat], vec![]);
+    let res = check_test_with_registry(
+        "[proc,cmd_mismatch]\n\
+         def_npc_mode $m = 0;\n\
+         boost_stat($m);\n",
+        reg,
+    );
+    assert!(
+        res.has_error_containing("Type mismatch"),
+        "expected type mismatch passing npc_mode to stat param, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn int_arg_widens_to_named_command_param() {
+    let mut reg = empty_registry();
+    reg.register_command("boost_stat".into(), 2001, vec![Type::Stat], vec![]);
+    let res = check_with_registry(
+        "[proc,cmd_ok]\n\
+         def_int $x = 5;\n\
+         boost_stat($x);\n",
+        reg,
+    );
+    assert_eq!(
+        res.error_count(),
+        0,
+        "int should widen to stat for command arg, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn command_literal_arg_adopts_named_type() {
+    let mut reg = empty_registry();
+    reg.register_command("boost_stat".into(), 2001, vec![Type::Stat], vec![]);
+    let res = check_with_registry(
+        "[proc,cmd_hint_ok]\n\
+         boost_stat(5);\n",
+        reg,
+    );
+    assert_eq!(
+        res.error_count(),
+        0,
+        "literal arg should adopt stat hint, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn int_arg_widens_to_named_proc_param() {
+    let res = check(
+        "[proc,takes_stat](stat $s)\n\
+         return;\n\
+         [proc,caller]\n\
+         def_int $x = 5;\n\
+         ~takes_stat($x);\n",
+    );
+    assert_eq!(
+        res.error_count(),
+        0,
+        "int should widen to stat for proc arg, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn named_type_to_different_named_proc_param_errors() {
+    let res = check_test(
+        "[proc,takes_stat](stat $s)\n\
+         return;\n\
+         [proc,caller]\n\
+         def_npc_mode $m = 0;\n\
+         ~takes_stat($m);\n",
+    );
+    assert!(
+        res.has_error_containing("Type mismatch"),
+        "expected type mismatch passing npc_mode to stat proc param, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn proc_literal_arg_adopts_named_type() {
+    let res = check(
+        "[proc,takes_stat](stat $s)\n\
+         return;\n\
+         [proc,caller]\n\
+         ~takes_stat(5);\n",
+    );
+    assert_eq!(
+        res.error_count(),
+        0,
+        "literal arg should adopt stat hint for proc param, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn return_int_var_for_named_type_ok() {
+    let res = check(
+        "[proc,ret_stat]()(stat)\n\
+         def_int $x = 5;\n\
+         return($x);\n",
+    );
+    assert_eq!(
+        res.error_count(),
+        0,
+        "int should widen to stat for return value, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn return_wrong_named_type_errors() {
+    let res = check_test(
+        "[proc,ret_stat]()(stat)\n\
+         def_npc_mode $m = 0;\n\
+         return($m);\n",
+    );
+    assert!(
+        res.has_error_containing("Type mismatch"),
+        "expected type mismatch returning npc_mode for stat, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn return_literal_for_stat_proc_ok() {
+    let res = check(
+        "[proc,ret_stat]()(stat)\n\
+         return(0);\n",
+    );
+    assert_eq!(
+        res.error_count(),
+        0,
+        "literal return should adopt stat hint, got:\n{}",
+        res.dump()
+    );
+}
+
+// ── Bare command-as-value lint ──────────────────────────────────────
+
+#[test]
+fn bare_command_requiring_args_warns() {
+    let mut reg = empty_registry();
+    // coordx(coord)(int) — requires a coord argument.
+    reg.register_command("coordx".into(), 1000, vec![Type::Coord], vec![Type::Int]);
+    let res = check_with_registry(
+        "[proc,oops]\n\
+         def_int $x = coordx;\n",
+        reg,
+    );
+    assert!(
+        res.has_warning_containing("used here as a bare value"),
+        "expected bare-command lint warning, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn bare_type_name_command_still_warns() {
+    let mut reg = empty_registry();
+    // `stat` doubles as a type name AND a command stat(stat)(int). A bare
+    // `def_int $x = stat` is still the footgun — the value context check
+    // catches it even though `stat` short-circuits as a type-char elsewhere.
+    reg.register_command("stat".into(), 1500, vec![Type::Stat], vec![Type::Int]);
+    let res = check_with_registry(
+        "[proc,oops]\n\
+         def_int $level = stat;\n",
+        reg,
+    );
+    assert!(
+        res.has_warning_containing("used here as a bare value"),
+        "expected bare-command lint for `stat`, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn proper_command_call_does_not_warn() {
+    let mut reg = empty_registry();
+    reg.register_command("coordx".into(), 1000, vec![Type::Coord], vec![Type::Int]);
+    reg.register_command("coord".into(), 1001, vec![], vec![Type::Coord]);
+    let res = check_with_registry(
+        "[proc,ok]\n\
+         def_coord $c = coord;\n\
+         def_int $x = coordx($c);\n",
+        reg,
+    );
+    assert!(
+        !res.has_warning_containing("used here as a bare value"),
+        "calling coordx with an argument should not warn, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn bare_command_without_args_does_not_warn() {
+    let mut reg = empty_registry();
+    // coord()(coord) — takes no arguments, so bare use is fine.
+    reg.register_command("coord".into(), 1001, vec![], vec![Type::Coord]);
+    let res = check_with_registry(
+        "[proc,ok]\n\
+         def_coord $c = coord;\n",
+        reg,
+    );
+    assert!(
+        !res.has_warning_containing("used here as a bare value"),
+        "no-arg command used bare should not warn, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn bare_void_command_as_opcode_does_not_warn() {
+    let mut reg = empty_registry();
+    // mes(string) and wait_for(int, int) — passing a void command's opcode
+    // (e.g. wait_for(mes, 20)) is a legitimate test-framework pattern.
+    reg.register_command("mes".into(), 2064, vec![Type::String], vec![]);
+    reg.register_command("wait_for".into(), 3000, vec![Type::Int, Type::Int], vec![]);
+    let res = check_with_registry(
+        "[proc,ok]\n\
+         wait_for(mes, 20);\n",
+        reg,
+    );
+    assert!(
+        !res.has_warning_containing("used here as a bare value"),
+        "passing a void command's opcode should not warn, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn bare_command_statement_warns() {
+    let mut reg = empty_registry();
+    // `mes;` as a standalone statement — a bare void command compiles to its
+    // opcode and is discarded. Must be flagged even though mes returns nothing.
+    reg.register_command("mes".into(), 2064, vec![Type::String], vec![]);
+    let res = check_with_registry(
+        "[proc,oops]\n\
+         mes;\n",
+        reg,
+    );
+    assert!(
+        res.has_warning_containing("used here as a bare value"),
+        "bare `mes;` statement should warn, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn bare_command_call_zero_args_errors() {
+    let mut reg = empty_registry();
+    // `mes()` with zero args for mes(string) — arg count mismatch.
+    reg.register_command("mes".into(), 2064, vec![Type::String], vec![]);
+    let res = check_test_with_registry(
+        "[proc,oops]\n\
+         mes();\n",
+        reg,
+    );
+    assert!(
+        res.has_error_containing("arg(s)"),
+        "mes() with zero args should error, got:\n{}",
+        res.dump()
+    );
+}
+
+/// Regression lock: strict command arg-count is `#testscript`-only. The same
+/// `mes()` mismatch must NOT error in a production script — command signatures
+/// can be variadic/partially-known in the symbol set, so enforcing exact arity
+/// false-positived on production content (esp. 225).
+#[test]
+fn command_arg_count_lenient_in_production() {
+    let mut reg = empty_registry();
+    reg.register_command("mes".into(), 2064, vec![Type::String], vec![]);
+    let res = check_with_registry(
+        "[proc,prod_argcount]\n\
+         mes();\n",
+        reg,
+    );
+    assert_eq!(
+        res.error_count(),
+        0,
+        "production must not strictly arg-count commands, got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn noarg_command_statement_does_not_warn() {
+    let mut reg = empty_registry();
+    // `if_close;` — a legitimate no-arg command statement, must not warn.
+    reg.register_command("if_close".into(), 1500, vec![], vec![]);
+    let res = check_with_registry(
+        "[proc,ok]\n\
+         if_close;\n",
+        reg,
+    );
+    assert!(
+        !res.has_warning_containing("used here as a bare value"),
+        "no-arg command statement should not warn, got:\n{}",
+        res.dump()
+    );
 }

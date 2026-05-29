@@ -369,10 +369,6 @@ pub fn trigger_pointers(trigger: &str) -> PointerSet {
             LastUseslot,
         ],
         "opheldt" => &[ActivePlayer, PActivePlayer, LastItem, LastSlot],
-        // Rev-647 extensions
-        "opheld6" | "opheld7" | "opheld8" | "opheld9" | "opheld10" => {
-            &[ActivePlayer, PActivePlayer, LastItem, LastSlot]
-        }
 
         // Interface button trigger
         "if_button" => &[ActivePlayer, LastCom],
@@ -389,8 +385,10 @@ pub fn trigger_pointers(trigger: &str) -> PointerSet {
             &[ActivePlayer, LastItem, LastSlot]
         }
         "inv_buttond" | "if_buttond" => &[ActivePlayer, LastSlot, LastTargetslot],
-        // Rev-647 extensions
-        "inv_button6" | "inv_button7" | "inv_button8" | "inv_button9" | "inv_button10" => {
+        // Rev-647: inventory item ops 6-10. Only the if_button spelling extends
+        // to 6-10 (inv_button is the 225 family, capped at 5). Content uses these
+        // + the `p_opheld(op, inv, slot)` command.
+        "if_button6" | "if_button7" | "if_button8" | "if_button9" | "if_button10" => {
             &[ActivePlayer, LastItem, LastSlot]
         }
 

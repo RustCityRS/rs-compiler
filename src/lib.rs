@@ -31,6 +31,12 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tracing::info;
 
+struct ParsedFile {
+    path: PathBuf,
+    file: ScriptFile,
+    testscript_line: Option<usize>,
+}
+
 /// Compile scripts and write output. When `lint` is true, also run lint passes
 /// (unused locals, unreachable code) after code generation.
 pub fn compile_memory(
@@ -38,7 +44,18 @@ pub fn compile_memory(
     pack_dir: Option<&Path>,
     lint: bool,
 ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
-    let (compiled_scripts, diagnostics) = run_pipeline(scripts_dir, pack_dir, lint)?;
+    compile_memory_with_tests(scripts_dir, pack_dir, lint, false)
+}
+
+/// Like `compile_memory` but includes `#testscript` sections when
+/// `include_tests` is true.
+pub fn compile_memory_with_tests(
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+    lint: bool,
+    include_tests: bool,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
+    let (compiled_scripts, diagnostics) = run_pipeline(scripts_dir, pack_dir, lint, include_tests)?;
 
     info!("Phase 5: Writing output to memory...");
     let writer = ScriptWriter::new("".into());
@@ -57,7 +74,7 @@ pub fn compile(
     output_dir: &Path,
     lint: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let (compiled_scripts, diagnostics) = run_pipeline(scripts_dir, pack_dir, lint)?;
+    let (compiled_scripts, diagnostics) = run_pipeline(scripts_dir, pack_dir, lint, false)?;
 
     let output = output_dir.display().to_string();
     info!("Phase 5: Writing output to {}...", output);
@@ -73,7 +90,7 @@ pub fn compile(
 /// Run all analysis passes (parse, type-check, codegen, pointer-check, lints)
 /// without writing output. Useful for editor tooling and CI lint gates.
 pub fn lint(scripts_dir: &Path, pack_dir: Option<&Path>) -> Result<(), Box<dyn Error>> {
-    let (_, diagnostics) = run_pipeline(scripts_dir, pack_dir, true)?;
+    let (_, diagnostics) = run_pipeline(scripts_dir, pack_dir, true, false)?;
 
     diagnostics.print_all();
     info!("Compilation complete!");
@@ -88,6 +105,7 @@ fn run_pipeline(
     scripts_dir: &Path,
     pack_dir: Option<&Path>,
     lint: bool,
+    include_tests: bool,
 ) -> Result<(Vec<CompiledScript>, DiagnosticsCollector), Box<dyn Error>> {
     if !scripts_dir.exists() || !scripts_dir.is_dir() {
         return Err(Box::new(error::CompilerError::FileNotFound(
@@ -104,17 +122,29 @@ fn run_pipeline(
 
     // Phase 1: Parse all files
     info!("Phase 1: Parsing...");
-    let mut all_files = Vec::new();
+    let mut all_files: Vec<ParsedFile> = Vec::new();
     let mut source_cache: HashMap<String, Rc<String>> = HashMap::new();
     for path in &rs2_files {
-        let source_code = fs::read_to_string(path)?;
+        let raw_source = fs::read_to_string(path)?;
+        let testscript_line = find_testscript_line(&raw_source);
+
+        let source_code = if !include_tests {
+            if let Some(line_no) = testscript_line {
+                truncate_at_line(&raw_source, line_no)
+            } else {
+                raw_source.clone()
+            }
+        } else {
+            strip_testscript_annotation(&raw_source)
+        };
+
         let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let mut key = canonical.to_string_lossy().into_owned();
         if key.starts_with("\\\\?\\") {
             key = key[4..].to_string();
         }
         key = key.replace("\\Content\\", "\\content\\");
-        source_cache.insert(key, Rc::new(source_code.clone()));
+        source_cache.insert(key, Rc::new(raw_source));
 
         let tokens = match Lexer::new(&source_code, path).tokenize() {
             Ok(t) => t,
@@ -131,7 +161,11 @@ fn run_pipeline(
         };
         let mut parser = Parser::new(tokens, path);
         match parser.parse() {
-            Ok(file) => all_files.push((path.clone(), file)),
+            Ok(file) => all_files.push(ParsedFile {
+                path: path.clone(),
+                file,
+                testscript_line: if include_tests { testscript_line } else { None },
+            }),
             Err(e) => {
                 diagnostics.error(
                     path.clone(),
@@ -156,13 +190,13 @@ fn run_pipeline(
     let registry = register_scripts(scripts_dir, pack_dir, &mut diagnostics, &mut all_files);
     info!("  Registered {} scripts", registry.scripts.len());
 
-    for (path, file) in &all_files {
-        for script in &file.scripts {
+    for pf in &all_files {
+        for script in &pf.file.scripts {
             if let Some(msg) =
                 Compiler::validate_trigger_subject(&script.trigger, &script.name, &registry)
             {
                 diagnostics.warning(
-                    path.clone(),
+                    pf.path.clone(),
                     script.line,
                     0,
                     msg,
@@ -234,18 +268,19 @@ fn check_pointers(
 }
 
 fn codegen(
-    all_files: &mut [(PathBuf, ScriptFile)],
+    all_files: &mut [ParsedFile],
     registry: SymbolRegistry,
 ) -> (Compiler, Vec<CompiledScript>) {
     let mut codegen = Compiler::new(registry);
     let mut compiled_scripts = Vec::new();
-    for (path, file) in all_files {
-        for script in &file.scripts {
+    for pf in all_files.iter() {
+        for script in &pf.file.scripts {
             if script.trigger == "command" {
                 continue;
             }
             let mut compiled = codegen.compile_script(script);
-            let canonical = fs::canonicalize(path.clone()).unwrap_or_else(|_| path.to_path_buf());
+            let canonical =
+                fs::canonicalize(pf.path.clone()).unwrap_or_else(|_| pf.path.to_path_buf());
             let mut source_path = canonical.to_string_lossy().into_owned();
             if source_path.starts_with("\\\\?\\") {
                 source_path = source_path[4..].to_string();
@@ -260,12 +295,12 @@ fn codegen(
 
 fn run_type_checker(
     diagnostics: &mut DiagnosticsCollector,
-    all_files: &mut [(PathBuf, ScriptFile)],
+    all_files: &mut [ParsedFile],
     registry: &SymbolRegistry,
 ) {
     let mut type_checker = TypeChecker::new(registry);
-    for (path, file) in all_files.iter() {
-        type_checker.check_file(file, path);
+    for pf in all_files.iter() {
+        type_checker.check_file_with_test_boundary(&pf.file, &pf.path, pf.testscript_line);
     }
     diagnostics.merge(type_checker.diagnostics);
 }
@@ -274,7 +309,7 @@ fn register_scripts(
     scripts_dir: &Path,
     pack_dir: Option<&Path>,
     diagnostics: &mut DiagnosticsCollector,
-    all_files: &mut Vec<(PathBuf, ScriptFile)>,
+    all_files: &mut [ParsedFile],
 ) -> SymbolRegistry {
     let mut registry = SymbolRegistry::new();
 
@@ -352,15 +387,15 @@ fn register_scripts(
         let mut registered_scripts: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
-        for (path, file) in all_files {
-            for script in &file.scripts {
+        for pf in all_files.iter() {
+            for script in &pf.file.scripts {
                 if script.trigger == "command" {
                     continue;
                 }
 
                 if !trigger_table::is_valid_trigger(&script.trigger) {
                     diagnostics.warning(
-                        path.clone(),
+                        pf.path.clone(),
                         script.line,
                         0,
                         msg::fmt(msg::SCRIPT_TRIGGER_INVALID, &[&script.trigger]),
@@ -371,7 +406,7 @@ fn register_scripts(
                 let key = format!("{}:{}", script.trigger, script.name);
                 if !registered_scripts.insert(key.clone()) {
                     diagnostics.warning(
-                        path.clone(),
+                        pf.path.clone(),
                         script.line,
                         0,
                         msg::fmt(msg::SCRIPT_REDECLARATION, &[&script.trigger, &script.name]),
@@ -383,7 +418,7 @@ fn register_scripts(
                     && !trigger_table::allows_returns(&script.trigger)
                 {
                     diagnostics.warning(
-                        path.clone(),
+                        pf.path.clone(),
                         script.line,
                         0,
                         msg::fmt(msg::SCRIPT_TRIGGER_NO_RETURNS, &[&script.trigger]),
@@ -399,10 +434,47 @@ fn register_scripts(
                     param_types,
                     script.return_types.clone(),
                 );
+
+                if let Some(ts_line) = pf.testscript_line
+                    && script.line >= ts_line
+                {
+                    registry.mark_test_script(&script.trigger, &script.name);
+                }
             }
         }
     }
     registry
+}
+
+fn find_testscript_line(source: &str) -> Option<usize> {
+    for (i, line) in source.lines().enumerate() {
+        if line.trim() == "#testscript" {
+            return Some(i + 1);
+        }
+    }
+    None
+}
+
+fn truncate_at_line(source: &str, line_no: usize) -> String {
+    source
+        .lines()
+        .take(line_no - 1)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn strip_testscript_annotation(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| {
+            if line.trim() == "#testscript" {
+                ""
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn collect_files(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) -> Result<(), Box<dyn Error>> {
