@@ -345,6 +345,11 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) {
         load_entity_ids(registry, &pack_dir.join(file), *type_hint);
     }
 
+    // obj.pack entities are also valid as namedobj (an object referenced by
+    // name at compile time). Register them under NamedObj in the typed map
+    // so hint-driven resolution works for commands like inv_add(inv, namedobj, int).
+    load_entity_ids_typed_only(registry, &pack_dir.join("obj.pack"), Type::NamedObj);
+
     // Register type-name identifiers so they resolve to their CS2 type chars.
     register_type_chars(registry);
 
@@ -954,6 +959,36 @@ fn load_entity_ids(registry: &mut SymbolRegistry, path: &Path, entity_type: Type
     }
 }
 
+/// Like `load_entity_ids` but only populates the typed entity map
+/// (no flat/untyped registration). Used to register obj.pack entries
+/// under a secondary type like `NamedObj`.
+fn load_entity_ids_typed_only(registry: &mut SymbolRegistry, path: &Path, entity_type: Type) {
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (id_str, name) = match line.split_once('=') {
+            Some(pair) => pair,
+            None => continue,
+        };
+        let name = name.trim();
+        if name.is_empty() || name == "null" {
+            continue;
+        }
+        let id: i32 = match id_str.parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let normalized = name.to_lowercase().replace(' ', "_");
+        registry.register_entity_id_typed_only(normalized, entity_type, id);
+    }
+}
+
 /// Register type-name identifiers as type-char constants.
 /// These are stored in a separate map (registry.type_chars) checked LAST in identifier
 /// resolution, so commands like `coord` take priority over the type name `coord`.
@@ -1073,8 +1108,87 @@ fn register_engine_constants(registry: &mut SymbolRegistry) {
         ("queue19", 65),
         ("queue20", 66),
     ];
+    // Many NpcMode names (oploc1-5, aploc1-5, opnpc1-5, apnpc1-5, opobj1-5,
+    // apobj1-5, opplayer1-5, applayer1-5, queue1-20) collide with names in
+    // the trigger table. Registering them as flat entity IDs would shadow
+    // those trigger names whenever they appear in an untyped or Int-typed
+    // expression context (e.g. `test_op(oploc1, ...)` — the compiler would
+    // resolve `oploc1` to NpcMode 17 instead of the trigger byte 66).
+    //
+    // The non-colliding ones (null, none, wander, patrol, playerescape,
+    // playerfollow, playerface, playerfaceclose) are registered into both
+    // maps as before so bare-identifier resolution keeps working for them.
+    fn is_trigger_collision(name: &str) -> bool {
+        matches!(
+            name,
+            "oploc1"
+                | "oploc2"
+                | "oploc3"
+                | "oploc4"
+                | "oploc5"
+                | "aploc1"
+                | "aploc2"
+                | "aploc3"
+                | "aploc4"
+                | "aploc5"
+                | "opnpc1"
+                | "opnpc2"
+                | "opnpc3"
+                | "opnpc4"
+                | "opnpc5"
+                | "apnpc1"
+                | "apnpc2"
+                | "apnpc3"
+                | "apnpc4"
+                | "apnpc5"
+                | "opobj1"
+                | "opobj2"
+                | "opobj3"
+                | "opobj4"
+                | "opobj5"
+                | "apobj1"
+                | "apobj2"
+                | "apobj3"
+                | "apobj4"
+                | "apobj5"
+                | "opplayer1"
+                | "opplayer2"
+                | "opplayer3"
+                | "opplayer4"
+                | "opplayer5"
+                | "applayer1"
+                | "applayer2"
+                | "applayer3"
+                | "applayer4"
+                | "applayer5"
+                | "queue1"
+                | "queue2"
+                | "queue3"
+                | "queue4"
+                | "queue5"
+                | "queue6"
+                | "queue7"
+                | "queue8"
+                | "queue9"
+                | "queue10"
+                | "queue11"
+                | "queue12"
+                | "queue13"
+                | "queue14"
+                | "queue15"
+                | "queue16"
+                | "queue17"
+                | "queue18"
+                | "queue19"
+                | "queue20"
+        )
+    }
     for &(name, id) in npc_modes {
-        registry.register_entity_id(name.to_string(), Type::NpcMode, id);
+        if is_trigger_collision(name) {
+            registry.register_entity_id_typed_only(name.to_string(), Type::NpcMode, id);
+        } else {
+            registry.register_entity_id(name.to_string(), Type::NpcMode, id);
+        }
     }
 
     // NpcStat FIRST (lower priority — overlapping names will be overwritten by PlayerStat)

@@ -33,7 +33,7 @@ pub struct TriggerInfo {
     ///     from the original `is_byte_keyed_trigger` whitelist; widening
     ///     this would change emitted warnings)
     pub validates_subject: bool,
-    /// True for if_button/if_button1-5/if_buttond and inv_button1-5/inv_buttond.
+    /// True for if_button/if_button1-10/if_buttond and inv_button1-5/inv_buttond.
     /// Used by pointer_checker to grant p_active_player on non-overlay
     /// interfaces, mirroring ServerPointerChecker.setsPointerTrigger().
     pub is_button: bool,
@@ -179,6 +179,15 @@ const TRIGGERS: &[TriggerInfo] = &[
     iface("if_button4", 152, true),
     iface("if_button5", 153, true),
     iface("if_buttond", 154, true),
+    // Rev-647: client merged OpHeld/InvButton into IfButton1-10. Inventory
+    // item ops 6-10 (e.g. Drop=op8) are handled in content via
+    // `[if_button6..10,inv:component]` + `p_opheld(op, inv, slot)`.
+    // Bytes 173-177 must match the engine's ServerTriggerType InvButton6-10.
+    iface("if_button6", 173, true),
+    iface("if_button7", 174, true),
+    iface("if_button8", 175, true),
+    iface("if_button9", 176, true),
+    iface("if_button10", 177, true),
     component("inv_button1", 149),
     component("inv_button2", 150),
     component("inv_button3", 151),
@@ -302,7 +311,7 @@ const NAME_KEYED_TRIGGERS: &[&str] = &[
 
 // Rev-647 extensions: valid triggers whose byte discriminants are not
 // yet standardized in the reference implementation.
-const EXTENDED_TRIGGERS: &[&str] = &["opheld6", "opheld7", "opheld8", "switch_window_mode"];
+const EXTENDED_TRIGGERS: &[&str] = &["switch_window_mode"];
 
 // ── Public lookup API ────────────────────────────────────────────────
 
@@ -363,6 +372,11 @@ mod tests {
             "if_button3",
             "if_button4",
             "if_button5",
+            "if_button6",
+            "if_button7",
+            "if_button8",
+            "if_button9",
+            "if_button10",
             "if_buttond",
             "inv_button1",
             "inv_button2",
@@ -450,10 +464,45 @@ mod tests {
 
     #[test]
     fn is_valid_trigger_extended() {
-        assert!(is_valid_trigger("opheld6"));
-        assert!(is_valid_trigger("opheld7"));
-        assert!(is_valid_trigger("opheld8"));
         assert!(is_valid_trigger("switch_window_mode"));
+    }
+
+    #[test]
+    fn opheld_only_goes_to_five() {
+        // Rev-647 (and OSRS) have no opheld beyond 5. Inventory item ops 6-10
+        // route through if_button6-10 + the p_opheld content command instead.
+        assert!(is_valid_trigger("opheld5"));
+        assert!(!is_valid_trigger("opheld6"));
+        assert!(!is_valid_trigger("opheld7"));
+        assert!(!is_valid_trigger("opheld10"));
+    }
+
+    #[test]
+    fn if_button_extended_to_ten() {
+        // Bytes 173-177 must stay in sync with the engine's ServerTriggerType
+        // InvButton6-10.
+        assert!(is_valid_trigger("if_button6"));
+        assert!(is_valid_trigger("if_button10"));
+        assert_eq!(byte("if_button6"), Some(173));
+        assert_eq!(byte("if_button10"), Some(177));
+    }
+
+    #[test]
+    fn inv_button_caps_at_five() {
+        // inv_button is the 225-era spelling with ops 1-5 (+ d). 647 content
+        // uses if_button, which extends to 6-10. Both 225 and 647 content
+        // compile here, so inv_button1-5/inv_buttond stay valid while
+        // inv_button6-10 must not exist.
+        for n in ["inv_button1", "inv_button5", "inv_buttond"] {
+            assert!(is_valid_trigger(n), "{n} should still be a trigger");
+        }
+        for n in ["inv_button6", "inv_button7", "inv_button10"] {
+            assert!(
+                !is_valid_trigger(n),
+                "{n} must not exist (inv_button caps at 5)"
+            );
+            assert_eq!(byte(n), None);
+        }
     }
 
     #[test]

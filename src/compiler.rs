@@ -1146,6 +1146,31 @@ impl Compiler {
                         return;
                     }
                 }
+                if let Some(trigger_byte) = crate::trigger_table::byte(name) {
+                    out.push(Instruction::push_int(trigger_byte as i32));
+                    return;
+                }
+                if type_hint == Some(Type::Int)
+                    && let Some(sym) = self
+                        .registry
+                        .lookup_command(name.strip_prefix('.').unwrap_or(name))
+                    && let SymbolKind::Command {
+                        opcode,
+                        param_types,
+                        ..
+                    } = &sym.kind
+                    && !param_types.is_empty()
+                {
+                    // Bare identifier referring to a command that takes args is
+                    // used in the test framework as the opcode-as-int literal
+                    // (e.g. `wait_for(mes, 30)` — `mes` becomes 2064).
+                    // 0-arg commands (`uid`, `name`, `map_clock`) fall through
+                    // to the lookup_command branch below which emits a real
+                    // Command invocation, since calling them with no args is
+                    // the natural meaning.
+                    out.push(Instruction::push_int(*opcode));
+                    return;
+                }
                 // Note: we fall through here only if entity lookup found a Param-type entity
                 // that should be overridden by a type_char, or if entity lookup returned None.
                 if let Some(sym) = self.registry.lookup_constant(name).cloned() {

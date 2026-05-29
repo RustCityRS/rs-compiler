@@ -1,5 +1,5 @@
 use crate::types::{BaseVarType, Type};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ── LocalTable ─────────────────────────────────────────────────────────────
 // Matches RuneScriptTS `LocalTable` (RuneScript.ts): a flat ordered list of
@@ -448,6 +448,8 @@ pub struct SymbolRegistry {
     pub(crate) components: HashMap<String, i32>,
     /// Interface name → ID mapping (for component resolution).
     pub(crate) interface_ids: HashMap<String, i32>,
+    /// Scripts defined below `#testscript` — keyed by "trigger:name".
+    pub(crate) test_scripts: HashSet<String>,
     /// Next available script ID.
     next_script_id: i32,
 }
@@ -478,6 +480,7 @@ impl SymbolRegistry {
             dbcolumn_types: HashMap::new(),
             components: HashMap::new(),
             interface_ids: HashMap::new(),
+            test_scripts: HashSet::new(),
             next_script_id: 0,
         }
     }
@@ -532,6 +535,8 @@ impl SymbolRegistry {
         param_types: Vec<Type>,
         return_types: Vec<Type>,
     ) {
+        self.command_param_types
+            .insert(name.clone(), param_types.clone());
         self.commands.insert(
             name.clone(),
             Symbol {
@@ -611,6 +616,22 @@ impl SymbolRegistry {
         );
     }
 
+    /// Register an entity ID that should only be resolvable via a typed
+    /// (hint-driven) lookup. Skips the flat `entity_ids` map so the name
+    /// does not shadow trigger names or other higher-priority resolutions
+    /// when used in untyped expression contexts.
+    ///
+    /// Used for NpcMode names like `oploc1`/`apnpc2` that share their
+    /// spelling with `ServerTriggerType` byte names — `npc_setmode(oploc1)`
+    /// still works (typed lookup hits `Type::NpcMode`), but bare `oploc1`
+    /// in e.g. `test_op(oploc1, …)` falls through to `trigger_table::byte`.
+    pub fn register_entity_id_typed_only(&mut self, name: String, entity_type: Type, id: i32) {
+        self.entity_ids_typed
+            .entry(name)
+            .or_default()
+            .insert(entity_type, id);
+    }
+
     /// Look up an entity ID for a specific expected type. Returns `None` if the
     /// name is not registered for that type.
     /// Normalizes the name (lowercase + spaces→underscores) matching TS normalizeName for Basic symbols.
@@ -674,6 +695,24 @@ impl SymbolRegistry {
         self.trigger_script_ids
             .get(&format!("{}:{}", trigger, name))
             .copied()
+    }
+
+    pub fn command_opcode(&self, name: &str) -> Option<i32> {
+        self.commands.get(name).and_then(|sym| {
+            if let SymbolKind::Command { opcode, .. } = &sym.kind {
+                Some(*opcode)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn mark_test_script(&mut self, trigger: &str, name: &str) {
+        self.test_scripts.insert(format!("{}:{}", trigger, name));
+    }
+
+    pub fn is_test_script(&self, trigger: &str, name: &str) -> bool {
+        self.test_scripts.contains(&format!("{}:{}", trigger, name))
     }
 
     /// Look up a component by interface_name:component_name.

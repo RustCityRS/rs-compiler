@@ -5,6 +5,15 @@ use crate::symbol::{SymbolKind, SymbolRegistry, SymbolTable};
 use crate::types::{BaseVarType, Type};
 use std::path::{Path, PathBuf};
 
+const TEST_COMMAND_PREFIXES: &[&str] = &[
+    "assert_",
+    "test_",
+    "setup_",
+    "mock_",
+    "verify_",
+    "wait_for_",
+];
+
 const LITERAL_TYPES: &[Type] = &[
     Type::Int,
     Type::Boolean,
@@ -22,6 +31,7 @@ pub struct TypeChecker<'a> {
     pub diagnostics: DiagnosticsCollector,
     pub registry: &'a SymbolRegistry,
     file_path: PathBuf,
+    current_script_is_test: bool,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -30,14 +40,34 @@ impl<'a> TypeChecker<'a> {
             diagnostics: DiagnosticsCollector::new(),
             registry,
             file_path: PathBuf::new(),
+            current_script_is_test: false,
         }
     }
 
     pub fn check_file(&mut self, file: &ScriptFile, file_path: &Path) {
+        self.check_file_with_test_boundary(file, file_path, None);
+    }
+
+    pub fn check_file_with_test_boundary(
+        &mut self,
+        file: &ScriptFile,
+        file_path: &Path,
+        testscript_line: Option<usize>,
+    ) {
         self.file_path = file_path.to_path_buf();
         for script in &file.scripts {
+            self.current_script_is_test = match testscript_line {
+                Some(ts_line) => script.line >= ts_line,
+                None => false,
+            };
             self.check_script(script);
         }
+    }
+
+    fn is_test_command(name: &str) -> bool {
+        TEST_COMMAND_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
     }
 
     fn check_script(&mut self, script: &ScriptDeclaration) {
@@ -264,6 +294,7 @@ impl<'a> TypeChecker<'a> {
                 }
 
                 if let Some(init_expr) = value {
+                    self.warn_if_bare_command_value(init_expr, *line);
                     let expr_type = self.infer_expr_type(init_expr, locals, *line, Some(*var_type));
                     if let Some(et) = expr_type
                         && !self.types_compatible(et, *var_type)
@@ -312,6 +343,7 @@ impl<'a> TypeChecker<'a> {
                 value,
                 line,
             } => {
+                self.warn_if_bare_command_value(value, *line);
                 let target_type = self.infer_expr_type(target, locals, *line, None);
                 let value_type = self.infer_expr_type(value, locals, *line, target_type);
                 if let (Some(tt), Some(vt)) = (target_type, value_type)
@@ -426,8 +458,12 @@ impl<'a> TypeChecker<'a> {
             }
 
             Statement::Expression { expr, line } => {
+                // A bare command reference used as a statement (e.g. `mes;`)
+                // compiles to its opcode and is discarded — flag it specifically.
+                let bare_cmd = self.warn_if_bare_command_value(expr, *line);
                 let expr_type = self.infer_expr_type(expr, locals, *line, None);
-                if let Some(et) = expr_type
+                if !bare_cmd
+                    && let Some(et) = expr_type
                     && et != Type::Error
                     && !self.expression_has_side_effects(expr)
                 {
@@ -724,6 +760,14 @@ impl<'a> TypeChecker<'a> {
                     return Some(h);
                 }
 
+                // When hint is Int, type chars (coord, obj, stat, …) take
+                // priority over same-named commands so that e.g.
+                // enum(int, coord, …) resolves `coord` as the type-char
+                // constant rather than the `coord` command.
+                if hint == Some(Type::Int) && self.registry.type_chars.contains_key(name) {
+                    return Some(Type::Int);
+                }
+
                 // Fallback: constants → entity IDs → commands → type chars
                 if let Some(sym) = self.registry.lookup_constant(name) {
                     match &sym.kind {
@@ -797,11 +841,17 @@ impl<'a> TypeChecker<'a> {
                             // in compile_expr for Ident):
                             //   1. entity_ids_typed (typed entities)
                             //   2. entity_ids (untyped entity fallback)
-                            //   3. proc_script_id / script_id (script refs
+                            //   3. trigger_table::byte (server trigger names
+                            //      like `oploc1`, `apnpc1`)
+                            //   4. command_opcode (bare command names used as
+                            //      the opcode literal when hint is Int)
+                            //   5. proc_script_id / script_id (script refs
                             //      for proc/label/queue/timer/walktrigger
                             //      params)
                             let resolved = self.registry.lookup_entity_id_typed(name, h).is_some()
                                 || self.registry.lookup_entity_id(name).is_some()
+                                || crate::trigger_table::byte(name).is_some()
+                                || (h == Type::Int && self.registry.command_opcode(name).is_some())
                                 || self.registry.proc_script_id(name).is_some()
                                 || self.registry.script_id(name).is_some();
                             if !resolved {
@@ -869,7 +919,7 @@ impl<'a> TypeChecker<'a> {
                     if matches!(lt, Some(Type::Long)) || matches!(rt, Some(Type::Long)) {
                         Some(Type::Long)
                     } else {
-                        Some(Type::Int)
+                        Some(hint.unwrap_or(Type::Int))
                     }
                 }
                 BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
@@ -905,6 +955,13 @@ impl<'a> TypeChecker<'a> {
                 ..
             } => {
                 let lookup_name = name.strip_prefix('.').unwrap_or(name);
+
+                if !self.current_script_is_test && Self::is_test_command(lookup_name) {
+                    self.error(
+                        *call_line,
+                        msg::fmt(msg::TEST_COMMAND_FROM_PRODUCTION, &[lookup_name]),
+                    );
+                }
 
                 // Look up command param types for hinting (same as compiler.rs:1345-1399)
                 let param_types: Vec<Type> = self
@@ -987,6 +1044,13 @@ impl<'a> TypeChecker<'a> {
                     return Some(Type::Error);
                 }
 
+                if !self.current_script_is_test && self.registry.is_test_script("proc", name) {
+                    self.error(
+                        *call_line,
+                        msg::fmt(msg::TEST_PROC_FROM_PRODUCTION, &[name]),
+                    );
+                }
+
                 let (p_types, r_types) = if let Some(ref sym) = script_sym {
                     if let SymbolKind::Script {
                         param_types,
@@ -1044,6 +1108,13 @@ impl<'a> TypeChecker<'a> {
                         let _ = self.infer_expr_type(arg, locals, *call_line, None);
                     }
                     return Some(Type::Error);
+                }
+
+                if !self.current_script_is_test && self.registry.is_test_script("label", name) {
+                    self.error(
+                        *call_line,
+                        msg::fmt(msg::TEST_LABEL_FROM_PRODUCTION, &[name]),
+                    );
                 }
 
                 let p_types = if let Some(ref sym) = script_sym {
@@ -1144,20 +1215,25 @@ impl<'a> TypeChecker<'a> {
             if has_call_arg {
                 return;
             }
-            // Commands may have variadic or partially-known signatures;
-            // only enforce strict arg count for procs and jumps.
-            if kind != CallKind::Command {
-                self.error(
-                    line,
-                    msg::fmt(
-                        msg::GENERIC_TYPE_MISMATCH,
-                        &[
-                            &format!("{} arg(s)", actual_types.len()),
-                            &format!("{} arg(s)", expected_types.len()),
-                        ],
-                    ),
-                );
+            // Strict command arg-count was tightened for the #testscript
+            // assertion framework. Production keeps main's behaviour: a command
+            // signature may be variadic or only partially known in the symbol
+            // set, so enforcing exact arity on commands false-positives on
+            // production content (esp. 225). Only procs/jumps are strictly
+            // arg-counted outside test scripts.
+            if kind == CallKind::Command && !self.current_script_is_test {
+                return;
             }
+            self.error(
+                line,
+                msg::fmt(
+                    msg::GENERIC_TYPE_MISMATCH,
+                    &[
+                        &format!("{} arg(s)", actual_types.len()),
+                        &format!("{} arg(s)", expected_types.len()),
+                    ],
+                ),
+            );
             return;
         }
 
@@ -1257,22 +1333,71 @@ impl<'a> TypeChecker<'a> {
         if actual == expected {
             return true;
         }
-        // Rule 4 (server): namedobj assignable to obj
-        if expected == Type::Obj && actual == Type::NamedObj {
+        // Rule 4 (server): obj and namedobj are interchangeable
+        if (expected == Type::Obj && actual == Type::NamedObj)
+            || (expected == Type::NamedObj && actual == Type::Obj)
+        {
             return true;
         }
         // Rule 5: Any actual also matches (symmetric with rule 1)
         if actual == Type::Any {
             return true;
         }
-        // Temporary fallback: integer-base interchangeability.
-        // The TS compiler doesn't need this because type hints resolve
-        // identifiers/literals to the correct type before comparison.
-        // Keep until hint coverage is proven complete.
-        if actual.base_type() == BaseVarType::Integer
+        // Rule 6: Int widens to any integer-base named type. Scripts use
+        // `def_int` for computed IDs (interface, component, npc, etc.) and
+        // pass them to commands expecting a named type. The reverse (named
+        // type → int) is NOT allowed — catches errors like passing
+        // npc_mode to tostring(int).
+        if actual == Type::Int && expected.base_type() == BaseVarType::Integer {
+            return true;
+        }
+        // Rule 7: Boolean and Obj narrow to Int. These types are
+        // semantically raw integers (boolean=0/1, obj=entity ID) and
+        // scripts pass them to int-typed commands like assert_eq.
+        if matches!(actual, Type::Boolean | Type::Obj) && expected == Type::Int {
+            return true;
+        }
+        // Rule 8 (production only): integer-base interchangeability. Any two
+        // integer-base named types (interface, queue, timer, label, obj, …) are
+        // mutually compatible *outside* test scripts. This restores the
+        // pre-#testscript behaviour: hint-based resolution isn't yet complete
+        // enough to pick the right namespace when a name exists in several
+        // (e.g. a `queue` shadowed by an interface of the same name), so without
+        // this, valid production scripts — especially 225 content — false
+        // positive. The strict Rules 6–7 still apply under `#testscript`, where
+        // assertions (assert_eq, …) need exact types.
+        if !self.current_script_is_test
+            && actual.base_type() == BaseVarType::Integer
             && expected.base_type() == BaseVarType::Integer
         {
             return true;
+        }
+        false
+    }
+
+    /// Lint a value-context expression (declaration initializer / assignment
+    /// RHS, or a standalone expression statement): a lone bare command
+    /// reference there compiles to the command's opcode (an int literal),
+    /// not the result of calling it. Passing a command's opcode as an
+    /// *argument* (e.g. `wait_for(mes, 20)`) is a legitimate test pattern,
+    /// which is why this only fires in value/statement contexts — not on
+    /// command/proc arguments. Returns true if a warning was emitted.
+    fn warn_if_bare_command_value(&mut self, expr: &Expr, line: usize) -> bool {
+        if let Expr::Identifier(name) = expr {
+            let requires_args = self
+                .registry
+                .command_param_types
+                .get(name)
+                .is_some_and(|p| !p.is_empty());
+            // Only commands (not constants/entities/locals) reach here as a
+            // mistake; the registry lookup confirms it's a command.
+            if requires_args && self.registry.lookup_command(name).is_some() {
+                self.warning(
+                    line,
+                    msg::fmt(msg::COMMAND_BARE_REQUIRES_ARGS, &[name, name]),
+                );
+                return true;
+            }
         }
         false
     }
