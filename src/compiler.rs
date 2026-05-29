@@ -529,6 +529,46 @@ impl Compiler {
         count
     }
 
+    /// Test-harness commands (`test_op`, `wait_for`) accept a bare trigger or
+    /// command NAME in an `int` parameter and want it lowered to the trigger
+    /// byte / command opcode (e.g. `test_op(oploc1, ...)` → byte,
+    /// `wait_for(mes, ...)` → opcode). This is scoped to those commands ONLY,
+    /// so general identifier resolution is unchanged from pre-test behavior — a
+    /// command that shares a trigger's name (e.g. `if_close`) still compiles to
+    /// its command opcode everywhere else. Returns true (and emits the push) if
+    /// `arg` was handled here.
+    fn try_emit_test_command_id_arg(
+        &self,
+        lookup_name: &str,
+        arg: &Expr,
+        hint: Option<Type>,
+        out: &mut CompiledScript,
+    ) -> bool {
+        if !matches!(lookup_name, "test_op" | "wait_for") || hint != Some(Type::Int) {
+            return false;
+        }
+        let Expr::Identifier(ident) = arg else {
+            return false;
+        };
+        if ident.contains(':') {
+            return false;
+        }
+        if let Some(trigger_byte) = crate::trigger_table::byte(ident) {
+            out.push(Instruction::push_int(trigger_byte as i32));
+            return true;
+        }
+        if let Some(sym) = self
+            .registry
+            .lookup_command(ident.strip_prefix('.').unwrap_or(ident))
+            && let SymbolKind::Command { opcode, .. } = &sym.kind
+        {
+            let opcode = *opcode;
+            out.push(Instruction::push_int(opcode));
+            return true;
+        }
+        false
+    }
+
     /// Compile a CommandCall expression starting at `args_start` (skipping already-pushed args).
     fn compile_command_call_args_from(
         &mut self,
@@ -576,6 +616,9 @@ impl Compiler {
                 continue;
             }
             let hint = param_types.get(i).copied();
+            if self.try_emit_test_command_id_arg(lookup_name, arg, hint, out) {
+                continue;
+            }
             self.compile_expr_hinted(arg, out, locals, hint);
         }
 
@@ -1146,31 +1189,15 @@ impl Compiler {
                         return;
                     }
                 }
-                if let Some(trigger_byte) = crate::trigger_table::byte(name) {
-                    out.push(Instruction::push_int(trigger_byte as i32));
-                    return;
-                }
-                if type_hint == Some(Type::Int)
-                    && let Some(sym) = self
-                        .registry
-                        .lookup_command(name.strip_prefix('.').unwrap_or(name))
-                    && let SymbolKind::Command {
-                        opcode,
-                        param_types,
-                        ..
-                    } = &sym.kind
-                    && !param_types.is_empty()
-                {
-                    // Bare identifier referring to a command that takes args is
-                    // used in the test framework as the opcode-as-int literal
-                    // (e.g. `wait_for(mes, 30)` — `mes` becomes 2064).
-                    // 0-arg commands (`uid`, `name`, `map_clock`) fall through
-                    // to the lookup_command branch below which emits a real
-                    // Command invocation, since calling them with no args is
-                    // the natural meaning.
-                    out.push(Instruction::push_int(*opcode));
-                    return;
-                }
+                // NOTE: a bare trigger/command NAME used as an int literal (the
+                // test harness's `test_op(oploc1, ...)` / `wait_for(mes, ...)`)
+                // is resolved at the *call site* of those specific commands (see
+                // `try_emit_test_command_id_arg`), NOT here. Resolving it here
+                // (for any int-hinted identifier) shadowed real commands that
+                // share a trigger's name — notably `if_close`, both the close
+                // command (opcode 2033) and the `[if_close,...]` trigger (byte
+                // 148) — so a bare `if_close` statement compiled to
+                // `push_int(148)` and the close was silently dropped.
                 // Note: we fall through here only if entity lookup found a Param-type entity
                 // that should be overridden by a type_char, or if entity lookup returned None.
                 if let Some(sym) = self.registry.lookup_constant(name).cloned() {
@@ -1398,6 +1425,9 @@ impl Compiler {
                         continue;
                     }
                     let hint = param_types.get(i).copied();
+                    if self.try_emit_test_command_id_arg(lookup_name, arg, hint, out) {
+                        continue;
+                    }
                     self.compile_expr_hinted(arg, out, locals, hint);
                 }
 
@@ -2097,5 +2127,99 @@ mod tests {
         let r = seed_registry();
         let warning = Compiler::validate_trigger_subject("opnpc1", "not_a_real_npc", &r);
         assert!(warning.is_some());
+    }
+
+    #[test]
+    fn bare_command_sharing_a_trigger_name_compiles_to_the_command() {
+        // `if_close` is BOTH the close command (opcode 2033) and the
+        // `[if_close,...]` trigger (byte 148). A bare `if_close` statement must
+        // compile to the COMMAND. Regression: the trigger byte used to shadow
+        // the command in general identifier resolution, so `if_close` silently
+        // compiled to `push_int(148)` and the close was dropped at runtime.
+        let mut r = seed_registry();
+        r.register_command("if_close".into(), 2033, vec![], vec![]);
+        let mut c = Compiler::new(r);
+        let mut out = CompiledScript::new("t".into(), 0);
+        let mut locals = SymbolTable::new();
+        c.compile_expr_hinted(
+            &Expr::Identifier("if_close".into()),
+            &mut out,
+            &mut locals,
+            None,
+        );
+        assert!(
+            out.instructions
+                .iter()
+                .any(|i| i.opcode == Opcode::Command && matches!(i.operand, Operand::Int(2033))),
+            "bare `if_close` should emit Command(2033), got {:?}",
+            out.instructions
+        );
+        assert!(
+            !out.instructions
+                .iter()
+                .any(|i| matches!(i.operand, Operand::Int(148))),
+            "bare `if_close` must NOT emit the trigger byte 148: {:?}",
+            out.instructions
+        );
+    }
+
+    #[test]
+    fn test_commands_resolve_names_to_ids_but_only_for_themselves() {
+        // The name->int resolution is scoped to test_op/wait_for arguments only;
+        // it must never leak into general identifier resolution.
+        let mut r = seed_registry();
+        r.register_command("mes".into(), 2064, vec![Type::String], vec![]);
+        r.register_command("if_close".into(), 2033, vec![], vec![]);
+        let c = Compiler::new(r);
+
+        // test_op(oploc1, ...): trigger name -> trigger byte (oploc1 = 66).
+        let mut out = CompiledScript::new("t".into(), 0);
+        assert!(c.try_emit_test_command_id_arg(
+            "test_op",
+            &Expr::Identifier("oploc1".into()),
+            Some(Type::Int),
+            &mut out
+        ));
+        let last = out.instructions.last().expect("an instruction");
+        assert!(
+            matches!(last.operand, Operand::Int(66)),
+            "got {:?}",
+            last.operand
+        );
+
+        // wait_for(mes, ...): command name -> command opcode (mes = 2064).
+        let mut out = CompiledScript::new("t".into(), 0);
+        assert!(c.try_emit_test_command_id_arg(
+            "wait_for",
+            &Expr::Identifier("mes".into()),
+            Some(Type::Int),
+            &mut out
+        ));
+        let last = out.instructions.last().expect("an instruction");
+        assert!(
+            matches!(last.operand, Operand::Int(2064)),
+            "got {:?}",
+            last.operand
+        );
+
+        // A NON-test command does not trigger the resolution, so `if_close`
+        // is left for normal resolution (→ its command opcode) downstream.
+        let mut out = CompiledScript::new("t".into(), 0);
+        assert!(!c.try_emit_test_command_id_arg(
+            "mes",
+            &Expr::Identifier("if_close".into()),
+            Some(Type::Int),
+            &mut out
+        ));
+        assert!(out.instructions.is_empty());
+
+        // A non-int parameter position is never treated as an id.
+        let mut out = CompiledScript::new("t".into(), 0);
+        assert!(!c.try_emit_test_command_id_arg(
+            "test_op",
+            &Expr::Identifier("oploc1".into()),
+            Some(Type::Loc),
+            &mut out
+        ));
     }
 }
