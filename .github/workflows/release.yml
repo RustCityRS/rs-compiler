@@ -153,6 +153,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Refuse to publish if the tag doesn't match the manifest version.
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CRATE="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/' | tr -d '[:space:]')"
+          echo "tag=$TAG  Cargo.toml=$CRATE"
+          if [ "$TAG" != "$CRATE" ]; then
+            echo "::error::Tag v$TAG does not match Cargo.toml version $CRATE -- bump the version to match the tag before releasing."
+            exit 1
+          fi
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
