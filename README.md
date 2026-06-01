@@ -1,3 +1,16 @@
+<div align="center">
+<pre>
+██████╗ ██╗   ██╗███████╗████████╗ ██████╗██╗████████╗██╗   ██╗
+██╔══██╗██║   ██║██╔════╝╚══██╔══╝██╔════╝██║╚══██╔══╝╚██╗ ██╔╝
+██████╔╝██║   ██║███████╗   ██║   ██║     ██║   ██║    ╚████╔╝ 
+██╔══██╗██║   ██║╚════██║   ██║   ██║     ██║   ██║     ╚██╔╝  
+██║  ██║╚██████╔╝███████║   ██║   ╚██████╗██║   ██║      ██║   
+╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝    ╚═════╝╚═╝   ╚═╝      ╚═╝   
+</pre>
+</div>
+
+----
+
 # RuneScript Compiler (runec)
 
 A compiler for RuneScript (`.rs2`), the scripting language used by RuneScape's game engine. Compiles source scripts into binary `script.dat`/`script.idx` output consumed by the game server.
