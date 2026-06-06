@@ -198,12 +198,12 @@ const TRIGGERS: &[TriggerInfo] = &[
     flat_no_validate("login", 157),
     flat_no_validate("logout", 158),
     flat("tutorial", 159),
-    flat("advancestat", 160),
+    stat("advancestat", 160),
     flat_no_validate("mapzone", 161),
     flat_no_validate("mapzoneexit", 162),
     flat_no_validate("zone", 163),
     flat_no_validate("zoneexit", 164),
-    flat("changestat", 165),
+    stat("changestat", 165),
     flat("ai_spawn", 166),
     flat("ai_despawn", 167),
 ];
@@ -269,6 +269,20 @@ const fn component(name: &'static str, byte: u8) -> TriggerInfo {
         subject_type: Some(Type::Component),
         validates_subject: true,
         is_button: true,
+    }
+}
+
+/// `[advancestat,stat]` / `[changestat,stat]` — subject is a player stat.
+/// Routes to `Type::Stat` so the subject resolves via the typed map instead
+/// of the flat entity-id map, where a same-named entity of another type
+/// (e.g. a `hunt` called `ranged`) would otherwise shadow the stat.
+const fn stat(name: &'static str, byte: u8) -> TriggerInfo {
+    TriggerInfo {
+        name,
+        byte,
+        subject_type: Some(Type::Stat),
+        validates_subject: true,
+        is_button: false,
     }
 }
 
@@ -419,6 +433,11 @@ mod tests {
         assert_eq!(subject_type("inv_button1"), Some(Type::Component));
         assert_eq!(subject_type("login"), None);
         assert_eq!(subject_type("opplayer1"), None); // flat lookup
+        // advancestat/changestat take a stat subject. Without this routing,
+        // `[advancestat,ranged]` flat-resolves `ranged` to whatever type was
+        // registered last under that name (e.g. a hunt) instead of the stat.
+        assert_eq!(subject_type("advancestat"), Some(Type::Stat));
+        assert_eq!(subject_type("changestat"), Some(Type::Stat));
     }
 
     #[test]
