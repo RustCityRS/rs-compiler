@@ -480,10 +480,9 @@ impl ScriptWriter {
         }
 
         // Encode each occupied slot once. Empty slots emit zero bytes.
-        let encoded: Vec<Vec<u8>> = by_id
-            .iter()
-            .map(|opt| opt.map(encode_script).unwrap_or_default())
-            .collect();
+        // Encoding is independent per slot, so fan it out across threads.
+        let encoded: Vec<Vec<u8>> =
+            crate::parallel_map(&by_id, |opt| opt.map(encode_script).unwrap_or_default());
 
         // Build script.dat
         let dat_path = Path::new(&self.output_dir).join("script.dat");
@@ -531,10 +530,9 @@ impl ScriptWriter {
         }
 
         // Encode each occupied slot once. Empty slots emit zero bytes.
-        let encoded: Vec<Vec<u8>> = by_id
-            .iter()
-            .map(|opt| opt.map(encode_script).unwrap_or_default())
-            .collect();
+        // Encoding is independent per slot, so fan it out across threads.
+        let encoded: Vec<Vec<u8>> =
+            crate::parallel_map(&by_id, |opt| opt.map(encode_script).unwrap_or_default());
 
         let mut dat: Vec<u8> = Vec::new();
         dat.extend_from_slice(&(slot_count as u32).to_be_bytes());

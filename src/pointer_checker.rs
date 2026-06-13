@@ -93,6 +93,10 @@ pub struct PointerChecker<'a> {
     opcode_to_name: HashMap<i32, String>,
     /// Reverse map: script id -> index into `scripts`.
     script_id_to_index: HashMap<i32, usize>,
+    /// Reverse map: script name -> index into `scripts` (first occurrence wins,
+    /// matching a linear `position(|s| s.name == name)` scan). Avoids an O(n)
+    /// scan per `validate_script`/`ensure_analysis` call (O(n²) overall).
+    script_name_to_index: HashMap<String, usize>,
     /// Overlay interface names (normalized lowercase). If_button/inv_button triggers
     /// for non-overlay interfaces grant p_active_player, matching ServerPointerChecker.
     overlay_interfaces: HashSet<String>,
@@ -100,7 +104,7 @@ pub struct PointerChecker<'a> {
     /// When present, the checker attaches rustc-style Help/Suggestion
     /// blocks to its warnings. When `None`, warnings still fire but carry
     /// no concrete fix text. Read-only; never feeds codegen.
-    source_cache: Option<&'a HashMap<String, std::rc::Rc<String>>>,
+    source_cache: Option<&'a HashMap<String, std::sync::Arc<String>>>,
     // Caches
     script_analyses: HashMap<String, ScriptAnalysis>,
     script_pointers: HashMap<String, PointerHolder>,
@@ -124,6 +128,14 @@ impl<'a> PointerChecker<'a> {
             script_id_to_index.insert(script.id, i);
         }
 
+        // Build reverse name -> index map. Insert only the first occurrence so
+        // lookups match `scripts.iter().position(|s| s.name == name)` exactly
+        // when multiple triggers share a name.
+        let mut script_name_to_index = HashMap::new();
+        for (i, script) in scripts.iter().enumerate() {
+            script_name_to_index.entry(script.name.clone()).or_insert(i);
+        }
+
         // Build overlay interface set from entity_ids (OverlayInterface type).
         // Any if_button/inv_button trigger whose interface is NOT in this set
         // gets p_active_player granted, matching ServerPointerChecker.
@@ -142,6 +154,7 @@ impl<'a> PointerChecker<'a> {
             registry,
             opcode_to_name,
             script_id_to_index,
+            script_name_to_index,
             overlay_interfaces,
             source_cache: None,
             script_analyses: HashMap::new(),
@@ -154,7 +167,7 @@ impl<'a> PointerChecker<'a> {
     /// Attach a source-text cache so emitted warnings can carry concrete
     /// before/after suggestion text. Purely diagnostic — never touches
     /// bytecode, script metadata, or output ordering.
-    pub fn set_source_cache(&mut self, cache: &'a HashMap<String, std::rc::Rc<String>>) {
+    pub fn set_source_cache(&mut self, cache: &'a HashMap<String, std::sync::Arc<String>>) {
         self.source_cache = Some(cache);
     }
 
@@ -186,22 +199,34 @@ impl<'a> PointerChecker<'a> {
 
     /// Run pointer checking on all scripts and return collected diagnostics.
     pub fn run(&mut self) -> DiagnosticsCollector {
+        let names = self.script_names();
+        self.validate_names(&names)
+    }
+
+    /// Script names in validation order (the order of `scripts`).
+    pub fn script_names(&self) -> Vec<String> {
+        self.scripts.iter().map(|s| s.name.clone()).collect()
+    }
+
+    /// Validate the given scripts, returning their diagnostics in `names` order.
+    ///
+    /// The per-script caches are pure memoization (a script's analysis is a
+    /// function of the read-only scripts + registry), so splitting
+    /// `script_names()` into chunks and giving each chunk its own
+    /// `PointerChecker` produces byte-identical diagnostics to validating
+    /// everything in a single checker — which lets the pass run across threads.
+    pub fn validate_names(&mut self, names: &[String]) -> DiagnosticsCollector {
         let mut diagnostics = DiagnosticsCollector::new();
-
-        // Collect script names first to avoid borrow issues
-        let script_names: Vec<String> = self.scripts.iter().map(|s| s.name.clone()).collect();
-
-        for script_name in &script_names {
+        for script_name in names {
             self.validate_script(script_name, &mut diagnostics);
         }
-
         diagnostics
     }
 
     fn validate_script(&mut self, script_name: &str, diagnostics: &mut DiagnosticsCollector) {
         // Find the script
-        let script_idx = match self.scripts.iter().position(|s| s.name == script_name) {
-            Some(i) => i,
+        let script_idx = match self.script_name_to_index.get(script_name) {
+            Some(&i) => i,
             None => return,
         };
         let trigger = self.scripts[script_idx].trigger.clone();
@@ -542,8 +567,8 @@ impl<'a> PointerChecker<'a> {
         }
         self.pending_analyses.insert(script_name.to_string());
 
-        let script_idx = match self.scripts.iter().position(|s| s.name == script_name) {
-            Some(i) => i,
+        let script_idx = match self.script_name_to_index.get(script_name) {
+            Some(&i) => i,
             None => return,
         };
 
@@ -2240,7 +2265,7 @@ mod tests {
     #[test]
     fn secondary_warning_attaches_help_with_rewrite_suggestions() {
         use std::collections::HashMap;
-        use std::rc::Rc;
+        use std::sync::Arc;
 
         let last_useitem_op = 4270;
         let p_delay_op = 5001;
@@ -2277,14 +2302,14 @@ mod tests {
 
         // Virtual source text. Caller on line 1, callee header on line 1
         // of its own file.
-        let mut source_cache: HashMap<String, Rc<String>> = HashMap::new();
+        let mut source_cache: HashMap<String, Arc<String>> = HashMap::new();
         source_cache.insert(
             "/virt/caller.rs2".to_string(),
-            Rc::new("[oplocu,target] @consume_useitem;\n".to_string()),
+            Arc::new("[oplocu,target] @consume_useitem;\n".to_string()),
         );
         source_cache.insert(
             "/virt/consume.rs2".to_string(),
-            Rc::new(
+            Arc::new(
                 "[label,consume_useitem]\n\
                  last_useitem;\n\
                  p_delay(0);\n"

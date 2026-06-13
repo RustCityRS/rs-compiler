@@ -4,16 +4,18 @@ use crate::symbol::{SymbolKind, SymbolRegistry, SymbolTable};
 use crate::types::{BaseVarType, Type};
 
 /// Code generator that transforms parsed AST into bytecode instructions.
-pub struct Compiler {
-    pub registry: SymbolRegistry,
+pub struct Compiler<'a> {
+    /// Borrowed read-only during code generation, so many `Compiler`s can share
+    /// one registry across threads (each thread builds its own scratch state).
+    pub registry: &'a SymbolRegistry,
     /// Return types of the currently-compiling script (used for type hints in return statements).
     current_return_types: Vec<Type>,
     /// The line number of the currently-compiling statement.
     current_stmt_line: usize,
 }
 
-impl Compiler {
-    pub fn new(registry: SymbolRegistry) -> Self {
+impl<'a> Compiler<'a> {
+    pub fn new(registry: &'a SymbolRegistry) -> Self {
         Compiler {
             registry,
             current_return_types: Vec::new(),
@@ -32,7 +34,7 @@ impl Compiler {
         let mut compiled = CompiledScript::new(full_name, id);
         compiled.trigger = script.trigger.clone();
         compiled.lookup_key =
-            Self::compute_lookup_key(&script.trigger, &script.name, &self.registry);
+            Self::compute_lookup_key(&script.trigger, &script.name, self.registry);
         compiled.param_types = script.params.iter().map(|p| p.param_type).collect();
         let mut locals = SymbolTable::new();
 
@@ -2138,7 +2140,7 @@ mod tests {
         // compiled to `push_int(148)` and the close was dropped at runtime.
         let mut r = seed_registry();
         r.register_command("if_close".into(), 2033, vec![], vec![]);
-        let mut c = Compiler::new(r);
+        let mut c = Compiler::new(&r);
         let mut out = CompiledScript::new("t".into(), 0);
         let mut locals = SymbolTable::new();
         c.compile_expr_hinted(
@@ -2170,7 +2172,7 @@ mod tests {
         let mut r = seed_registry();
         r.register_command("mes".into(), 2064, vec![Type::String], vec![]);
         r.register_command("if_close".into(), 2033, vec![], vec![]);
-        let c = Compiler::new(r);
+        let c = Compiler::new(&r);
 
         // test_op(oploc1, ...): trigger name -> trigger byte (oploc1 = 66).
         let mut out = CompiledScript::new("t".into(), 0);

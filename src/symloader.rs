@@ -170,7 +170,11 @@ fn load_script_pack(registry: &mut SymbolRegistry, path: &Path) {
 
 /// Generate/update script.pack from .rs2 files, matching 2004scape's regenScriptPack().
 /// Scans all [trigger,name] declarations, preserves existing IDs, assigns new ones.
-pub fn generate_script_pack(scripts_dir: &Path, pack_dir: &Path) {
+pub fn generate_script_pack(
+    scripts_dir: &Path,
+    pack_dir: &Path,
+    sources: &std::collections::HashMap<std::path::PathBuf, std::sync::Arc<String>>,
+) {
     use std::collections::BTreeMap;
 
     let pack_path = pack_dir.join("script.pack");
@@ -209,8 +213,18 @@ pub fn generate_script_pack(scripts_dir: &Path, pack_dir: &Path) {
         if path.file_name().and_then(|n| n.to_str()) == Some("engine.rs2") {
             continue;
         }
-        let Ok(text) = fs::read_to_string(path) else {
-            continue;
+        // Reuse the source already read during parsing; only touch disk for a
+        // file somehow absent from the cache. Same bytes either way, so the
+        // scanned declarations (and resulting script IDs) are unchanged.
+        let fallback;
+        let text: &str = if let Some(rc) = sources.get(path) {
+            rc
+        } else {
+            fallback = match fs::read_to_string(path) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            &fallback
         };
         for line in text.lines() {
             let line = line.split("//").next().unwrap_or("").trim();
@@ -261,10 +275,20 @@ fn collect_rs2_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    let mut sorted: Vec<std::path::PathBuf> = entries.flatten().map(|e| e.path()).collect();
-    sorted.sort();
-    for path in sorted {
-        if path.is_dir() {
+    // Keep each entry's file-type (free from the directory enumeration)
+    // alongside its path so the recursion avoids a metadata syscall per entry,
+    // while still sorting by path to preserve the previous traversal order.
+    let mut sorted: Vec<(std::path::PathBuf, bool)> = entries
+        .flatten()
+        .map(|e| {
+            let p = e.path();
+            let is_dir = entry_is_dir(&e, &p);
+            (p, is_dir)
+        })
+        .collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    for (path, is_dir) in sorted {
+        if is_dir {
             collect_rs2_files(&path, out);
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs2") {
             out.push(path);
@@ -352,8 +376,14 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) {
 
     // Register type-name identifiers so they resolve to their CS2 type chars.
     register_type_chars(registry);
+}
 
-    // Load pre-assigned script IDs LAST so they are available before script registration.
+/// Load the script-id packs. Split out of `load_packs` because `script.pack` is
+/// (re)generated from the parsed sources by `generate_script_pack`, so these
+/// must run after parsing — whereas the rest of `load_packs` is parse-independent
+/// and can run concurrently with it.
+pub fn load_script_ids(registry: &mut SymbolRegistry, pack_dir: &Path) {
+    // Pre-assigned script IDs, available before script registration.
     load_script_pack(registry, &pack_dir.join("script.pack"));
 
     // Load clientscript.pack: CS2 scripts the server references by name via
@@ -478,14 +508,16 @@ fn load_game_vars(registry: &mut SymbolRegistry, path: &Path, category: &str) {
 /// same IDs the runtime uses when indexing rows.
 pub fn load_dbtable_configs(
     registry: &mut SymbolRegistry,
-    scripts_dir: &Path,
+    files: &[std::path::PathBuf],
     dbtable_ids: &std::collections::HashMap<String, u16>,
 ) {
-    let mut dbtable_files: Vec<std::path::PathBuf> = Vec::new();
-    collect_files_by_ext(scripts_dir, "dbtable", &mut dbtable_files);
+    let mut dbtable_files: Vec<&std::path::PathBuf> = files
+        .iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("dbtable"))
+        .collect();
     dbtable_files.sort();
 
-    for path in &dbtable_files {
+    for path in dbtable_files {
         let Ok(text) = fs::read_to_string(path) else {
             continue;
         };
@@ -583,12 +615,14 @@ pub fn load_dbtable_pack(path: &Path) -> std::collections::HashMap<String, u16> 
 /// `loadDirExtFull(scripts_dir, '.constant', ...)` behavior.
 ///
 /// Format: `^name = value` per line, with `//` and `/* */` comment stripping.
-pub fn load_constant_files(registry: &mut SymbolRegistry, scripts_dir: &Path) {
-    let mut constant_files: Vec<std::path::PathBuf> = Vec::new();
-    collect_files_by_ext(scripts_dir, "constant", &mut constant_files);
+pub fn load_constant_files(registry: &mut SymbolRegistry, files: &[std::path::PathBuf]) {
+    let mut constant_files: Vec<&std::path::PathBuf> = files
+        .iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("constant"))
+        .collect();
     constant_files.sort();
 
-    for path in &constant_files {
+    for path in constant_files {
         let text = match fs::read_to_string(path) {
             Ok(t) => t,
             Err(_) => continue,
@@ -703,7 +737,7 @@ fn strip_comments(text: &str) -> Vec<String> {
 /// of each matching game-var. `load_game_vars` defaults everything to
 /// `Type::Int`; the real type comes from the `type=<typename>` line
 /// in the config block.
-pub fn load_game_var_types(registry: &mut SymbolRegistry, scripts_dir: &Path) {
+pub fn load_game_var_types(registry: &mut SymbolRegistry, files: &[std::path::PathBuf]) {
     // Track the next auto-assigned ID per category for vars only found in config files.
     let mut next_auto_id: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
     for ext in &["varp", "varn", "vars", "varbit"] {
@@ -731,9 +765,10 @@ pub fn load_game_var_types(registry: &mut SymbolRegistry, scripts_dir: &Path) {
     }
 
     for ext in &["varp", "varn", "vars", "varbit"] {
-        let mut files = Vec::new();
-        collect_files_by_ext(scripts_dir, ext, &mut files);
-        for path in &files {
+        let ext_files = files
+            .iter()
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some(*ext));
+        for path in ext_files {
             let Ok(text) = fs::read_to_string(path) else {
                 continue;
             };
@@ -794,17 +829,38 @@ pub fn load_game_var_types(registry: &mut SymbolRegistry, scripts_dir: &Path) {
     }
 }
 
-/// Recursively collect files with a given extension.
-fn collect_files_by_ext(dir: &Path, ext: &str, out: &mut Vec<std::path::PathBuf>) {
+/// Decide whether a directory entry is a directory.
+///
+/// Prefers the file-type carried by the directory enumeration — free on
+/// Windows, where `read_dir` already returns each entry's attributes — and
+/// only falls back to a `metadata` syscall for symlinks. This preserves
+/// `Path::is_dir`'s symlink-following semantics exactly while avoiding one
+/// metadata syscall per entry in the common (non-symlink) case.
+pub(crate) fn entry_is_dir(entry: &fs::DirEntry, path: &Path) -> bool {
+    match entry.file_type() {
+        Ok(ft) if !ft.is_symlink() => ft.is_dir(),
+        _ => path.is_dir(),
+    }
+}
+
+/// Recursively collect every file under `dir` in a single traversal, in
+/// `read_dir` order (each directory recursed as it is encountered).
+///
+/// Callers filter this list by extension in memory, so one walk feeds the
+/// constant, game-var, and dbtable loaders instead of each re-walking the
+/// tree. Filtering preserves relative order, so the per-extension subsequence
+/// is identical to walking for that single extension — loader behavior is
+/// unchanged.
+pub(crate) fn collect_all_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            collect_files_by_ext(&path, ext, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
+        if entry_is_dir(&entry, &path) {
+            collect_all_files(&path, out);
+        } else {
             out.push(path);
         }
     }

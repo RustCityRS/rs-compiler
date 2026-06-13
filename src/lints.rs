@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::bytecode::{CompiledScript, Instruction, Opcode, Operand};
 use crate::diagnostics::{
@@ -28,7 +28,7 @@ use crate::types::BaseVarType;
 
 pub fn run_lints(
     scripts: &[CompiledScript],
-    source_cache: Option<&HashMap<String, Rc<String>>>,
+    source_cache: Option<&HashMap<String, Arc<String>>>,
 ) -> DiagnosticsCollector {
     let mut diags = DiagnosticsCollector::new();
     for script in scripts {
@@ -48,7 +48,7 @@ pub fn run_lints(
 /// gets a warning at its declaration/first-write line.
 fn check_unused_locals(
     script: &CompiledScript,
-    source_cache: Option<&HashMap<String, Rc<String>>>,
+    source_cache: Option<&HashMap<String, Arc<String>>>,
     diagnostics: &mut DiagnosticsCollector,
 ) {
     // Per-type slot id -> read? (PushXxxLocal / PushArrayInt).
@@ -235,7 +235,7 @@ fn check_unused_locals(
 
 fn emit_unused_local(
     script: &CompiledScript,
-    source_cache: Option<&HashMap<String, Rc<String>>>,
+    source_cache: Option<&HashMap<String, Arc<String>>>,
     diagnostics: &mut DiagnosticsCollector,
     name: &str,
     ty: &str,
@@ -303,7 +303,7 @@ fn emit_unused_local(
 /// trigger a false positive.
 fn check_unreachable_code(
     script: &CompiledScript,
-    source_cache: Option<&HashMap<String, Rc<String>>>,
+    source_cache: Option<&HashMap<String, Arc<String>>>,
     diagnostics: &mut DiagnosticsCollector,
 ) {
     let instrs = &script.instructions;
@@ -426,7 +426,7 @@ fn check_unreachable_code(
 
 fn emit_unreachable(
     script: &CompiledScript,
-    source_cache: Option<&HashMap<String, Rc<String>>>,
+    source_cache: Option<&HashMap<String, Arc<String>>>,
     diagnostics: &mut DiagnosticsCollector,
     line: usize,
 ) {

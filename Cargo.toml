@@ -26,3 +26,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 ctor = "0.2"
 lazy_static = "1.4"
+
+# Release profile tuned for runtime speed. These only affect how the optimizer
+# compiles identical source — no behavior change. Fat LTO + a single codegen
+# unit let the optimizer inline across module boundaries (lexer/parser/registry
+# hot paths) at the cost of a slower build.
+[profile.release]
+lto = "fat"
+codegen-units = 1
