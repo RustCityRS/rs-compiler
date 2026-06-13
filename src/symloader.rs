@@ -851,7 +851,11 @@ pub(crate) fn entry_is_dir(entry: &fs::DirEntry, path: &Path) -> bool {
 /// tree. Filtering preserves relative order, so the per-extension subsequence
 /// is identical to walking for that single extension — loader behavior is
 /// unchanged.
-pub(crate) fn collect_all_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+///
+/// Public so external consumers can build the file list that
+/// [`load_constant_files`], [`load_game_var_types`], and [`load_dbtable_configs`]
+/// now take, rather than re-implementing the walk themselves.
+pub fn collect_all_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
