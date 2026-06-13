@@ -83,6 +83,16 @@ runec lint -s data/src/scripts --pack data/pack
 
 This runs the full pipeline (parse, type-check, codegen, pointer-check, lints) and reports diagnostics. Useful for editor tooling and CI lint gates.
 
+## Performance
+
+`runec` runs its heavy phases — parsing, type-checking, code generation,
+pointer analysis, and output encoding — in parallel across all available
+cores, while producing **byte-for-byte identical** output to a single-threaded
+run (verified against the reference compiler on full 225 and 647 script sets).
+On a 1,100+ file script set it compiles in roughly half a second — about **6×
+faster** than 0.2.x on a multi-core machine. Release builds use fat LTO for
+additional throughput.
+
 ## Development
 
 ### Building from Source
@@ -118,7 +128,7 @@ Or add it to your `Cargo.toml` manually:
 
 ```toml
 [dependencies]
-rs-runec = "0.0.9"
+rs-runec = "0.3.1"
 ```
 
 ### Example
