@@ -781,18 +781,8 @@ impl<'a> TypeChecker<'a> {
                             Some(Type::Error)
                         }
                     }
-                } else if let Some(sym) = self.registry.lookup_entity_id(name) {
-                    match &sym.kind {
-                        SymbolKind::Constant { const_type, .. } => Some(*const_type),
-                        other => {
-                            let kind_name = other.kind_name();
-                            self.error(
-                                line,
-                                msg::fmt(msg::UNSUPPORTED_SYMBOLTYPE_TO_TYPE, &[kind_name]),
-                            );
-                            Some(Type::Error)
-                        }
-                    }
+                } else if let Some(e) = self.registry.lookup_entity_id(name) {
+                    Some(e.const_type)
                 } else if let Some(sym) = self.registry.lookup_command(name).cloned() {
                     if let SymbolKind::Command { return_types, .. } = &sym.kind {
                         return return_types.first().copied();
@@ -891,11 +881,8 @@ impl<'a> TypeChecker<'a> {
                             {
                                 return Some(h);
                             }
-                        } else if self.registry.lookup_entity_id(&combined).is_some()
-                            && let Some(sym) = self.registry.lookup_entity_id(&combined)
-                            && let SymbolKind::Constant { const_type, .. } = &sym.kind
-                        {
-                            return Some(*const_type);
+                        } else if let Some(e) = self.registry.lookup_entity_id(&combined) {
+                            return Some(e.const_type);
                         }
                     }
 
@@ -1540,13 +1527,15 @@ impl<'a> TypeChecker<'a> {
                 scored.push((d, cand.to_string()));
             };
 
-        for (cand, by_type) in self.registry.entity_ids_typed.iter() {
-            if by_type.contains_key(&expected) {
+        for (cand, entry) in self.registry.entity_ids.iter() {
+            if entry.variants.iter().any(|(t, _)| *t == expected) {
                 consider(cand, &mut scored, &mut seen);
             }
         }
-        for cand in self.registry.entity_ids.keys() {
-            consider(cand, &mut scored, &mut seen);
+        for (cand, entry) in self.registry.entity_ids.iter() {
+            if entry.primary.is_some() {
+                consider(cand, &mut scored, &mut seen);
+            }
         }
 
         scored.sort_by_key(|(d, _)| *d);

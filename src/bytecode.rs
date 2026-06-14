@@ -91,20 +91,27 @@ pub enum Opcode {
 pub struct Instruction {
     pub opcode: Opcode,
     pub operand: Operand,
-    pub line: Option<u32>,
 }
 
 /// The operand (data) associated with an instruction.
+///
+/// Kept as small as possible (each script holds a `Vec<Instruction>`, and the
+/// corpus runs to ~half a million instructions): the two heap-backed payloads —
+/// string literals and switch tables — live in side pools on the owning
+/// `CompiledScript`, and the operand stores only a `u32` index into them. That
+/// keeps every variant ≤ 8 B, so `Operand` is 16 B and `Instruction` is 24 B
+/// (vs 24/32 when the payloads were inline `Box<str>`/`Box<[_]>`).
 #[derive(Debug, Clone)]
 pub enum Operand {
     None,
     Int(i32),
     Long(i64),
-    Str(String),
+    /// Index into the owning `CompiledScript::strings` pool.
+    Str(u32),
     /// Jump target as instruction index within the script
     JumpTarget(usize),
-    /// Switch table: list of (case_value, jump_target) pairs
-    SwitchTable(Vec<(i32, usize)>),
+    /// Index into the owning `CompiledScript::switch_tables` pool.
+    SwitchTable(u32),
     /// String join with N parts
     StringCount(u32),
     /// Array definition: (var_id, element_type_char)
@@ -113,35 +120,18 @@ pub enum Operand {
 
 impl Instruction {
     pub fn new(opcode: Opcode, operand: Operand) -> Self {
-        Instruction {
-            opcode,
-            operand,
-            line: None,
-        }
-    }
-
-    pub fn with_line(opcode: Opcode, operand: Operand, line: u32) -> Self {
-        Instruction {
-            opcode,
-            operand,
-            line: Some(line),
-        }
+        Instruction { opcode, operand }
     }
 
     pub fn simple(opcode: Opcode) -> Self {
         Instruction {
             opcode,
             operand: Operand::None,
-            line: None,
         }
     }
 
     pub fn push_int(value: i32) -> Self {
         Instruction::new(Opcode::PushConstantInt, Operand::Int(value))
-    }
-
-    pub fn push_string(value: String) -> Self {
-        Instruction::new(Opcode::PushConstantString, Operand::Str(value))
     }
 
     pub fn push_long(value: i64) -> Self {
@@ -234,7 +224,12 @@ pub struct CompiledScript {
     pub int_arg_count: u16,
     pub string_arg_count: u16,
     pub long_arg_count: u16,
-    pub switch_tables: Vec<Vec<(i32, usize)>>,
+    /// String-literal / unknown-command-name payloads, referenced by
+    /// `Operand::Str(index)`. Kept out of the instruction so `Operand` stays 8 B.
+    pub strings: Vec<Box<str>>,
+    /// Switch-case tables `(case_value, jump_target)`, referenced by
+    /// `Operand::SwitchTable(index)`. Stored in instruction-encounter order.
+    pub switch_tables: Vec<Box<[(i32, usize)]>>,
 }
 
 impl CompiledScript {
@@ -254,12 +249,29 @@ impl CompiledScript {
             int_arg_count: 0,
             string_arg_count: 0,
             long_arg_count: 0,
+            strings: Vec::new(),
             switch_tables: Vec::new(),
         }
     }
 
     pub fn push(&mut self, instruction: Instruction) {
         self.instructions.push(instruction);
+    }
+
+    /// Add a string payload to the pool and return its `Operand::Str` index.
+    pub fn intern_str(&mut self, value: String) -> u32 {
+        let idx = self.strings.len() as u32;
+        self.strings.push(value.into_boxed_str());
+        idx
+    }
+
+    /// Emit a `PushConstantString` whose literal is interned into the pool.
+    pub fn push_string(&mut self, value: String) {
+        let idx = self.intern_str(value);
+        self.instructions.push(Instruction::new(
+            Opcode::PushConstantString,
+            Operand::Str(idx),
+        ));
     }
 
     pub fn len(&self) -> usize {
@@ -273,5 +285,17 @@ impl CompiledScript {
     /// Update a jump target at the given instruction index.
     pub fn patch_jump(&mut self, index: usize, target: usize) {
         self.instructions[index].operand = Operand::JumpTarget(target);
+    }
+
+    /// Release the spare capacity the growable codegen buffers left behind.
+    /// Compiled scripts are immutable after codegen but are held in memory for
+    /// the whole pointer-check + write phase, so reclaiming each `Vec`'s doubling
+    /// slack (often 25-50%) meaningfully lowers the resident footprint.
+    pub fn shrink_to_fit(&mut self) {
+        self.instructions.shrink_to_fit();
+        self.param_types.shrink_to_fit();
+        self.local_table.shrink_to_fit();
+        self.strings.shrink_to_fit();
+        self.switch_tables.shrink_to_fit();
     }
 }
