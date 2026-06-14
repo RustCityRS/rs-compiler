@@ -479,7 +479,7 @@ pub fn compile_memory(
     pack_dir: Option<&Path>,
     lint: bool,
 ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
-    compile_memory_with_tests(scripts_dir, pack_dir, lint, false)
+    compile_memory_with_options(scripts_dir, pack_dir, lint, false, false)
 }
 
 /// Like `compile_memory` but includes `#testscript` sections when
@@ -490,6 +490,29 @@ pub fn compile_memory_with_tests(
     lint: bool,
     include_tests: bool,
 ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
+    compile_memory_with_options(scripts_dir, pack_dir, lint, include_tests, false)
+}
+
+/// In-memory compile — returns the `(script.dat, script.idx)` bytes instead of
+/// writing them — choosing the compilation strategy.
+///
+/// With `low_mem`, the recompile pipeline is used: scripts are re-parsed and
+/// re-compiled on demand so the full compiled set is never resident (~16 MB heap
+/// vs ~93), at roughly 6× the time; the returned bytes are byte-identical to the
+/// default path. `include_tests` keeps `#testscript` sections. The
+/// `RUNEC_RECOMPILE` environment variable forces low-memory mode on as well.
+pub fn compile_memory_with_options(
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+    lint: bool,
+    include_tests: bool,
+    low_mem: bool,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
+    if low_mem || std::env::var("RUNEC_RECOMPILE").is_ok_and(|v| !v.is_empty()) {
+        info!("[recompile] low-memory recompile pipeline enabled");
+        return compile_recompile_memory(scripts_dir, pack_dir, lint, include_tests);
+    }
+
     let (compiled_scripts, diagnostics) = run_pipeline(scripts_dir, pack_dir, lint, include_tests)?;
 
     info!("Writing compiled output to memory...");
@@ -1411,15 +1434,24 @@ impl RecompileStore<'_> {
     }
 }
 
-/// Full compile via the recompile pipeline: writes output + prints diagnostics.
-fn compile_recompile(
+/// Per-slot encoded output blobs (indexed by script id) plus accumulated
+/// diagnostics — what the recompile core hands back before the bytes are written
+/// to disk or assembled in memory.
+type RecompiledOutput = (Vec<Vec<u8>>, DiagnosticsCollector);
+
+/// Core of the recompile (low-memory) pipeline: runs every phase re-compiling
+/// scripts on demand — never holding all compiled bytecode at once — and returns
+/// the per-slot encoded output blobs plus diagnostics, without writing or
+/// printing. The disk and in-memory entry points (`compile_recompile`,
+/// `compile_recompile_memory`) wrap this. On a phase error it prints diagnostics
+/// and returns `Err`, matching the batch path.
+fn recompile_to_encoded(
     scripts_dir: &Path,
     pack_dir: Option<&Path>,
-    output_dir: &Path,
     lint: bool,
-) -> Result<(), Box<dyn Error>> {
+    include_tests: bool,
+) -> Result<RecompiledOutput, Box<dyn Error>> {
     use crate::pointer_checker::{PointerChecker, ScriptSource};
-    let include_tests = false;
 
     let mut rs2_files: Vec<PathBuf> = get_rs2_files(scripts_dir, "rs2")?;
     rs2_files.sort();
@@ -1612,11 +1644,9 @@ fn compile_recompile(
     mem_mark("after pointercheck");
 
     // Output: re-compile each file once, encode each script into its id slot,
-    // optionally lint, then write — never holding all compiled scripts at once.
-    info!(
-        "Writing output to {}...",
-        output_dir.display().to_string().replace('\\', "/")
-    );
+    // optionally lint — never holding all compiled scripts at once. The caller
+    // writes the blobs to disk or assembles them in memory.
+    info!("[recompile] Re-compiling + encoding output...");
     let mut encoded: Vec<Vec<u8>> = vec![Vec::new(); slot_count];
     for path in &rs2_files {
         let parsed = match parse_one_file(path, include_tests).read {
@@ -1650,11 +1680,43 @@ fn compile_recompile(
         }
     }
     mem_mark("after codegen");
-    ScriptWriter::new(output_dir.display().to_string()).write_encoded(&encoded)?;
+    Ok((encoded, diagnostics))
+}
 
+/// Full compile via the recompile (low-memory) pipeline: writes `script.dat` /
+/// `script.idx` to `output_dir`, then prints diagnostics.
+fn compile_recompile(
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+    output_dir: &Path,
+    lint: bool,
+) -> Result<(), Box<dyn Error>> {
+    let (encoded, diagnostics) = recompile_to_encoded(scripts_dir, pack_dir, lint, false)?;
+    info!(
+        "Writing output to {}...",
+        output_dir.display().to_string().replace('\\', "/")
+    );
+    ScriptWriter::new(output_dir.display().to_string()).write_encoded(&encoded)?;
     diagnostics.print_all();
     info!("Compilation complete!");
     Ok(())
+}
+
+/// In-memory compile via the recompile (low-memory) pipeline: returns the
+/// `(script.dat, script.idx)` bytes, then prints diagnostics. Byte-identical to
+/// the in-memory batch path (`compile_memory*`).
+fn compile_recompile_memory(
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+    lint: bool,
+    include_tests: bool,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
+    let (encoded, diagnostics) = recompile_to_encoded(scripts_dir, pack_dir, lint, include_tests)?;
+    info!("Writing compiled output to memory...");
+    let out = ScriptWriter::new("".into()).build_encoded(&encoded);
+    diagnostics.print_all();
+    info!("Compilation complete!");
+    Ok(out)
 }
 
 fn find_testscript_line(source: &str) -> Option<usize> {

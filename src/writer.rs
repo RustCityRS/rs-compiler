@@ -525,6 +525,30 @@ impl ScriptWriter {
         Ok(())
     }
 
+    /// Build `script.dat` + `script.idx` bytes in memory from pre-encoded per-slot
+    /// blobs — the in-memory counterpart of [`ScriptWriter::write_encoded`], used
+    /// by the recompile pipeline's in-memory entry point. Uses the identical
+    /// header + sparse-by-id layout, so it is byte-for-byte equal to `build_all`
+    /// for the same scripts.
+    pub fn build_encoded(&self, encoded: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
+        let slot_count = encoded.len();
+
+        let mut dat: Vec<u8> = Vec::new();
+        dat.extend_from_slice(&(slot_count as u32).to_be_bytes());
+        dat.extend_from_slice(&COMPILER_VERSION.to_be_bytes());
+        for bytes in encoded {
+            dat.extend_from_slice(bytes);
+        }
+
+        let mut idx: Vec<u8> = Vec::new();
+        idx.extend_from_slice(&(slot_count as u32).to_be_bytes());
+        for bytes in encoded {
+            idx.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        }
+
+        (dat, idx)
+    }
+
     pub fn build_all(&self, scripts: &[CompiledScript]) -> io::Result<(Vec<u8>, Vec<u8>)> {
         // Max id determines the sparse slot count. Scripts with id < 0
         // are stray (unresolved) and would collide at slot 0 — drop them
