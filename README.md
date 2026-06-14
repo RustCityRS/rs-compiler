@@ -148,7 +148,7 @@ Or add it to your `Cargo.toml` manually:
 
 ```toml
 [dependencies]
-rs-runec = "0.3.1"
+rs-runec = "0.4.0"
 ```
 
 ### Example
