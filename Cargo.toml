@@ -23,6 +23,12 @@ clap = { version = "4.5", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[features]
+# Heap profiling via a counting global allocator (src/memprof.rs). Off by
+# default so the shipped binary is unaffected; enable with `--features memprof`
+# to log per-phase live heap and the global peak. Adds no dependencies.
+memprof = []
+
 [dev-dependencies]
 ctor = "0.2"
 lazy_static = "1.4"

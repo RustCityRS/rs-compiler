@@ -64,7 +64,7 @@ impl<'a> Compiler<'a> {
                 BaseVarType::Integer => {
                     compiled.push(Instruction::push_int(ret_type.default_return_value()))
                 }
-                BaseVarType::String => compiled.push(Instruction::push_string(String::new())),
+                BaseVarType::String => compiled.push_string(String::new()),
                 BaseVarType::Long => compiled.push(Instruction::push_long(0)),
             }
         }
@@ -164,7 +164,7 @@ impl<'a> Compiler<'a> {
                         BaseVarType::Integer => {
                             out.push(Instruction::push_int(var_type.default_int_value()))
                         }
-                        BaseVarType::String => out.push(Instruction::push_string(String::new())),
+                        BaseVarType::String => out.push_string(String::new()),
                         BaseVarType::Long => out.push(Instruction::push_long(0)),
                     }
                     Self::emit_line(*line, out);
@@ -634,7 +634,7 @@ impl<'a> Compiler<'a> {
                 .iter()
                 .map(|arg| self.infer_type_char(arg, locals))
                 .collect();
-            out.push(Instruction::push_string(type_desc));
+            out.push_string(type_desc);
         }
 
         let cmd_sym = self
@@ -653,9 +653,10 @@ impl<'a> Compiler<'a> {
                 out.push(Instruction::new(Opcode::Command, Operand::Int(encoded)));
             }
         } else {
+            let cmd_name_idx = out.intern_str(name.to_string());
             out.push(Instruction::new(
                 Opcode::Command,
-                Operand::Str(name.to_string()),
+                Operand::Str(cmd_name_idx),
             ));
         }
     }
@@ -781,9 +782,11 @@ impl<'a> Compiler<'a> {
 
         // Emit SWITCH instruction (table to be filled in later)
         let switch_idx = out.len();
+        let switch_tbl_idx = out.switch_tables.len() as u32;
+        out.switch_tables.push(Box::default());
         out.push(Instruction::new(
             Opcode::Switch,
-            Operand::SwitchTable(Vec::new()),
+            Operand::SwitchTable(switch_tbl_idx),
         ));
 
         // Layout (matches reference compiler):
@@ -881,14 +884,13 @@ impl<'a> Compiler<'a> {
                         resolved = true;
                     }
                     if !resolved {
-                        if let Some(sym) = self.registry.entity_ids.get(ident.as_str()) {
-                            if let SymbolKind::Constant {
-                                int_value: Some(value),
-                                ..
-                            } = &sym.kind
-                            {
-                                values.push(*value);
-                            }
+                        if let Some(e) = self
+                            .registry
+                            .entity_ids
+                            .get(ident.as_str())
+                            .and_then(|en| en.primary)
+                        {
+                            values.push(e.id);
                         } else if let Some(sym) = self.registry.constants.get(ident.as_str())
                             && let SymbolKind::Constant {
                                 int_value: Some(value),
@@ -914,13 +916,8 @@ impl<'a> Compiler<'a> {
                             {
                                 values.push(id);
                             }
-                        } else if let Some(sym) = self.registry.lookup_entity_id(&combined).cloned()
-                            && let SymbolKind::Constant {
-                                int_value: Some(id),
-                                ..
-                            } = &sym.kind
-                        {
-                            values.push(*id);
+                        } else if let Some(e) = self.registry.lookup_entity_id(&combined) {
+                            values.push(e.id);
                         }
                     }
                 } else if let Expr::CoordLiteral(v) = val {
@@ -973,7 +970,9 @@ impl<'a> Compiler<'a> {
         }
 
         // Update the SWITCH instruction with the complete table
-        out.instructions[switch_idx].operand = Operand::SwitchTable(table);
+        if let Operand::SwitchTable(tbl_idx) = out.instructions[switch_idx].operand {
+            out.switch_tables[tbl_idx as usize] = table.into_boxed_slice();
+        }
 
         // Patch end-of-case jumps to end_pos
         for pos in end_jumps {
@@ -1011,17 +1010,12 @@ impl<'a> Compiler<'a> {
                         out.push(Instruction::push_int(id));
                         return;
                     }
-                    if let Some(sym) = self.registry.lookup_entity_id(s)
-                        && let SymbolKind::Constant {
-                            int_value: Some(id),
-                            ..
-                        } = &sym.kind
-                    {
-                        out.push(Instruction::push_int(*id));
+                    if let Some(e) = self.registry.lookup_entity_id(s) {
+                        out.push(Instruction::push_int(e.id));
                         return;
                     }
                 }
-                out.push(Instruction::push_string(s.clone()));
+                out.push_string(s.clone());
             }
 
             Expr::BoolLiteral(b) => {
@@ -1032,7 +1026,7 @@ impl<'a> Compiler<'a> {
                 // For string-typed parameters, null is the string "null".
                 // For all other types, null is integer -1.
                 if matches!(type_hint, Some(Type::String)) {
-                    out.push(Instruction::push_string("null".to_string()));
+                    out.push_string("null".to_string());
                 } else {
                     out.push(Instruction::push_int(-1));
                 }
@@ -1118,7 +1112,7 @@ impl<'a> Compiler<'a> {
                         if *const_line > 0 {
                             Self::emit_line(*const_line - 1, out);
                         }
-                        out.push(Instruction::push_string(s.clone()));
+                        out.push_string(s.clone());
                     }
                 }
             }
@@ -1168,25 +1162,16 @@ impl<'a> Compiler<'a> {
                         return;
                     }
                 }
-                if let Some(sym) = self.registry.lookup_entity_id(name).cloned()
-                    && let SymbolKind::Constant {
-                        const_type,
-                        int_value,
-                        string_value,
-                    } = &sym.kind
-                {
+                if let Some(e) = self.registry.lookup_entity_id(name) {
                     // Param entities should NOT shadow type name identifiers unless
                     // we have a Param-typed hint. This allows "namedobj" etc. to resolve
                     // to their type chars in enum(int, namedobj, ...) contexts.
-                    let skip_for_type_char = *const_type == Type::Param
+                    let skip_for_type_char = e.const_type == Type::Param
                         && type_hint != Some(Type::Param)
                         && self.registry.type_chars.contains_key(name);
                     if !skip_for_type_char {
-                        if let Some(v) = int_value {
-                            out.push(Instruction::push_int(*v));
-                        } else if let Some(s) = string_value {
-                            out.push(Instruction::push_string(s.clone()));
-                        }
+                        // Entity ids are always integer ids (string_value is never set).
+                        out.push(Instruction::push_int(e.id));
                         // If skip_for_type_char, fall through to commands/type_chars below
                         return;
                     }
@@ -1212,7 +1197,7 @@ impl<'a> Compiler<'a> {
                         if let Some(v) = int_value {
                             out.push(Instruction::push_int(*v));
                         } else if let Some(s) = string_value {
-                            out.push(Instruction::push_string(s.clone()));
+                            out.push_string(s.clone());
                         }
                     }
                 } else {
@@ -1283,13 +1268,8 @@ impl<'a> Compiler<'a> {
                         (lhs.as_ref(), rhs.as_ref())
                 {
                     let combined = format!("{}+{}", lhs_name, rhs_name);
-                    if let Some(sym) = self.registry.lookup_entity_id(&combined).cloned()
-                        && let SymbolKind::Constant {
-                            int_value: Some(id),
-                            ..
-                        } = &sym.kind
-                    {
-                        out.push(Instruction::push_int(*id));
+                    if let Some(e) = self.registry.lookup_entity_id(&combined) {
+                        out.push(Instruction::push_int(e.id));
                         return;
                     }
                 }
@@ -1444,7 +1424,7 @@ impl<'a> Compiler<'a> {
                         .iter()
                         .map(|arg| self.infer_type_char(arg, locals))
                         .collect();
-                    out.push(Instruction::push_string(type_desc));
+                    out.push_string(type_desc);
                 }
 
                 // db_find needs an implicit extra push_int argument: the Java BaseVarType
@@ -1491,9 +1471,10 @@ impl<'a> Compiler<'a> {
                         out.push(Instruction::new(Opcode::Command, Operand::Int(encoded)));
                     }
                 } else {
+                    let cmd_name_idx = out.intern_str(name.to_string());
                     out.push(Instruction::new(
                         Opcode::Command,
-                        Operand::Str(name.clone()),
+                        Operand::Str(cmd_name_idx),
                     ));
                 }
 
@@ -1593,7 +1574,7 @@ impl<'a> Compiler<'a> {
                 for part in parts {
                     match part {
                         StringPart::Literal(s) => {
-                            out.push(Instruction::push_string(s.clone()));
+                            out.push_string(s.clone());
                             count += 1;
                         }
                         StringPart::Expr(e) => {
@@ -2030,13 +2011,8 @@ impl<'a> Compiler<'a> {
         }
 
         // Fallback: flat entity_ids lookup
-        if let Some(sym) = registry.lookup_entity_id(entity_name)
-            && let crate::symbol::SymbolKind::Constant {
-                int_value: Some(entity_id),
-                ..
-            } = &sym.kind
-        {
-            return (*entity_id as i64 * 1024 + 512 + trigger_byte) as i32;
+        if let Some(e) = registry.lookup_entity_id(entity_name) {
+            return (e.id as i64 * 1024 + 512 + trigger_byte) as i32;
         }
         -1
     }

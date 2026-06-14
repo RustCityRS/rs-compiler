@@ -17,7 +17,6 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crate::bytecode::{CompiledScript, Instruction, Opcode, Operand};
 use crate::diagnostics::{
@@ -28,12 +27,26 @@ use crate::types::BaseVarType;
 
 pub fn run_lints(
     scripts: &[CompiledScript],
-    source_cache: Option<&HashMap<String, Arc<String>>>,
+    source_cache: Option<crate::SourceProvider<'_>>,
 ) -> DiagnosticsCollector {
+    // Each script's two lint passes are independent and their per-script output
+    // is deterministic, so fan the scripts out across threads exactly like the
+    // other analysis phases (type-check, codegen, pointer-check). `SourceProvider`
+    // is `Copy` + `Sync` (it only borrows the source maps), so workers share it
+    // freely. `parallel_chunks` hands each worker a contiguous range and joins in
+    // input order, so the merged diagnostic stream is byte-identical to the old
+    // sequential `for script in scripts` loop.
+    let chunk_diags = crate::parallel_chunks(scripts, move |chunk| {
+        let mut diags = DiagnosticsCollector::new();
+        for script in chunk {
+            check_unused_locals(script, source_cache, &mut diags);
+            check_unreachable_code(script, source_cache, &mut diags);
+        }
+        diags
+    });
     let mut diags = DiagnosticsCollector::new();
-    for script in scripts {
-        check_unused_locals(script, source_cache, &mut diags);
-        check_unreachable_code(script, source_cache, &mut diags);
+    for d in chunk_diags {
+        diags.merge(d);
     }
     diags
 }
@@ -48,7 +61,7 @@ pub fn run_lints(
 /// gets a warning at its declaration/first-write line.
 fn check_unused_locals(
     script: &CompiledScript,
-    source_cache: Option<&HashMap<String, Arc<String>>>,
+    source_cache: Option<crate::SourceProvider<'_>>,
     diagnostics: &mut DiagnosticsCollector,
 ) {
     // Per-type slot id -> read? (PushXxxLocal / PushArrayInt).
@@ -99,29 +112,13 @@ fn check_unused_locals(
         }
     }
 
-    // For parameters, locate the actual `[trigger,name]` header line in
-    // source so the warning points at the declaration rather than the
-    // first body statement. Falls back to the first LineNumber (body
-    // opener) if the header can't be located — still unambiguous.
-    let short_name = script
-        .name
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .split_once(',')
-        .map(|(_, n)| n.to_string())
-        .unwrap_or_else(|| script.name.clone());
-    let first_body_line = script
-        .instructions
-        .iter()
-        .find_map(|i| match (i.opcode, &i.operand) {
-            (Opcode::LineNumber, Operand::Int(n)) => Some(*n as usize),
-            _ => None,
-        })
-        .unwrap_or(1);
-    let header_line = source_cache
-        .and_then(|c| c.get(&script.source_path))
-        .and_then(|src| find_header_line(src, &script.trigger, &short_name))
-        .unwrap_or_else(|| first_body_line.saturating_sub(1).max(1));
+    // The reporting line for an unused *parameter* is its `[trigger,name]`
+    // header, which needs an O(file) source scan to locate. Only unused params
+    // with no in-body write actually consume it, and those are rare across the
+    // corpus, so compute it lazily and memoize per script (`compute_header_line`)
+    // rather than scanning every script's source up front. Locals that ARE
+    // written report their write line and never touch this.
+    let mut header_line_cache: Option<usize> = None;
 
     // Walk the LocalTable, computing per-type slot ids on the fly using
     // the same counting strategy as `LocalTable::get_variable_id`.
@@ -140,7 +137,6 @@ fn check_unused_locals(
         let is_param = *is_param;
         let is_array = *is_array;
         let suppress = name.starts_with('_');
-        let var_name = format!("${}", name);
 
         if is_array {
             let slot = array_slot_counter;
@@ -148,15 +144,14 @@ fn check_unused_locals(
             if suppress || array_touched.contains(&slot) {
                 continue;
             }
-            let line = array_first_def_line
-                .get(&slot)
-                .copied()
-                .unwrap_or(header_line);
+            let line = array_first_def_line.get(&slot).copied().unwrap_or_else(|| {
+                *header_line_cache.get_or_insert_with(|| compute_header_line(script, source_cache))
+            });
             emit_unused_local(
                 script,
                 source_cache,
                 diagnostics,
-                &var_name,
+                name,
                 "array",
                 is_param,
                 line,
@@ -175,15 +170,15 @@ fn check_unused_locals(
                 if suppress || int_reads.contains(&slot) {
                     continue;
                 }
-                let line = int_first_write_line
-                    .get(&slot)
-                    .copied()
-                    .unwrap_or(header_line);
+                let line = int_first_write_line.get(&slot).copied().unwrap_or_else(|| {
+                    *header_line_cache
+                        .get_or_insert_with(|| compute_header_line(script, source_cache))
+                });
                 emit_unused_local(
                     script,
                     source_cache,
                     diagnostics,
-                    &var_name,
+                    name,
                     "int",
                     is_param,
                     line,
@@ -198,12 +193,15 @@ fn check_unused_locals(
                 let line = string_first_write_line
                     .get(&slot)
                     .copied()
-                    .unwrap_or(header_line);
+                    .unwrap_or_else(|| {
+                        *header_line_cache
+                            .get_or_insert_with(|| compute_header_line(script, source_cache))
+                    });
                 emit_unused_local(
                     script,
                     source_cache,
                     diagnostics,
-                    &var_name,
+                    name,
                     "string",
                     is_param,
                     line,
@@ -218,12 +216,15 @@ fn check_unused_locals(
                 let line = long_first_write_line
                     .get(&slot)
                     .copied()
-                    .unwrap_or(header_line);
+                    .unwrap_or_else(|| {
+                        *header_line_cache
+                            .get_or_insert_with(|| compute_header_line(script, source_cache))
+                    });
                 emit_unused_local(
                     script,
                     source_cache,
                     diagnostics,
-                    &var_name,
+                    name,
                     "long",
                     is_param,
                     line,
@@ -235,13 +236,16 @@ fn check_unused_locals(
 
 fn emit_unused_local(
     script: &CompiledScript,
-    source_cache: Option<&HashMap<String, Arc<String>>>,
+    source_cache: Option<crate::SourceProvider<'_>>,
     diagnostics: &mut DiagnosticsCollector,
-    name: &str,
+    raw_name: &str,
     ty: &str,
     is_param: bool,
     line: usize,
 ) {
+    // `$`-prefixed display name, formatted here (only when a local is actually
+    // unused) rather than for every local in the hot walk above.
+    let name = format!("${}", raw_name);
     let (message, help_text) = if is_param {
         (
             format!(
@@ -303,7 +307,7 @@ fn emit_unused_local(
 /// trigger a false positive.
 fn check_unreachable_code(
     script: &CompiledScript,
-    source_cache: Option<&HashMap<String, Arc<String>>>,
+    source_cache: Option<crate::SourceProvider<'_>>,
     diagnostics: &mut DiagnosticsCollector,
 ) {
     let instrs = &script.instructions;
@@ -312,33 +316,43 @@ fn check_unreachable_code(
     }
 
     // Skip LineNumbers when assigning node ids — they are diagnostic
-    // markers, not control-flow points.
-    let mut instr_to_node: HashMap<usize, usize> = HashMap::new();
+    // markers, not control-flow points. `instr_to_node` is indexed directly by
+    // instruction position (dense, 0..len) with `u32::MAX` as the "not a node"
+    // sentinel — a flat Vec rather than a HashMap, since the keys are dense and
+    // this is the hot lookup in `resolve_target`.
+    let mut instr_to_node: Vec<u32> = vec![u32::MAX; instrs.len()];
     let mut node_instr: Vec<usize> = Vec::new();
     for (i, instr) in instrs.iter().enumerate() {
         if instr.opcode == Opcode::LineNumber {
             continue;
         }
-        instr_to_node.insert(i, node_instr.len());
+        instr_to_node[i] = node_instr.len() as u32;
         node_instr.push(i);
     }
     if node_instr.is_empty() {
         return;
     }
 
-    // Build forward adjacency. Fallthrough is the default; branch/jump
-    // opcodes add target edges and suppress fallthrough when they are
-    // unconditional terminals.
-    let mut next: Vec<Vec<usize>> = vec![Vec::new(); node_instr.len()];
-    for (order_idx, &instr_idx) in node_instr.iter().enumerate() {
-        let instr = &instrs[instr_idx];
+    // Forward reachability BFS from node 0. Successors are computed on the fly
+    // from each node's instruction (fallthrough by default; branch/switch add
+    // target edges; unconditional terminals suppress fallthrough) instead of
+    // being materialized into a `Vec<Vec<usize>>` adjacency. That adjacency
+    // allocated one heap Vec per node — hundreds of thousands across the corpus —
+    // for a graph traversed exactly once; the reachable set is identical without
+    // it. Nodes are marked reachable at discovery (push) time, so each is popped
+    // and expanded at most once, matching the original two-phase build+BFS.
+    let mut reachable = vec![false; node_instr.len()];
+    reachable[0] = true;
+    let mut queue: VecDeque<usize> = VecDeque::from([0]);
+    while let Some(order_idx) = queue.pop_front() {
+        let instr = &instrs[node_instr[order_idx]];
 
         let is_terminal = matches!(
             instr.opcode,
             Opcode::Branch | Opcode::Return | Opcode::Jump | Opcode::JumpWithParams
         );
 
-        // Jump-target edge.
+        // Branch / switch target edges.
         match instr.opcode {
             Opcode::Branch
             | Opcode::BranchNot
@@ -357,15 +371,21 @@ fn check_unreachable_code(
             | Opcode::ObjBranchNot => {
                 if let Operand::JumpTarget(target) = &instr.operand
                     && let Some(tnode) = resolve_target(*target, instrs, &instr_to_node)
+                    && !reachable[tnode]
                 {
-                    next[order_idx].push(tnode);
+                    reachable[tnode] = true;
+                    queue.push_back(tnode);
                 }
             }
             Opcode::Switch => {
-                if let Operand::SwitchTable(cases) = &instr.operand {
-                    for &(_, target) in cases {
-                        if let Some(tnode) = resolve_target(target, instrs, &instr_to_node) {
-                            next[order_idx].push(tnode);
+                if let Operand::SwitchTable(tbl_idx) = &instr.operand {
+                    let cases = &script.switch_tables[*tbl_idx as usize];
+                    for &(_, target) in cases.iter() {
+                        if let Some(tnode) = resolve_target(target, instrs, &instr_to_node)
+                            && !reachable[tnode]
+                        {
+                            reachable[tnode] = true;
+                            queue.push_back(tnode);
                         }
                     }
                 }
@@ -375,16 +395,7 @@ fn check_unreachable_code(
 
         // Fallthrough edge for non-terminals.
         if !is_terminal && order_idx + 1 < node_instr.len() {
-            next[order_idx].push(order_idx + 1);
-        }
-    }
-
-    // Forward BFS from node 0.
-    let mut reachable = vec![false; node_instr.len()];
-    reachable[0] = true;
-    let mut queue: VecDeque<usize> = VecDeque::from([0]);
-    while let Some(n) = queue.pop_front() {
-        for &m in &next[n] {
+            let m = order_idx + 1;
             if !reachable[m] {
                 reachable[m] = true;
                 queue.push_back(m);
@@ -406,7 +417,12 @@ fn check_unreachable_code(
                 break None;
             }
             if instrs[j].opcode != Opcode::LineNumber {
-                break instr_to_node.get(&j).copied();
+                let n = instr_to_node[j];
+                break if n == u32::MAX {
+                    None
+                } else {
+                    Some(n as usize)
+                };
             }
             j += 1;
         };
@@ -426,7 +442,7 @@ fn check_unreachable_code(
 
 fn emit_unreachable(
     script: &CompiledScript,
-    source_cache: Option<&HashMap<String, Arc<String>>>,
+    source_cache: Option<crate::SourceProvider<'_>>,
     diagnostics: &mut DiagnosticsCollector,
     line: usize,
 ) {
@@ -438,7 +454,7 @@ fn emit_unreachable(
     let mut suggestions: Vec<Suggestion> = Vec::new();
     if let Some(cache) = source_cache
         && let Some(src) = cache.get(&script.source_path)
-        && nth_source_line(src, line).is_some()
+        && nth_source_line(&src, line).is_some()
     {
         suggestions.push(Suggestion {
             file: PathBuf::from(&script.source_path),
@@ -494,12 +510,48 @@ fn nth_source_line(src: &str, line_no: usize) -> Option<&str> {
 fn resolve_target(
     mut target: usize,
     instrs: &[Instruction],
-    instr_to_node: &HashMap<usize, usize>,
+    instr_to_node: &[u32],
 ) -> Option<usize> {
     while target < instrs.len() && instrs[target].opcode == Opcode::LineNumber {
         target += 1;
     }
-    instr_to_node.get(&target).copied()
+    if target < instrs.len() {
+        let n = instr_to_node[target];
+        if n != u32::MAX {
+            return Some(n as usize);
+        }
+    }
+    None
+}
+
+/// The 1-indexed source line an unused *parameter* is reported at: the script's
+/// `[trigger,name]` header, falling back to the line just before the first body
+/// statement when the source can't be read. Invoked lazily by
+/// `check_unused_locals` — only when a script actually has an unused parameter —
+/// because the `find_header_line` scan is O(file) and almost never needed.
+fn compute_header_line(
+    script: &CompiledScript,
+    source_cache: Option<crate::SourceProvider<'_>>,
+) -> usize {
+    let short_name = script
+        .name
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split_once(',')
+        .map(|(_, n)| n)
+        .unwrap_or(script.name.as_str());
+    let first_body_line = script
+        .instructions
+        .iter()
+        .find_map(|i| match (i.opcode, &i.operand) {
+            (Opcode::LineNumber, Operand::Int(n)) => Some(*n as usize),
+            _ => None,
+        })
+        .unwrap_or(1);
+    source_cache
+        .and_then(|c| c.get(&script.source_path))
+        .and_then(|src| find_header_line(&src, &script.trigger, short_name))
+        .unwrap_or_else(|| first_body_line.saturating_sub(1).max(1))
 }
 
 /// Locate the 1-indexed line that declares `[<trigger>,<name>]` in `src`.
@@ -642,9 +694,10 @@ mod tests {
         let mut script = empty_script("foo");
         push_local_entry(&mut script, "s", Type::String, false, false);
         push_local_entry(&mut script, "l", Type::Long, false, false);
+        let hi = script.intern_str("hi".to_string());
         script.instructions = vec![
             Instruction::new(Opcode::LineNumber, Operand::Int(1)),
-            Instruction::push_string("hi".to_string()),
+            Instruction::new(Opcode::PushConstantString, Operand::Str(hi)),
             Instruction::pop_string_local(0),
             Instruction::push_long(42),
             Instruction::pop_long_local(0),
@@ -723,14 +776,16 @@ mod tests {
     fn dead_code_after_return_is_reported() {
         // mes("hi"); return; mes("bye");  <-- line 4 unreachable
         let mut script = empty_script("foo");
+        let hi = script.intern_str("hi".to_string());
+        let bye = script.intern_str("bye".to_string());
         script.instructions = vec![
             Instruction::new(Opcode::LineNumber, Operand::Int(2)),
-            Instruction::push_string("hi".to_string()),
+            Instruction::new(Opcode::PushConstantString, Operand::Str(hi)),
             Instruction::new(Opcode::Command, Operand::Int(0)), // mes
             Instruction::new(Opcode::LineNumber, Operand::Int(3)),
             Instruction::simple(Opcode::Return),
             Instruction::new(Opcode::LineNumber, Operand::Int(4)),
-            Instruction::push_string("bye".to_string()),
+            Instruction::new(Opcode::PushConstantString, Operand::Str(bye)),
             Instruction::new(Opcode::Command, Operand::Int(0)),
             Instruction::simple(Opcode::Return),
         ];
@@ -751,11 +806,12 @@ mod tests {
     fn dead_code_after_jump_is_reported() {
         // @some_label; mes("never");
         let mut script = empty_script("foo");
+        let never = script.intern_str("never".to_string());
         script.instructions = vec![
             Instruction::new(Opcode::LineNumber, Operand::Int(2)),
             Instruction::new(Opcode::JumpWithParams, Operand::Int(999)),
             Instruction::new(Opcode::LineNumber, Operand::Int(3)),
-            Instruction::push_string("never".to_string()),
+            Instruction::new(Opcode::PushConstantString, Operand::Str(never)),
             Instruction::new(Opcode::Command, Operand::Int(0)),
             Instruction::simple(Opcode::Return),
         ];
@@ -775,6 +831,7 @@ mod tests {
     fn reachable_code_after_conditional_branch_is_ok() {
         // if (cond) { body } — body IS reachable via BranchEquals target.
         let mut script = empty_script("foo");
+        let yes = script.intern_str("yes".to_string());
         script.instructions = vec![
             Instruction::new(Opcode::LineNumber, Operand::Int(1)),
             Instruction::push_int(1),
@@ -782,7 +839,7 @@ mod tests {
             Instruction::new(Opcode::BranchEquals, Operand::JumpTarget(6)),
             Instruction::new(Opcode::Branch, Operand::JumpTarget(9)),
             Instruction::new(Opcode::LineNumber, Operand::Int(2)),
-            Instruction::push_string("yes".to_string()),
+            Instruction::new(Opcode::PushConstantString, Operand::Str(yes)),
             Instruction::new(Opcode::Command, Operand::Int(0)),
             Instruction::new(Opcode::LineNumber, Operand::Int(3)),
             Instruction::simple(Opcode::Return),

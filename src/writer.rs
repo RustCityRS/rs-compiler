@@ -104,7 +104,7 @@ pub fn encode_script(script: &CompiledScript) -> Vec<u8> {
         None,
         Small(u8),
         Large(i32),
-        Str(String),
+        Str(Box<str>),
     }
     struct FlatInstr {
         opcode: u16,
@@ -137,9 +137,9 @@ pub fn encode_script(script: &CompiledScript) -> Vec<u8> {
                         cmd_small_operand = ((*v >> 16) & 0xFF) as u8;
                         (*v & 0xFFFF) as u16
                     }
-                    Operand::Str(s) => {
+                    Operand::Str(idx) => {
                         // Unknown command referenced by name – skip with 0
-                        let _ = s;
+                        let _ = idx;
                         0
                     }
                     _ => 0,
@@ -197,12 +197,14 @@ pub fn encode_script(script: &CompiledScript) -> Vec<u8> {
                 // For now, emit high 32-bits (this is rarely used in 2004scape).
                 ResolvedOp::Large(*v as i32)
             }
-            Operand::Str(s) => ResolvedOp::Str(s.clone()),
+            Operand::Str(idx) => ResolvedOp::Str(script.strings[*idx as usize].clone()),
             Operand::JumpTarget(target) => {
                 // Will be resolved to relative offset in second pass.
                 ResolvedOp::Large(*target as i32) // placeholder – absolute index
             }
-            Operand::SwitchTable(table) => {
+            Operand::SwitchTable(idx) => {
+                // The table lives in the script's pool; the operand is its index.
+                let table = &script.switch_tables[*idx as usize];
                 // Assign a table index and store the table.
                 let tbl_idx = switch_tables.len();
                 // We'll fill in relative offsets in the second pass.
@@ -484,25 +486,37 @@ impl ScriptWriter {
         let encoded: Vec<Vec<u8>> =
             crate::parallel_map(&by_id, |opt| opt.map(encode_script).unwrap_or_default());
 
-        // Build script.dat
+        self.write_encoded(&encoded)
+    }
+
+    /// Write `script.dat` + `script.idx` from pre-encoded per-slot byte blobs
+    /// (`encoded[slot]` is that script's bytes; empty for unused slots). Lets the
+    /// streaming recompile path produce output without ever holding the full
+    /// `Vec<CompiledScript>` — it encodes each script as it re-compiles, places
+    /// the bytes by id, then calls this. Byte-identical to `write_all`.
+    pub fn write_encoded(&self, encoded: &[Vec<u8>]) -> io::Result<()> {
+        fs::create_dir_all(&self.output_dir)?;
+        let slot_count = encoded.len();
+
         let dat_path = Path::new(&self.output_dir).join("script.dat");
         {
-            let mut dat: Vec<u8> = Vec::new();
-            // Header: count (u32) + version (i32)
-            dat.extend_from_slice(&(slot_count as u32).to_be_bytes());
-            dat.extend_from_slice(&COMPILER_VERSION.to_be_bytes());
-            for bytes in &encoded {
-                dat.extend_from_slice(bytes);
+            // Stream the dat to disk so we never hold a second full copy of the
+            // output (encoded blobs + a concatenated buffer). Byte-identical.
+            use std::io::Write;
+            let mut dat = io::BufWriter::new(fs::File::create(&dat_path)?);
+            dat.write_all(&(slot_count as u32).to_be_bytes())?;
+            dat.write_all(&COMPILER_VERSION.to_be_bytes())?;
+            for bytes in encoded {
+                dat.write_all(bytes)?;
             }
-            fs::write(&dat_path, dat)?;
+            dat.flush()?;
         }
 
-        // Build script.idx
         let idx_path = Path::new(&self.output_dir).join("script.idx");
         {
             let mut idx: Vec<u8> = Vec::new();
             idx.extend_from_slice(&(slot_count as u32).to_be_bytes());
-            for bytes in &encoded {
+            for bytes in encoded {
                 idx.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
             }
             fs::write(&idx_path, idx)?;

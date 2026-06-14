@@ -10,6 +10,118 @@ use crate::pointer::{PointerHolder, PointerSet, PointerType, command_pointers, t
 use crate::symbol::{SymbolKind, SymbolRegistry};
 
 // ---------------------------------------------------------------------------
+// CFG re-compile access trace (profiling only). Records the file whose CFG is
+// built, so an LRU simulation can estimate the re-parse multiplier a streaming
+// "re-compile on demand" pointer check would pay — measured before committing
+// to that rearchitecture. Enabled by `RUNEC_TRACE_CFG`; built only with memprof.
+// ---------------------------------------------------------------------------
+#[cfg(feature = "memprof")]
+static CFG_TRACE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(feature = "memprof")]
+fn cfg_trace_push(source_path: &str) {
+    if std::env::var_os("RUNEC_TRACE_CFG").is_some() {
+        CFG_TRACE.lock().unwrap().push(source_path.to_string());
+    }
+}
+
+/// Simulate an LRU file cache over the recorded CFG-build sequence and report
+/// re-parse counts for several cache sizes (1.0x = each file parsed once).
+#[cfg(feature = "memprof")]
+pub(crate) fn cfg_trace_report() {
+    use tracing::info;
+    let trace = CFG_TRACE.lock().unwrap();
+    if trace.is_empty() {
+        return;
+    }
+    let distinct: HashSet<&str> = trace.iter().map(|s| s.as_str()).collect();
+    let nfiles = distinct.len().max(1);
+    info!(
+        "[trace] build_cfg calls: {}, distinct files: {}",
+        trace.len(),
+        nfiles
+    );
+    for &cap in &[16usize, 64, 256, 1024, nfiles] {
+        let mut lru: Vec<&str> = Vec::with_capacity(cap + 1);
+        let mut misses = 0usize;
+        for f in trace.iter() {
+            let f = f.as_str();
+            if let Some(pos) = lru.iter().position(|x| *x == f) {
+                lru.remove(pos);
+            } else {
+                misses += 1;
+            }
+            lru.insert(0, f);
+            if lru.len() > cap {
+                lru.pop();
+            }
+        }
+        info!(
+            "[trace] LRU cap {:>5}: {:>7} re-parses ({:.2}x of {} files)",
+            cap,
+            misses,
+            misses as f64 / nfiles as f64,
+            nfiles
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Script source: resident slice (batch/stream) or recompile-on-demand (the
+// `RUNEC_RECOMPILE` memory mode, which never holds all compiled scripts).
+// ---------------------------------------------------------------------------
+
+/// A script handle that is either borrowed from the resident slice (zero-cost)
+/// or owned via an `Rc` from the recompile store. Derefs to `CompiledScript`, so
+/// call sites read fields the same way regardless of mode.
+pub(crate) enum ScriptRef<'a> {
+    Borrowed(&'a CompiledScript),
+    Owned(std::rc::Rc<CompiledScript>),
+}
+
+impl std::ops::Deref for ScriptRef<'_> {
+    type Target = CompiledScript;
+    fn deref(&self) -> &CompiledScript {
+        match self {
+            ScriptRef::Borrowed(s) => s,
+            ScriptRef::Owned(rc) => rc,
+        }
+    }
+}
+
+/// Where the pointer checker gets a script's compiled form. `Resident` borrows
+/// the already-compiled slice. `Recompile` calls back into a store that re-parses
+/// and compiles the script on demand (bounded LRU), so the 13 MB of compiled
+/// scripts need not be resident. The recompile getter is `FnMut` (mutates its
+/// cache) and not `Sync`, so that mode runs the checker single-threaded.
+pub(crate) enum ScriptSource<'a> {
+    Resident(&'a [CompiledScript]),
+    Recompile {
+        len: usize,
+        get: std::cell::RefCell<Box<dyn FnMut(usize) -> std::rc::Rc<CompiledScript> + 'a>>,
+    },
+}
+
+impl<'a> ScriptSource<'a> {
+    fn len(&self) -> usize {
+        match self {
+            ScriptSource::Resident(s) => s.len(),
+            ScriptSource::Recompile { len, .. } => *len,
+        }
+    }
+
+    /// Fetch script `idx`. Borrowed (resident) carries the slice lifetime, not
+    /// `&self`'s, so it doesn't pin a whole-`self` borrow — preserving the
+    /// checker's disjoint field borrows (scripts vs the mutable caches).
+    fn get(&self, idx: usize) -> ScriptRef<'a> {
+        match self {
+            ScriptSource::Resident(s) => ScriptRef::Borrowed(&(*s)[idx]),
+            ScriptSource::Recompile { get, .. } => ScriptRef::Owned((get.borrow_mut())(idx)),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Control flow graph node
 // ---------------------------------------------------------------------------
 
@@ -58,9 +170,6 @@ struct ScriptAnalysis {
     set_list: Vec<Vec<usize>>,
     /// `corrupted_list[ptr_index]` = list of node indices that corrupt this pointer.
     corrupted_list: Vec<Vec<usize>>,
-    /// Quick lookup sets for BFS blocking.
-    set_nodes: Vec<HashSet<usize>>,
-    corrupted_nodes: Vec<HashSet<usize>>,
     /// Node indices of Return instructions.
     returns: Vec<usize>,
 }
@@ -73,8 +182,6 @@ impl ScriptAnalysis {
             required: vec![Vec::new(); n],
             set_list: vec![Vec::new(); n],
             corrupted_list: vec![Vec::new(); n],
-            set_nodes: vec![HashSet::new(); n],
-            corrupted_nodes: vec![HashSet::new(); n],
             returns: Vec::new(),
         }
     }
@@ -84,11 +191,12 @@ impl ScriptAnalysis {
 // PointerChecker
 // ---------------------------------------------------------------------------
 
-pub struct PointerChecker<'a> {
-    scripts: &'a [CompiledScript],
+/// Read-only lookup tables derived once from the compiled scripts + registry.
+/// Shared via `Arc` across the per-chunk checkers that run on worker threads,
+/// so this (command-table-sized) data is built once per compile instead of once
+/// per thread — the pointer-check pass otherwise rebuilt all of it ~N-cores times.
+pub(crate) struct SharedMaps {
     cmd_pointers: HashMap<String, PointerHolder>,
-    #[allow(dead_code)]
-    registry: &'a SymbolRegistry,
     /// Reverse map: command opcode -> command name (lowercase).
     opcode_to_name: HashMap<i32, String>,
     /// Reverse map: script id -> index into `scripts`.
@@ -100,11 +208,19 @@ pub struct PointerChecker<'a> {
     /// Overlay interface names (normalized lowercase). If_button/inv_button triggers
     /// for non-overlay interfaces grant p_active_player, matching ServerPointerChecker.
     overlay_interfaces: HashSet<String>,
+}
+
+pub struct PointerChecker<'a> {
+    scripts: ScriptSource<'a>,
+    #[allow(dead_code)]
+    registry: &'a SymbolRegistry,
+    /// Read-only lookup tables, shared (`Arc`) across worker threads.
+    shared: std::sync::Arc<SharedMaps>,
     /// Optional source-text cache, keyed by `CompiledScript::source_path`.
     /// When present, the checker attaches rustc-style Help/Suggestion
     /// blocks to its warnings. When `None`, warnings still fire but carry
     /// no concrete fix text. Read-only; never feeds codegen.
-    source_cache: Option<&'a HashMap<String, std::sync::Arc<String>>>,
+    source_cache: Option<crate::SourceProvider<'a>>,
     // Caches
     script_analyses: HashMap<String, ScriptAnalysis>,
     script_pointers: HashMap<String, PointerHolder>,
@@ -112,8 +228,11 @@ pub struct PointerChecker<'a> {
     pending_scripts: HashSet<String>,
 }
 
-impl<'a> PointerChecker<'a> {
-    pub fn new(scripts: &'a [CompiledScript], registry: &'a SymbolRegistry) -> Self {
+impl SharedMaps {
+    /// Build the read-only lookup tables from the script identities (id, name) +
+    /// registry. Taking `(id, name)` idents rather than the compiled slice lets
+    /// the recompile mode build these from lightweight metas (no held bytecode).
+    fn build<'b>(idents: impl Iterator<Item = (i32, &'b str)>, registry: &SymbolRegistry) -> Self {
         // Build reverse opcode -> name map from registry.commands
         let mut opcode_to_name = HashMap::new();
         for (name, sym) in &registry.commands {
@@ -122,40 +241,83 @@ impl<'a> PointerChecker<'a> {
             }
         }
 
-        // Build reverse script_id -> index map
-        let mut script_id_to_index = HashMap::new();
-        for (i, script) in scripts.iter().enumerate() {
-            script_id_to_index.insert(script.id, i);
-        }
-
-        // Build reverse name -> index map. Insert only the first occurrence so
-        // lookups match `scripts.iter().position(|s| s.name == name)` exactly
+        // Build reverse id->index and name->index maps. Insert only the first
+        // name occurrence so lookups match a `position(|s| s.name == name)` scan
         // when multiple triggers share a name.
+        let mut script_id_to_index = HashMap::new();
         let mut script_name_to_index = HashMap::new();
-        for (i, script) in scripts.iter().enumerate() {
-            script_name_to_index.entry(script.name.clone()).or_insert(i);
+        for (i, (id, name)) in idents.enumerate() {
+            script_id_to_index.insert(id, i);
+            script_name_to_index.entry(name.to_string()).or_insert(i);
         }
 
         // Build overlay interface set from entity_ids (OverlayInterface type).
         // Any if_button/inv_button trigger whose interface is NOT in this set
         // gets p_active_player granted, matching ServerPointerChecker.
         let mut overlay_interfaces = HashSet::new();
-        for (name, sym) in &registry.entity_ids {
-            if let SymbolKind::Constant { const_type, .. } = &sym.kind
-                && *const_type == crate::types::Type::OverlayInterface
+        for (name, entry) in &registry.entity_ids {
+            if let Some(e) = entry.primary
+                && e.const_type == crate::types::Type::OverlayInterface
             {
                 overlay_interfaces.insert(name.to_lowercase().replace(' ', "_"));
             }
         }
 
-        PointerChecker {
-            scripts,
+        SharedMaps {
             cmd_pointers: command_pointers(),
-            registry,
             opcode_to_name,
             script_id_to_index,
             script_name_to_index,
             overlay_interfaces,
+        }
+    }
+}
+
+impl<'a> PointerChecker<'a> {
+    pub fn new(scripts: &'a [CompiledScript], registry: &'a SymbolRegistry) -> Self {
+        let shared = std::sync::Arc::new(SharedMaps::build(
+            scripts.iter().map(|s| (s.id, s.name.as_str())),
+            registry,
+        ));
+        Self::with_shared(ScriptSource::Resident(scripts), registry, shared)
+    }
+
+    /// Build the read-only lookup tables once, so a fleet of per-chunk checkers
+    /// can share them across threads (`Arc::clone`) instead of each rebuilding
+    /// the full command/script tables.
+    pub(crate) fn build_shared(
+        scripts: &[CompiledScript],
+        registry: &SymbolRegistry,
+    ) -> std::sync::Arc<SharedMaps> {
+        std::sync::Arc::new(SharedMaps::build(
+            scripts.iter().map(|s| (s.id, s.name.as_str())),
+            registry,
+        ))
+    }
+
+    /// Build the shared maps for the recompile mode from lightweight `(id, name)`
+    /// idents, so no compiled bytecode need be resident to construct them.
+    pub(crate) fn build_shared_idents(
+        idents: &[(i32, String)],
+        registry: &SymbolRegistry,
+    ) -> std::sync::Arc<SharedMaps> {
+        std::sync::Arc::new(SharedMaps::build(
+            idents.iter().map(|(id, name)| (*id, name.as_str())),
+            registry,
+        ))
+    }
+
+    /// Construct a checker over pre-built shared maps. Each worker thread gets
+    /// its own checker (own memoization caches) but shares the read-only maps.
+    pub(crate) fn with_shared(
+        scripts: ScriptSource<'a>,
+        registry: &'a SymbolRegistry,
+        shared: std::sync::Arc<SharedMaps>,
+    ) -> Self {
+        PointerChecker {
+            scripts,
+            registry,
+            shared,
             source_cache: None,
             script_analyses: HashMap::new(),
             script_pointers: HashMap::new(),
@@ -167,8 +329,8 @@ impl<'a> PointerChecker<'a> {
     /// Attach a source-text cache so emitted warnings can carry concrete
     /// before/after suggestion text. Purely diagnostic — never touches
     /// bytecode, script metadata, or output ordering.
-    pub fn set_source_cache(&mut self, cache: &'a HashMap<String, std::sync::Arc<String>>) {
-        self.source_cache = Some(cache);
+    pub fn set_source_cache(&mut self, provider: crate::SourceProvider<'a>) {
+        self.source_cache = Some(provider);
     }
 
     /// Check if an if_button/inv_button trigger on a non-overlay interface
@@ -194,7 +356,7 @@ impl<'a> PointerChecker<'a> {
             return false;
         }
         // Non-overlay interfaces grant p_active_player
-        !self.overlay_interfaces.contains(&iface_name)
+        !self.shared.overlay_interfaces.contains(&iface_name)
     }
 
     /// Run pointer checking on all scripts and return collected diagnostics.
@@ -205,7 +367,9 @@ impl<'a> PointerChecker<'a> {
 
     /// Script names in validation order (the order of `scripts`).
     pub fn script_names(&self) -> Vec<String> {
-        self.scripts.iter().map(|s| s.name.clone()).collect()
+        (0..self.scripts.len())
+            .map(|i| self.scripts.get(i).name.clone())
+            .collect()
     }
 
     /// Validate the given scripts, returning their diagnostics in `names` order.
@@ -219,18 +383,26 @@ impl<'a> PointerChecker<'a> {
         let mut diagnostics = DiagnosticsCollector::new();
         for script_name in names {
             self.validate_script(script_name, &mut diagnostics);
+            // A script's CFG (and any callee CFGs built to derive summaries) is
+            // only needed during its own validation; the cross-script pointer
+            // summaries persist in `script_pointers`. Free the CFGs now so peak
+            // scratch is ~one script's CFG instead of the whole chunk's — the
+            // checker otherwise memoizes every analyzed CFG for the chunk's life.
+            // (`build_rule_a_help` rebuilds a callee's CFG on demand if a later
+            // warning needs it, so diagnostics are unchanged.)
+            self.script_analyses.clear();
         }
         diagnostics
     }
 
     fn validate_script(&mut self, script_name: &str, diagnostics: &mut DiagnosticsCollector) {
         // Find the script
-        let script_idx = match self.script_name_to_index.get(script_name) {
+        let script_idx = match self.shared.script_name_to_index.get(script_name) {
             Some(&i) => i,
             None => return,
         };
-        let trigger = self.scripts[script_idx].trigger.clone();
-        let source_path = self.scripts[script_idx].source_path.clone();
+        let trigger = self.scripts.get(script_idx).trigger.clone();
+        let source_path = self.scripts.get(script_idx).source_path.clone();
         let trigger_set = trigger_pointers(&trigger);
 
         // Ensure analysis exists
@@ -250,8 +422,12 @@ impl<'a> PointerChecker<'a> {
                 continue;
             }
 
-            // Build corrupted set: start with the analysis corrupted nodes
-            let mut corrupted: HashSet<usize> = analysis.corrupted_nodes[ptr_idx].clone();
+            // Build corrupted set: start with the analysis corrupted nodes. The
+            // CFG stores only the compact `corrupted_list` Vec; the BFS needs an
+            // O(1) lookup set, so materialize one here (transient, dropped after
+            // this pointer's check) rather than retaining a duplicate per CFG.
+            let mut corrupted: HashSet<usize> =
+                analysis.corrupted_list[ptr_idx].iter().copied().collect();
 
             // If the trigger doesn't set this pointer, add the start node (node 0) as corrupted.
             // Special case: if_button/inv_button triggers on non-overlay interfaces
@@ -271,7 +447,7 @@ impl<'a> PointerChecker<'a> {
                 continue;
             }
 
-            let set_blocked: HashSet<usize> = analysis.set_nodes[ptr_idx].clone();
+            let set_blocked: HashSet<usize> = analysis.set_list[ptr_idx].iter().copied().collect();
 
             // Try to find a path from a required node backwards to a corrupted node
             let path = self.find_edge_path(
@@ -313,7 +489,8 @@ impl<'a> PointerChecker<'a> {
                 };
 
                 let analysis = self.script_analyses.get(script_name).unwrap();
-                let instructions = &self.scripts[script_idx].instructions;
+                let script_ref = self.scripts.get(script_idx);
+                let instructions = &script_ref.instructions;
                 let req_line = analysis.nodes[start_node_idx]
                     .instruction_index
                     .map(|idx| resolve_line(instructions, idx))
@@ -384,19 +561,30 @@ impl<'a> PointerChecker<'a> {
             // practice, the callers in these patterns do not access the
             // pointer again after the gosub, so flagging them is noise.
             if !reported_via_main_bfs && is_static_only_pointer(ptr) {
-                let analysis = self.script_analyses.get(script_name).unwrap();
-                let instructions = &self.scripts[script_idx].instructions;
-                let corrupted_nodes = &analysis.corrupted_nodes[ptr_idx];
+                // Collect the (node, line) pairs that both require and corrupt
+                // this pointer, then drop the analysis borrow so help generation
+                // can take `&mut self` (it may rebuild a cleared callee's CFG).
+                let targets: Vec<(usize, usize)> = {
+                    let analysis = self.script_analyses.get(script_name).unwrap();
+                    let script_ref = self.scripts.get(script_idx);
+                    let instructions = &script_ref.instructions;
+                    let corrupted_nodes: HashSet<usize> =
+                        analysis.corrupted_list[ptr_idx].iter().copied().collect();
+                    required_nodes
+                        .iter()
+                        .filter(|&&node_idx| corrupted_nodes.contains(&node_idx))
+                        .map(|&node_idx| {
+                            let line = analysis.nodes[node_idx]
+                                .instruction_index
+                                .map(|idx| resolve_line(instructions, idx))
+                                .unwrap_or(0);
+                            (node_idx, line)
+                        })
+                        .collect()
+                };
                 let mut seen_lines: HashSet<usize> = HashSet::new();
                 let repr = ptr.representation();
-                for &node_idx in &required_nodes {
-                    if !corrupted_nodes.contains(&node_idx) {
-                        continue;
-                    }
-                    let line = analysis.nodes[node_idx]
-                        .instruction_index
-                        .map(|idx| resolve_line(instructions, idx))
-                        .unwrap_or(0);
+                for (node_idx, line) in targets {
                     if !seen_lines.insert(line) {
                         continue;
                     }
@@ -567,7 +755,7 @@ impl<'a> PointerChecker<'a> {
         }
         self.pending_analyses.insert(script_name.to_string());
 
-        let script_idx = match self.script_name_to_index.get(script_name) {
+        let script_idx = match self.shared.script_name_to_index.get(script_name) {
             Some(&i) => i,
             None => return,
         };
@@ -585,7 +773,9 @@ impl<'a> PointerChecker<'a> {
     // -----------------------------------------------------------------------
 
     fn build_cfg(&self, script_idx: usize) -> ScriptAnalysis {
-        let script = &self.scripts[script_idx];
+        let script = self.scripts.get(script_idx);
+        #[cfg(feature = "memprof")]
+        cfg_trace_push(&script.source_path);
         let instructions = &script.instructions;
         let mut analysis = ScriptAnalysis::new();
 
@@ -653,8 +843,9 @@ impl<'a> PointerChecker<'a> {
                 }
 
                 Opcode::Switch => {
-                    if let Operand::SwitchTable(cases) = &instr.operand {
-                        for &(_, target_instr_idx) in cases {
+                    if let Operand::SwitchTable(tbl_idx) = &instr.operand {
+                        let cases = &script.switch_tables[*tbl_idx as usize];
+                        for &(_, target_instr_idx) in cases.iter() {
                             if let Some(target_node) =
                                 resolve_target_node(target_instr_idx, instructions, &instr_to_node)
                             {
@@ -700,7 +891,8 @@ impl<'a> PointerChecker<'a> {
         instr_to_node: &HashMap<usize, usize>,
         node_order: &[usize],
     ) {
-        let instructions = &self.scripts[script_idx].instructions;
+        let script_ref = self.scripts.get(script_idx);
+        let instructions = &script_ref.instructions;
 
         // Look for the pattern: [Command with conditional_set] ... [PushConstantInt(0 or 1)] [BranchEquals]
         // The Command may not be immediately before PushConstantInt because argument
@@ -756,13 +948,13 @@ impl<'a> PointerChecker<'a> {
             let cmd_instr = &instructions[cmd_instr_idx];
 
             // Look up command pointer info
-            let cmd_name = self.resolve_command_name(cmd_instr);
+            let cmd_name = self.resolve_command_name(cmd_instr, &script_ref.strings);
             let cmd_name = match cmd_name {
                 Some(n) => n,
                 None => continue,
             };
 
-            let holder = match self.cmd_pointers.get(&cmd_name) {
+            let holder = match self.shared.cmd_pointers.get(&cmd_name) {
                 Some(h) => h,
                 None => continue,
             };
@@ -835,7 +1027,8 @@ impl<'a> PointerChecker<'a> {
     // -----------------------------------------------------------------------
 
     fn categorize_nodes(&mut self, script_idx: usize, analysis: &mut ScriptAnalysis) {
-        let instructions = &self.scripts[script_idx].instructions;
+        let script_ref = self.scripts.get(script_idx);
+        let instructions = &script_ref.instructions;
 
         for node_idx in 0..analysis.nodes.len() {
             let instr_idx = match analysis.nodes[node_idx].instruction_index {
@@ -847,7 +1040,6 @@ impl<'a> PointerChecker<'a> {
                         for ptr in ptr_set.iter() {
                             let pi = ptr.index();
                             analysis.set_list[pi].push(node_idx);
-                            analysis.set_nodes[pi].insert(node_idx);
                         }
                     }
                     continue;
@@ -858,9 +1050,9 @@ impl<'a> PointerChecker<'a> {
 
             match instr.opcode {
                 Opcode::Command => {
-                    let cmd_name = self.resolve_command_name(instr);
+                    let cmd_name = self.resolve_command_name(instr, &script_ref.strings);
                     if let Some(name) = cmd_name
-                        && let Some(holder) = self.cmd_pointers.get(&name).cloned()
+                        && let Some(holder) = self.shared.cmd_pointers.get(&name).cloned()
                     {
                         self.apply_holder(analysis, node_idx, &holder);
                     }
@@ -927,12 +1119,10 @@ impl<'a> PointerChecker<'a> {
         for ptr in holder.set.iter() {
             let pi = ptr.index();
             analysis.set_list[pi].push(node_idx);
-            analysis.set_nodes[pi].insert(node_idx);
         }
         for ptr in holder.corrupted.iter() {
             let pi = ptr.index();
             analysis.corrupted_list[pi].push(node_idx);
-            analysis.corrupted_nodes[pi].insert(node_idx);
         }
     }
 
@@ -953,13 +1143,13 @@ impl<'a> PointerChecker<'a> {
     ///   passing through a setter? If yes, the script may corrupt this pointer.
     fn get_script_pointers(&mut self, script_id: i32) -> PointerHolder {
         // Find script by ID
-        let script_idx = match self.script_id_to_index.get(&script_id) {
+        let script_idx = match self.shared.script_id_to_index.get(&script_id) {
             Some(&i) => i,
             None => {
                 return PointerHolder::default();
             }
         };
-        let script_name = self.scripts[script_idx].name.clone();
+        let script_name = self.scripts.get(script_idx).name.clone();
 
         // Check cache
         if let Some(holder) = self.script_pointers.get(&script_name) {
@@ -981,45 +1171,58 @@ impl<'a> PointerChecker<'a> {
             for &ptr in &PointerType::ALL {
                 let pi = ptr.index();
 
+                // Both BFS walks below treat setter nodes as blocking. The CFG
+                // stores only the compact `set_list`/`corrupted_list` Vecs, so
+                // build the O(1) lookup sets on demand here (transient, freed at
+                // the end of this iteration) instead of caching a duplicate
+                // HashSet per pointer type in every memoized CFG.
+                let requires = !analysis.required[pi].is_empty();
+                let has_returns = !analysis.returns.is_empty();
+                if !requires && !has_returns {
+                    continue;
+                }
+                let set_blocked: HashSet<usize> = analysis.set_list[pi].iter().copied().collect();
+
                 // requiresPointerScript: BFS from required → graph[0], blocked by setters
-                if !analysis.required[pi].is_empty() {
+                if requires {
                     let path = Self::find_edge_path_static(
                         &analysis.nodes,
                         &analysis.required[pi],
                         |node_idx| node_idx == 0,
-                        &analysis.set_nodes[pi],
+                        &set_blocked,
                     );
                     if path.is_some() {
                         holder.required.insert(ptr);
                     }
                 }
 
-                // setsPointerScript: BFS from returns → (graph[0] OR corruptor), blocked by setters
-                // If NO path found, script guarantees the pointer is set.
-                if !analysis.returns.is_empty() {
-                    let corrupted_nodes = &analysis.corrupted_nodes[pi];
+                if has_returns {
+                    let corrupted_nodes: HashSet<usize> =
+                        analysis.corrupted_list[pi].iter().copied().collect();
+
+                    // setsPointerScript: BFS from returns → (graph[0] OR corruptor),
+                    // blocked by setters. If NO path found, the script guarantees set.
                     let path = Self::find_edge_path_static(
                         &analysis.nodes,
                         &analysis.returns,
                         |node_idx| node_idx == 0 || corrupted_nodes.contains(&node_idx),
-                        &analysis.set_nodes[pi],
+                        &set_blocked,
                     );
                     if path.is_none() {
                         holder.set.insert(ptr);
                     }
-                }
 
-                // corruptsPointerScript: BFS from returns → corruptor, blocked by setters
-                if !analysis.returns.is_empty() && !analysis.corrupted_nodes[pi].is_empty() {
-                    let corrupted_nodes = &analysis.corrupted_nodes[pi];
-                    let path = Self::find_edge_path_static(
-                        &analysis.nodes,
-                        &analysis.returns,
-                        |node_idx| corrupted_nodes.contains(&node_idx),
-                        &analysis.set_nodes[pi],
-                    );
-                    if path.is_some() {
-                        holder.corrupted.insert(ptr);
+                    // corruptsPointerScript: BFS from returns → corruptor, blocked by setters
+                    if !corrupted_nodes.is_empty() {
+                        let path = Self::find_edge_path_static(
+                            &analysis.nodes,
+                            &analysis.returns,
+                            |node_idx| corrupted_nodes.contains(&node_idx),
+                            &set_blocked,
+                        );
+                        if path.is_some() {
+                            holder.corrupted.insert(ptr);
+                        }
                     }
                 }
             }
@@ -1042,7 +1245,7 @@ impl<'a> PointerChecker<'a> {
     /// pointer, etc. Each entry is `(display_name, source_line)`.
     /// Results are deduplicated by `(name, line)`.
     fn corruptors_in_callee(&self, callee_idx: usize, ptr: PointerType) -> Vec<(String, usize)> {
-        let callee = &self.scripts[callee_idx];
+        let callee = self.scripts.get(callee_idx);
         let analysis = match self.script_analyses.get(&callee.name) {
             Some(a) => a,
             None => return Vec::new(),
@@ -1060,15 +1263,15 @@ impl<'a> PointerChecker<'a> {
             let line = resolve_line(&callee.instructions, instr_idx);
 
             let name = match instr.opcode {
-                Opcode::Command => match self.resolve_command_name(instr) {
+                Opcode::Command => match self.resolve_command_name(instr, &callee.strings) {
                     Some(n) => n,
                     None => continue,
                 },
                 Opcode::Gosub | Opcode::GosubWithParams => match &instr.operand {
-                    Operand::Int(id) => match self.script_id_to_index.get(id) {
-                        Some(&target_idx) => short_script_name(&self.scripts[target_idx].name)
+                    Operand::Int(id) => match self.shared.script_id_to_index.get(id) {
+                        Some(&target_idx) => short_script_name(&self.scripts.get(target_idx).name)
                             .map(|s| format!("~{}", s))
-                            .unwrap_or_else(|| self.scripts[target_idx].name.clone()),
+                            .unwrap_or_else(|| self.scripts.get(target_idx).name.clone()),
                         None => continue,
                     },
                     _ => continue,
@@ -1088,19 +1291,19 @@ impl<'a> PointerChecker<'a> {
         result
     }
 
-    fn resolve_command_name(&self, instr: &Instruction) -> Option<String> {
+    fn resolve_command_name(&self, instr: &Instruction, strings: &[Box<str>]) -> Option<String> {
         match &instr.operand {
             Operand::Int(encoded) => {
                 let opcode = encoded & 0xFFFF;
                 let secondary = (encoded >> 16) & 1;
-                let base_name = self.opcode_to_name.get(&opcode)?;
+                let base_name = self.shared.opcode_to_name.get(&opcode)?;
                 if secondary == 1 {
                     Some(format!(".{}", base_name))
                 } else {
                     Some(base_name.clone())
                 }
             }
-            Operand::Str(name) => Some(name.to_lowercase()),
+            Operand::Str(idx) => Some(strings[*idx as usize].to_lowercase()),
             _ => None,
         }
     }
@@ -1117,41 +1320,48 @@ impl<'a> PointerChecker<'a> {
     // Falls back to `None` when the source cache is absent or the callee
     // cannot be identified — the warning itself still fires.
     fn build_rule_a_help(
-        &self,
+        &mut self,
         ptr: PointerType,
         caller_source_path: &str,
         caller_line: usize,
         node_idx: usize,
         caller_script_idx: usize,
     ) -> Option<Help> {
-        let analysis = self
-            .script_analyses
-            .get(&self.scripts[caller_script_idx].name)?;
-        let caller_instructions = &self.scripts[caller_script_idx].instructions;
-        let instr_idx = analysis.nodes[node_idx].instruction_index?;
-        let instr = &caller_instructions[instr_idx];
-
-        // Only Jump/Gosub nodes drive Rule A.
-        let (is_gosub, script_id) = match instr.opcode {
-            Opcode::Jump | Opcode::JumpWithParams => (
-                false,
-                match &instr.operand {
-                    Operand::Int(id) => *id,
-                    _ => return None,
-                },
-            ),
-            Opcode::Gosub | Opcode::GosubWithParams => (
-                true,
-                match &instr.operand {
-                    Operand::Int(id) => *id,
-                    _ => return None,
-                },
-            ),
-            _ => return None,
+        // Resolve the jump/gosub target from the caller's CFG node, then drop
+        // the borrow so the callee's analysis can be (re)built below.
+        let (is_gosub, script_id) = {
+            let caller = self.scripts.get(caller_script_idx);
+            let analysis = self.script_analyses.get(&caller.name)?;
+            let instr_idx = analysis.nodes[node_idx].instruction_index?;
+            let instr = &caller.instructions[instr_idx];
+            // Only Jump/Gosub nodes drive Rule A.
+            match instr.opcode {
+                Opcode::Jump | Opcode::JumpWithParams => (
+                    false,
+                    match &instr.operand {
+                        Operand::Int(id) => *id,
+                        _ => return None,
+                    },
+                ),
+                Opcode::Gosub | Opcode::GosubWithParams => (
+                    true,
+                    match &instr.operand {
+                        Operand::Int(id) => *id,
+                        _ => return None,
+                    },
+                ),
+                _ => return None,
+            }
         };
 
-        let callee_idx = *self.script_id_to_index.get(&script_id)?;
-        let callee = &self.scripts[callee_idx];
+        let callee_idx = *self.shared.script_id_to_index.get(&script_id)?;
+        // The callee's CFG may have been freed (CFG caches are cleared between
+        // top-level scripts to bound memory); rebuild it — a no-op if cached —
+        // so `corruptors_in_callee` can name the specific superseding command.
+        let callee_name = self.scripts.get(callee_idx).name.clone();
+        self.ensure_analysis(&callee_name);
+
+        let callee = self.scripts.get(callee_idx);
         let callee_source = callee.source_path.clone();
 
         // Derive the callee's `[trigger,name]` header line. The first
@@ -1180,7 +1390,7 @@ impl<'a> PointerChecker<'a> {
         let callee_header_line = self
             .source_cache
             .and_then(|c| c.get(&callee_source))
-            .and_then(|src| find_header_line(src, &callee_trigger, &callee_short_early))
+            .and_then(|src| find_header_line(&src, &callee_trigger, &callee_short_early))
             .unwrap_or_else(|| first_body_line.saturating_sub(1).max(1));
 
         let ptr_cmd = ptr.representation(); // "last_useitem", "last_item", …
@@ -1234,7 +1444,7 @@ impl<'a> PointerChecker<'a> {
         // (1) Caller rewrite: insert the captured pointer as an argument
         // to the @label/~proc call on `caller_line`.
         if let Some(src) = cache.get(caller_source_path)
-            && let Some(line_text) = nth_source_line(src, caller_line)
+            && let Some(line_text) = nth_source_line(&src, caller_line)
             && let Some(rewritten) = rewrite_call_site_arg(line_text, arrow, &callee_short, ptr_cmd)
         {
             suggestions.push(Suggestion {
@@ -1247,7 +1457,7 @@ impl<'a> PointerChecker<'a> {
 
         // (2) Callee rewrite: append `<ty> <name>` to the header's param list.
         if let Some(src) = cache.get(&callee_source)
-            && let Some(header_text) = nth_source_line(src, callee_header_line)
+            && let Some(header_text) = nth_source_line(&src, callee_header_line)
             && let Some(rewritten) =
                 rewrite_header_add_param(header_text, &callee_short, param_type, &param_name)
         {
@@ -2319,7 +2529,7 @@ mod tests {
 
         let scripts = vec![callee, caller];
         let mut checker = PointerChecker::new(&scripts, &registry);
-        checker.set_source_cache(&source_cache);
+        checker.set_source_cache(crate::SourceProvider::Eager(&source_cache));
         let diags = checker.run();
 
         // Find the corrupted-last_useitem warning and verify help is

@@ -1,5 +1,6 @@
 use crate::types::{BaseVarType, Type};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 // ── LocalTable ─────────────────────────────────────────────────────────────
 // Matches RuneScriptTS `LocalTable` (RuneScript.ts): a flat ordered list of
@@ -33,6 +34,11 @@ impl LocalTable {
     /// Read-only view of the ordered local entries. Use this for iteration.
     pub fn entries(&self) -> &[LocalEntry] {
         &self.all
+    }
+
+    /// Release spare capacity once the table is final (post-codegen).
+    pub fn shrink_to_fit(&mut self) {
+        self.all.shrink_to_fit();
     }
 
     pub fn push_param(&mut self, name: String, param_type: Type) -> i32 {
@@ -164,6 +170,42 @@ impl SymbolKind {
 pub struct Symbol {
     pub name: String,
     pub kind: SymbolKind,
+}
+
+/// A resolved entity id (from loc.pack/npc.pack/stat.pack/etc.) and its type.
+///
+/// Entity IDs hugely outnumber every other symbol (~22k for a full corpus), so
+/// they get this 8-byte `Copy` record instead of a 104-byte `Symbol` — entity
+/// lookups only ever need the type and the id.
+#[derive(Debug, Clone, Copy)]
+pub struct EntityRef {
+    pub const_type: Type,
+    pub id: i32,
+}
+
+/// All ids registered under one entity name. Replaces the former
+/// `entity_ids: HashMap<String, Symbol>` + `entity_ids_typed:
+/// HashMap<String, HashMap<Type, i32>>` pair (same data, ~6 MB smaller on a full
+/// corpus: no 104-byte `Symbol`s and no ~22k nested HashMaps).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct EntityEntry {
+    /// Priority winner for untyped lookup (last `register_entity_id` wins);
+    /// `None` for typed-only names (registered via `register_entity_id_typed_only`).
+    pub(crate) primary: Option<EntityRef>,
+    /// Every `(type, id)` variant under this name, for type-aware lookup.
+    /// Tiny (usually one entry); includes the primary's `(type, id)`.
+    pub(crate) variants: Vec<(Type, i32)>,
+}
+
+impl EntityEntry {
+    /// Insert or replace the id for `entity_type` (last write wins per type).
+    fn set_variant(&mut self, entity_type: Type, id: i32) {
+        if let Some(slot) = self.variants.iter_mut().find(|(t, _)| *t == entity_type) {
+            slot.1 = id;
+        } else {
+            self.variants.push((entity_type, id));
+        }
+    }
 }
 
 /// A hierarchical symbol table supporting scoped lookup.
@@ -404,21 +446,22 @@ impl SymbolTable {
 /// without breaking the lib's public surface.
 #[derive(Debug, Clone)]
 pub struct SymbolRegistry {
-    /// All registered scripts by name.
-    pub(crate) scripts: HashMap<String, Symbol>,
+    /// All registered scripts by name (last registration wins). The `Symbol` is
+    /// shared (`Arc`) with `scripts_by_trigger` so each script's symbol — and its
+    /// param/return type vectors — is stored once, not once per map.
+    pub(crate) scripts: HashMap<String, Arc<Symbol>>,
     /// All registered commands by name.
     pub(crate) commands: HashMap<String, Symbol>,
     /// All registered game variables by name.
     pub(crate) game_vars: HashMap<String, Symbol>,
     /// All registered constants by name (from .constant files).
     pub(crate) constants: HashMap<String, Symbol>,
-    /// Entity IDs from pack files (loc.pack, npc.pack, stat.pack, etc.).
-    /// These are looked up for plain identifiers; constants override only ^name refs.
-    pub(crate) entity_ids: HashMap<String, Symbol>,
-    /// Entity IDs keyed by (name, type) — supports type-aware lookup so that
-    /// `smokepuff` resolves to synth=164 when used in sound_synth() but
-    /// spotanim=86 when used in spotanim_map(), matching Java compiler behaviour.
-    pub(crate) entity_ids_typed: HashMap<String, HashMap<Type, i32>>,
+    /// Entity IDs from pack files (loc.pack, npc.pack, stat.pack, etc.), keyed by
+    /// name. Each entry carries a priority winner for plain-identifier lookup
+    /// plus all per-type variants for type-aware lookup (so `smokepuff` resolves
+    /// to synth=164 in sound_synth() but spotanim=86 in spotanim_map(), matching
+    /// the Java compiler). Constants override only `^name` refs.
+    pub(crate) entity_ids: HashMap<String, EntityEntry>,
     /// Parameter types for engine commands, parsed from engine.rs2.
     /// Maps command name → ordered list of parameter types.
     pub(crate) command_param_types: HashMap<String, Vec<Type>>,
@@ -437,7 +480,8 @@ pub struct SymbolRegistry {
     /// Full script symbols keyed by "trigger:name".
     /// Unlike `scripts` (name-only key, last-write-wins), this preserves
     /// all trigger variants so `[proc,fib]` isn't overwritten by `[debugproc,fib]`.
-    pub(crate) scripts_by_trigger: HashMap<String, Symbol>,
+    /// Shares each `Symbol` (`Arc`) with `scripts`.
+    pub(crate) scripts_by_trigger: HashMap<String, Arc<Symbol>>,
     /// Pre-assigned script IDs loaded from script.pack: "trigger:name" → ID.
     /// When present, overrides sequential assignment so IDs match the Java compiler.
     pub(crate) preloaded_script_ids: HashMap<String, i32>,
@@ -468,7 +512,6 @@ impl SymbolRegistry {
             game_vars: HashMap::new(),
             constants: HashMap::new(),
             entity_ids: HashMap::new(),
-            entity_ids_typed: HashMap::new(),
             command_param_types: HashMap::new(),
             type_chars: HashMap::new(),
             script_ids: HashMap::new(),
@@ -502,26 +545,27 @@ impl SymbolRegistry {
             id
         };
 
-        self.script_ids.insert(name.clone(), id);
-        // Register in trigger-specific maps
-        self.trigger_script_ids
-            .insert(format!("{}:{}", trigger, name), id);
+        // proc/label ids are keyed by bare name (not `trigger:name`), so they
+        // can't be derived from the trigger-keyed map without a per-lookup
+        // concat — keep these small dedicated maps.
         if trigger == "proc" {
             self.proc_script_ids.insert(name.clone(), id);
         } else if trigger == "label" {
             self.label_script_ids.insert(name.clone(), id);
         }
-        let symbol = Symbol {
+        // The id lives in the `Symbol`; `script_id` / `script_id_for_trigger`
+        // read it from `scripts` / `scripts_by_trigger` (the `*_script_ids` maps
+        // are now only the clientscript-pack fallback), so we don't duplicate it.
+        let symbol = Arc::new(Symbol {
             name: name.clone(),
             kind: SymbolKind::Script {
                 id,
-                trigger: trigger.clone(),
+                trigger,
                 param_types,
                 return_types,
             },
-        };
-        self.scripts_by_trigger
-            .insert(format!("{}:{}", trigger, name), symbol.clone());
+        });
+        self.scripts_by_trigger.insert(key, Arc::clone(&symbol));
         self.scripts.insert(name, symbol);
 
         id
@@ -596,24 +640,13 @@ impl SymbolRegistry {
     /// These are stored separately from .constant files values so plain
     /// identifier resolution uses entity IDs, while ^name uses .constant files.
     pub fn register_entity_id(&mut self, name: String, entity_type: Type, id: i32) {
-        // Store in the typed map (for type-aware lookup).
-        self.entity_ids_typed
-            .entry(name.clone())
-            .or_default()
-            .insert(entity_type, id);
-
-        // Also store in the flat map (priority-ordered; last write wins).
-        self.entity_ids.insert(
-            name.clone(),
-            Symbol {
-                name,
-                kind: SymbolKind::Constant {
-                    const_type: entity_type,
-                    int_value: Some(id),
-                    string_value: None,
-                },
-            },
-        );
+        let entry = self.entity_ids.entry(name).or_default();
+        // Priority winner for untyped lookup (last write wins).
+        entry.primary = Some(EntityRef {
+            const_type: entity_type,
+            id,
+        });
+        entry.set_variant(entity_type, id);
     }
 
     /// Register an entity ID that should only be resolvable via a typed
@@ -626,10 +659,10 @@ impl SymbolRegistry {
     /// still works (typed lookup hits `Type::NpcMode`), but bare `oploc1`
     /// in e.g. `test_op(oploc1, …)` falls through to `trigger_table::byte`.
     pub fn register_entity_id_typed_only(&mut self, name: String, entity_type: Type, id: i32) {
-        self.entity_ids_typed
+        self.entity_ids
             .entry(name)
             .or_default()
-            .insert(entity_type, id);
+            .set_variant(entity_type, id);
     }
 
     /// Look up an entity ID for a specific expected type. Returns `None` if the
@@ -637,21 +670,22 @@ impl SymbolRegistry {
     /// Normalizes the name (lowercase + spaces→underscores) matching TS normalizeName for Basic symbols.
     pub fn lookup_entity_id_typed(&self, name: &str, expected: Type) -> Option<i32> {
         let normalized = name.to_lowercase().replace(' ', "_");
-        self.entity_ids_typed
+        self.entity_ids
             .get(&normalized)
-            .and_then(|m| m.get(&expected))
-            .copied()
+            .and_then(|e| e.variants.iter().find(|(t, _)| *t == expected))
+            .map(|(_, id)| *id)
     }
 
     /// Look up a script by name (last registration wins if multiple triggers share the name).
     pub fn lookup_script(&self, name: &str) -> Option<&Symbol> {
-        self.scripts.get(name)
+        self.scripts.get(name).map(|s| s.as_ref())
     }
 
     /// Look up a script by trigger and name (avoids name collisions between triggers).
     pub fn lookup_script_by_trigger(&self, trigger: &str, name: &str) -> Option<&Symbol> {
         self.scripts_by_trigger
             .get(&format!("{}:{}", trigger, name))
+            .map(|s| s.as_ref())
     }
 
     /// Look up a command by name.
@@ -671,13 +705,30 @@ impl SymbolRegistry {
 
     /// Look up an entity ID by name (from stat.pack, npc.pack, etc.).
     /// Normalizes the name matching TS normalizeName for Basic symbols.
-    pub fn lookup_entity_id(&self, name: &str) -> Option<&Symbol> {
+    pub fn lookup_entity_id(&self, name: &str) -> Option<EntityRef> {
         let normalized = name.to_lowercase().replace(' ', "_");
-        self.entity_ids.get(&normalized)
+        self.entity_ids.get(&normalized).and_then(|e| e.primary)
     }
 
-    /// Get the script ID for a given name.
+    /// Free registration-only scratch once every script is registered. The
+    /// pre-assigned IDs from `script.pack` are consulted only while assigning
+    /// ids in `register_script`; codegen and pointer-checking never read them.
+    /// Replacing (not `clear`-ing) the map returns its buckets to the allocator.
+    pub(crate) fn drop_registration_scratch(&mut self) {
+        self.preloaded_script_ids = HashMap::new();
+    }
+
+    /// Get the script ID for a given name. Reads the id from the registered
+    /// script's `Symbol`; falls back to `script_ids` (clientscript-pack entries,
+    /// which are never registered as RS2). Registered scripts take precedence,
+    /// matching the old insert order (clientscripts loaded, then `register_script`
+    /// overwrote by name).
     pub fn script_id(&self, name: &str) -> Option<i32> {
+        if let Some(s) = self.scripts.get(name)
+            && let SymbolKind::Script { id, .. } = &s.kind
+        {
+            return Some(*id);
+        }
         self.script_ids.get(name).copied()
     }
 
@@ -692,9 +743,15 @@ impl SymbolRegistry {
     }
 
     pub fn script_id_for_trigger(&self, trigger: &str, name: &str) -> Option<i32> {
-        self.trigger_script_ids
-            .get(&format!("{}:{}", trigger, name))
-            .copied()
+        let key = format!("{}:{}", trigger, name);
+        if let Some(s) = self.scripts_by_trigger.get(&key)
+            && let SymbolKind::Script { id, .. } = &s.kind
+        {
+            return Some(*id);
+        }
+        // Fallback: clientscript-pack ids (keyed `clientscript:name`), never
+        // registered as RS2 scripts.
+        self.trigger_script_ids.get(&key).copied()
     }
 
     pub fn command_opcode(&self, name: &str) -> Option<i32> {
