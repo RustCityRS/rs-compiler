@@ -2107,6 +2107,44 @@ mod tests {
         assert!(warning.is_some());
     }
 
+    /// An npc AI trigger binds its subject as the npc even when an obj of the
+    /// same name was registered after it (obj.pack loads after npc.pack, so
+    /// the obj owns the untyped name). Rev 647 names npc 708 and a dummy obj
+    /// 9952 both `imp`: `[ai_timer,imp]` keyed to the obj and never ran.
+    #[test]
+    fn npc_ai_triggers_bind_the_npc_over_a_same_named_obj() {
+        let mut r = SymbolRegistry::new();
+        r.register_entity_id("imp".into(), Type::Npc, 708);
+        r.register_entity_id("imp".into(), Type::Obj, 9952);
+        for (trigger, byte) in [
+            ("ai_timer", 139),
+            ("ai_queue2", 118),
+            ("ai_applayer2", 102),
+            ("ai_opplayer2", 109),
+            ("ai_oploc1", 80),
+            ("ai_apobj1", 45),
+            ("ai_spawn", 166),
+            ("ai_despawn", 167),
+        ] {
+            assert_eq!(
+                Compiler::compute_lookup_key(trigger, "imp", &r),
+                708 * 1024 + 512 + byte,
+                "[{trigger},imp]"
+            );
+        }
+        // An npc category still keys by the category.
+        r.register_entity_id("demons".into(), Type::Category, 7);
+        assert_eq!(
+            Compiler::compute_lookup_key("ai_timer", "_demons", &r),
+            7 * 1024 + 256 + 139
+        );
+        // A held-item trigger still binds the obj.
+        assert_eq!(
+            Compiler::compute_lookup_key("opheld1", "imp", &r),
+            9952 * 1024 + 512 + 140
+        );
+    }
+
     #[test]
     fn bare_command_sharing_a_trigger_name_compiles_to_the_command() {
         // `if_close` is BOTH the close command (opcode 2033) and the
