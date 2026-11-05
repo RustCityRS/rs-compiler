@@ -1584,12 +1584,13 @@ impl Parser {
                         && stripped
                             .chars()
                             .all(|c| c.is_ascii_alphanumeric() || c == '_');
-                    let is_code = expr_str.starts_with('$')
-                        || expr_str.starts_with('%')
-                        || expr_str.starts_with('^')
-                        || expr_str.starts_with('~')
-                        || expr_str.contains('(')
-                        || is_plain_identifier;
+                    let is_code = !is_string_tag(&expr_str)
+                        && (expr_str.starts_with('$')
+                            || expr_str.starts_with('%')
+                            || expr_str.starts_with('^')
+                            || expr_str.starts_with('~')
+                            || expr_str.contains('(')
+                            || is_plain_identifier);
                     if is_code {
                         let expr = self.parse_string_embedded_expr(&expr_str);
                         parts.push(StringPart::Expr(expr));
@@ -1634,4 +1635,22 @@ impl Parser {
 
         Expr::JoinedString { parts }
     }
+}
+
+/// Whether `inner`, the text between a string's `<` and `>`, is a formatting
+/// tag rather than code: Neptune's lexer (`RuneScriptLexer.g4`, `STRING_TAG`
+/// and `STRING_CLOSE_TAG`) reads `<` Tag (`=` value)? `>` and `</` Tag `>` as
+/// tags, with Tag one of br, col, str, shad, u, img, gt, lt. So `<br>` is a
+/// line break, not a call to a command named `br`.
+fn is_string_tag(inner: &str) -> bool {
+    const TAGS: [&str; 8] = ["br", "col", "str", "shad", "u", "img", "gt", "lt"];
+    let (name, closing) = match inner.strip_prefix('/') {
+        Some(rest) => (rest, true),
+        None => (inner, false),
+    };
+    let (name, has_value) = match name.split_once('=') {
+        Some((name, value)) => (name, !value.is_empty()),
+        None => (name, false),
+    };
+    TAGS.contains(&name) && !(closing && has_value)
 }
