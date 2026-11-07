@@ -125,13 +125,9 @@ pub fn editor_project(
     let mut files = sources::config_files(&dir);
     if let Some(pack) = &pack {
         symloader::collect_all_files(pack, &mut files);
-        // Interfaces, world maps and defaults live beside the scripts they're for.
+        // Interfaces and defaults live beside the scripts they're for.
         if let Some(content) = pack.parent() {
-            for (folder, extension) in [
-                ("interfaces", "if3"),
-                ("worldmap_data", "wma"),
-                ("defaults", "defaults"),
-            ] {
+            for (folder, extension) in [("interfaces", "if3"), ("defaults", "defaults")] {
                 let Ok(entries) = fs::read_dir(content.join(folder)) else {
                     continue;
                 };

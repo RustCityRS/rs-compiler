@@ -5,8 +5,8 @@
 
 use crate::types::Type;
 use Value::{
-    AnyVar, ColumnName, Component, Config, Declared, Flag, Hook, Input, Number, OfColumn, OfParam,
-    Output, Sound, Text, TypeName, Word,
+    AnyVar, ColumnName, Component, Config, Declared, Flag, Floor, Hook, Input, Number, OfColumn,
+    OfParam, Output, Sound, Text, Tile, TypeName, Word,
 };
 use std::collections::HashMap;
 
@@ -31,6 +31,10 @@ pub(super) enum Value {
     Component,
     /// A script, what it's given, and what it runs on.
     Hook,
+    /// A world map tile: `underlay:name`, `overlay:name@index`, `layers:count,options` or a word.
+    Tile,
+    /// The underlay or overlay the tile before it names directly.
+    Floor,
 }
 
 /// What a file has already declared that later values depend on.
@@ -47,6 +51,7 @@ pub(super) struct Section<'a> {
     output: Option<&'a str>,
     declared: Option<&'a str>,
     pub(super) table: Option<&'a str>,
+    floor: Option<&'a str>,
 }
 
 impl<'a> Section<'a> {
@@ -56,6 +61,7 @@ impl<'a> Section<'a> {
             "outputtype" => self.output = Some(value),
             "type" => self.declared = Some(value),
             "table" => self.table = Some(value),
+            _ if key.starts_with("tile") => self.floor = value.split(':').next(),
             _ => {}
         }
     }
@@ -87,6 +93,7 @@ const PARAM_INT: &[Value] = &[Config(Type::Param), Number];
 const PARAM_TEXT: &[Value] = &[Config(Type::Param), Text];
 const VARP_RANGE: &[Value] = &[Config(Type::Varp), Number, Number];
 const VARBIT_RANGE: &[Value] = &[Config(Type::Varbit), Number, Number];
+const TILE: &[Value] = &[Tile];
 
 const BAS: &[Field] = &[
     ("readyanim", SEQ),
@@ -667,6 +674,27 @@ const WMA: &[Field] = &[
     ("element", &[Number, Config(Type::MapElement), Number]),
 ];
 
+const WORLDMAP: &[Field] = &[
+    ("format", WORD),
+    ("underlays", NUMBER),
+    ("flu", &[Config(Type::Flu)]),
+    ("overlays", NUMBER),
+    ("flo", &[Config(Type::Flo)]),
+    ("square", TEXT),
+    ("chunk_kind", NUMBER),
+    ("map_x", NUMBER),
+    ("map_z", NUMBER),
+    ("chunk_x", NUMBER),
+    ("chunk_z", NUMBER),
+    ("floor", &[Floor]),
+    ("underlay", &[Config(Type::Flu)]),
+    ("overlay", &[Config(Type::Flo)]),
+    ("shape_rotation", NUMBER),
+    ("locs", NUMBER),
+    ("loc", &[Config(Type::Loc)]),
+    ("loc_shape_rotation", NUMBER),
+];
+
 const IF3: &[Field] = &[
     ("type", WORD),
     ("name", TEXT),
@@ -782,6 +810,7 @@ pub(super) fn keys(kind: &str) -> &'static [Field] {
         "quickchatcat" => QUICKCHATCAT,
         "quickchatphrase" => QUICKCHATPHRASE,
         "wma" => WMA,
+        "fm" | "fms" => WORLDMAP,
         "cursor" => CURSOR,
         "dbrow" => DBROW,
         "dbtable" => DBTABLE,
@@ -819,6 +848,10 @@ pub(super) fn field(kind: &str, key: &str) -> Option<&'static [Value]> {
     if table.is_empty() {
         return None;
     }
+    // A tile goes by its coordinates.
+    if matches!(kind, "fm" | "fms") && key.starts_with("tile") {
+        return Some(TILE);
+    }
     if key.starts_with("recol") {
         return Some(NUMBER);
     }
@@ -850,6 +883,18 @@ pub(super) fn slot(
             let column = types.columns.get(&format!("{}:{first}", section.table?))?;
             (!column.is_empty()).then(|| of_type(column[part.saturating_sub(1) % column.len()]))
         }
+        Tile => Some(match (first, part) {
+            ("underlay", 0) => Config(Type::Flu),
+            ("overlay", 0) => Config(Type::Flo),
+            // The palette index after `@`.
+            ("underlay" | "overlay", _) => Number,
+            _ => Tile,
+        }),
+        Floor => Some(Config(if section.floor == Some("overlay") {
+            Type::Flo
+        } else {
+            Type::Flu
+        })),
         value => Some(value),
     }
 }
@@ -882,6 +927,8 @@ pub(super) fn describe(values: &[Value]) -> String {
             Sound => "synth or vorbis",
             Component => "component",
             Hook => "clientscript hook",
+            Tile => "world map tile",
+            Floor => "flu or flo",
         })
         .collect::<Vec<_>>()
         .join(", ")

@@ -195,6 +195,67 @@ fn interface_values_read_by_their_keys() {
 }
 
 #[test]
+fn world_map_values_read_by_their_keys() {
+    let mut project = project();
+    let flu = project.open_config("mem:all.flu", Scope::Global, 1, "[underlay_47]\n", "flu");
+    let flo = project.open_config("mem:all.flo", Scope::Global, 1, "[overlay_9]\n", "flo");
+    let text = "[file_1]\nformat=area\nunderlays=1\nflu=underlay_47\noverlays=1\nflo=overlay_9\n\
+                square=main/file_1/m50_50.fms\n";
+    let area = project.open_config("mem:main.fm", Scope::Global, 1, text, "fm");
+    let tokens = project.semantic_tokens(area);
+    ordered(text, &tokens);
+    assert_eq!(at(text, &tokens, "file_1").kind, TokenKind::Namespace);
+    assert_eq!(
+        at(text, &tokens, "main/file_1/m50_50.fms").kind,
+        TokenKind::String
+    );
+    // The section is a file id, not a name anything refers to.
+    assert!(project.hover(area, text.find("file_1").unwrap()).is_none());
+    let underlay = text.find("underlay_47").unwrap();
+    assert_eq!(project.definition(area, underlay).unwrap().source, flu);
+
+    let text = "tile3200_3215=underlay:underlay_47\ntile3200_3216=layers:2,overlay,locs,extra:3\n\
+                overlay=overlay_9\nshape_rotation=1,1\ntile3200_3217=overlay:direct\nfloor=overlay_9\n\
+                tile3200_3218=overlay:overlay_9@5\n";
+    let square = project.open_config("mem:m50_50.fms", Scope::Global, 1, text, "fms");
+    let tokens = project.semantic_tokens(square);
+    ordered(text, &tokens);
+    let at_part = |within: &str, part: &str| {
+        let start = text.find(within).unwrap() + within.find(part).unwrap();
+        start..start + part.len()
+    };
+    let kind = |within: &str, part: &str| {
+        let range = at_part(within, part);
+        tokens
+            .iter()
+            .find(|token| token.range == range)
+            .unwrap_or_else(|| panic!("No token for {part:?} in {within:?}: {tokens:?}"))
+            .kind
+    };
+    assert_eq!(kind("=underlay:", "underlay"), TokenKind::Keyword);
+    assert_eq!(kind(":underlay_47", "underlay_47"), TokenKind::EnumMember);
+    assert_eq!(kind("=layers:2", "layers"), TokenKind::Keyword);
+    assert_eq!(kind("layers:2", "2"), TokenKind::Number);
+    assert_eq!(kind(",locs", "locs"), TokenKind::Keyword);
+    assert_eq!(kind("extra:3", "3"), TokenKind::Number);
+    assert_eq!(kind(":direct", "direct"), TokenKind::Keyword);
+    assert_eq!(kind("@5", "5"), TokenKind::Number);
+    for (within, part, config) in [
+        (":underlay_47", "underlay_47", flu),
+        ("floor=overlay_9", "overlay_9", flo),
+        (":overlay_9@", "overlay_9", flo),
+    ] {
+        let start = at_part(within, part).start;
+        assert_eq!(project.definition(square, start).unwrap().source, config);
+    }
+    assert!(
+        project
+            .definition(square, at_part("@5", "5").start)
+            .is_none()
+    );
+}
+
+#[test]
 fn config_text_is_one_string_and_stops_at_a_comment() {
     let mut project = project();
     let text = "[man]\nop1=Talk-to the man, slowly // spoken\nname=Man\nsize=2\nmembers=yes\n";

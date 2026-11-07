@@ -91,6 +91,10 @@ pub(super) fn declarations(
     });
     for document in documents {
         let kind = document.config.as_deref().unwrap();
+        // A world map area's sections are its file ids, which nothing names.
+        if matches!(kind, "fm" | "fms") {
+            continue;
+        }
         let pack = kind.strip_prefix("pack:");
         let kind = pack.unwrap_or(kind);
         let interfaces = if pack == Some("interface") {
@@ -316,6 +320,8 @@ fn typed_tokens<'a>(document: &'a Document, types: &ConfigTypes) -> Vec<Typed<'a
             continue;
         }
         let slot = values.and_then(|values| fields::slot(values, part, first, &context, types));
+        // A tile's parts end at `:` and `@` as well.
+        let tile = values.is_some_and(|values| values.contains(&Value::Tile));
         let kind = if quoted {
             // A name in quotes is one name, whatever it holds.
             if bytes[i] == b'"' {
@@ -400,8 +406,11 @@ fn typed_tokens<'a>(document: &'a Document, types: &ConfigTypes) -> Vec<Typed<'a
                 i -= 1;
             }
             TokenKind::Namespace
-        } else if value && bytes[i] == b',' {
+        } else if value && (bytes[i] == b',' || tile && bytes[i] == b'@') {
             part += 1;
+            i += 1;
+            TokenKind::Operator
+        } else if value && tile && bytes[i] == b':' {
             i += 1;
             TokenKind::Operator
         } else if bytes[i] == b'=' {
@@ -426,6 +435,7 @@ fn typed_tokens<'a>(document: &'a Document, types: &ConfigTypes) -> Vec<Typed<'a
                 while i < bytes.len()
                     && !b",\r\n".contains(&bytes[i])
                     && !bytes[i..].starts_with(b"//")
+                    && !(tile && bytes[i] == b'@')
                 {
                     i += 1;
                 }
@@ -433,7 +443,7 @@ fn typed_tokens<'a>(document: &'a Document, types: &ConfigTypes) -> Vec<Typed<'a
                     i -= 1;
                 }
             } else {
-                while i < bytes.len() && config_ident(bytes[i]) {
+                while i < bytes.len() && config_ident(bytes[i]) && !(tile && bytes[i] == b':') {
                     i += 1;
                 }
             }
@@ -443,12 +453,16 @@ fn typed_tokens<'a>(document: &'a Document, types: &ConfigTypes) -> Vec<Typed<'a
                 TokenKind::Property
             } else if slot == Some(Value::Hook) && part == 0 && first.is_empty() {
                 TokenKind::Function
-            } else if matches!(word, "true" | "false" | "yes" | "no" | "null") {
+            } else if matches!(word, "true" | "false" | "yes" | "no" | "null")
+                || tile && word == "direct"
+            {
                 TokenKind::Keyword
             } else if slot == Some(Value::TypeName) && Type::from_name(word).is_some() {
                 TokenKind::Type
             } else if number(word) {
                 TokenKind::Number
+            } else if slot == Some(Value::Tile) {
+                TokenKind::Keyword
             } else {
                 TokenKind::EnumMember
             }

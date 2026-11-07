@@ -195,6 +195,9 @@ use: `*.anim`, `*.area`, `*.bas`, `*.billboard`, `*.category`, `*.config44`, `*.
 `*.varbit`, `*.varc`, `*.varclan`, `*.varclansetting`, `*.varcon`,
 `*.varn`, `*.varnbit`, `*.varobj`, `*.varp`, `*.vars` and `*.wma`.
 
+```
+*.anim;*.bas;*.category;*.config15;*.config18;*.config19;*.config20;*.config21;*.config22;*.config23;*.config24;*.config25;*.config37;*.config38;*.config39;*.config40;*.config41;*.config42;*.config43;*.config44;*.config45;*.config47;*.config48;*.config7;*.constant;*.cursor;*.dbrow;*.dbtable;*.enum;*.flo;*.flu;*.fontmetrics;*.hashes;*.hitmark;*.hunt;*.idk;*.if;*.inv;*.jingle;*.light;*.loc;*.locshape;*.mel;*.mesanim;*.midi;*.model;*.msi;*.npc;*.obj;*.order;*.overlayinterface;*.pack;*.param;*.quest;*.seq;*.spotanim;*.stat;*.struct;*.synth;*.varbit;*.varc;*.varclansetting;*.varcstr;*.varn;*.varp;*.vars;*.billboard;*.controller;*.defaults;*.area;*.if3;*.itemcode;*.particleeffector;*.particleemitter;*.quickchatcat;*.quickchatphrase;*.varclan;*.varcon;*.varnbit;*.varobj;*.wma;*.fm;*.fms```
+
 Optional color settings:
 
 - **JetBrains with LSP4IJ:** import [editor/runec.icls](editor/runec.icls)
