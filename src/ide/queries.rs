@@ -3,7 +3,7 @@ use super::{
     SymbolKind, TextEdit, config, highlighting, index,
 };
 use crate::clientscript::hooks::transmit_id;
-use crate::diagnostics::{Diagnostic, Phase};
+use crate::diagnostics::{Diagnostic, DiagnosticsCollector, Phase};
 use crate::project::{Project, SourceId};
 use crate::sources::Scope;
 use crate::symbol::SymbolKind as RegistryKind;
@@ -21,7 +21,9 @@ impl Project {
 
     pub fn hover(&self, source: SourceId, offset: usize) -> Option<Hover> {
         let index = self.symbol_index();
-        let reference = index.at(source, offset)?;
+        let Some(reference) = index.at(source, offset) else {
+            return config::key_hover(self.document(source)?, offset);
+        };
         let symbol = &index.symbols[reference.symbol];
         Some(Hover {
             range: reference.location.range.clone(),
@@ -241,6 +243,9 @@ impl Project {
         };
         if !document.text.is_char_boundary(offset) {
             return Vec::new();
+        }
+        if let Some(items) = config::completions(self, document, offset, limit) {
+            return items;
         }
         let Some(before) = document.text.get(..offset) else {
             return Vec::new();
@@ -526,12 +531,37 @@ impl Project {
         })
     }
 
+    /// Config values that do not name what their key holds.
+    pub fn config_diagnostics(&self) -> DiagnosticsCollector {
+        let mut diagnostics = DiagnosticsCollector::new();
+        for (source, problems) in &self.symbol_index().config_problems {
+            let Some(document) = self.document(*source) else {
+                continue;
+            };
+            for (line, message) in problems {
+                diagnostics.warning(
+                    document.label.clone(),
+                    *line,
+                    0,
+                    message.clone(),
+                    Phase::TypeChecking,
+                );
+            }
+        }
+        diagnostics
+    }
+
     pub fn semantic_tokens(&self, source: SourceId) -> Vec<SemanticToken> {
         let Some(document) = self.document(source) else {
             return Vec::new();
         };
         if document.config.is_some() {
-            return config::tokens(document);
+            // Never waits for the index: until it exists, values typed by a
+            // declaration read as plain words.
+            return match self.index.get() {
+                Some(index) => config::tokens(document, &index.config_types),
+                None => config::tokens(document, &Default::default()),
+            };
         }
         highlighting::script(document, self.symbol_index())
     }

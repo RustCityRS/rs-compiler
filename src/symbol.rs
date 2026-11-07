@@ -824,24 +824,36 @@ impl SymbolRegistry {
                 .script_id_for_trigger("clientscript", name)
                 .or_else(|| self.script_id_for_trigger("proc", name)),
             Type::Proc => self.proc_script_id(name),
-            Type::Model => self.lookup_entity_id_typed(name, expected).or_else(|| {
-                name.strip_prefix("model_")
-                    .and_then(|id| id.parse::<i32>().ok())
-                    .filter(|id| *id >= 0)
-            }),
-            Type::Varp | Type::Varn | Type::Vars | Type::Varbit => {
-                self.lookup_game_var(name).and_then(|symbol| {
-                    if let SymbolKind::GameVar {
-                        var_id, category, ..
-                    } = &symbol.kind
-                        && category == expected.name()
-                    {
-                        Some(*var_id)
-                    } else {
-                        None
-                    }
+            // These go by number without a name of their own.
+            Type::Model | Type::Texture | Type::Category => {
+                self.lookup_entity_id_typed(name, expected).or_else(|| {
+                    name.strip_prefix(expected.name())?
+                        .strip_prefix('_')?
+                        .parse::<i32>()
+                        .ok()
+                        .filter(|id| *id >= 0)
                 })
             }
+            Type::Varp
+            | Type::Varn
+            | Type::Vars
+            | Type::Varbit
+            | Type::Varc
+            | Type::VarClanSetting => self.lookup_game_var(name).and_then(|symbol| {
+                if let SymbolKind::GameVar {
+                    var_id, category, ..
+                } = &symbol.kind
+                    && match expected {
+                        Type::Varc => matches!(category.as_str(), "varc" | "varcs"),
+                        Type::VarClanSetting => category.starts_with("clansetting_"),
+                        _ => category == expected.name(),
+                    }
+                {
+                    Some(*var_id)
+                } else {
+                    None
+                }
+            }),
             _ => self.lookup_entity_id_typed(name, expected),
         }
     }

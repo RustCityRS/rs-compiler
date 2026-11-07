@@ -1,6 +1,6 @@
 use runec::bytecode::{Opcode, Operand};
 use runec::clientscript::{
-    self, Source,
+    self, HookValue, Source,
     decode::Script,
     decompile::{self, Names},
     format::Format,
@@ -109,13 +109,8 @@ fn quoted_hooks_preserve_arguments_transmits_and_clearing() {
 fn named_transmit_triggers_compile_as_ids_and_decompile_as_names() {
     for (command, kind, name, id) in [
         ("cc_setonvartransmit", "varp", "bank_open", 90),
-        ("cc_setonvarctransmit", "varc_int", "varc_int_192", 192),
-        (
-            "cc_setonvarcstrtransmit",
-            "varc_string",
-            "varc_string_352",
-            352,
-        ),
+        ("cc_setonvarctransmit", "varc", "varclient_192", 192),
+        ("cc_setonvarcstrtransmit", "varcs", "varclient_352", 352),
         ("cc_setoninvtransmit", "inv", "tradeoffer", 94),
         ("cc_setonstattransmit", "stat", "magic", 6),
     ] {
@@ -130,8 +125,8 @@ fn named_transmit_triggers_compile_as_ids_and_decompile_as_names() {
         registry.set_script_id("clientscript", "callback", 2);
         registry.register_script("callback".into(), "clientscript".into(), vec![], vec![]);
         if kind.starts_with("var") {
-            // String varcs also work without a pack entry, as with %varc_string_N.
-            if kind != "varc_string" {
+            // String varcs also work without a pack entry, as with %varcs_N.
+            if kind != "varcs" {
                 registry.register_game_var(name.into(), Type::Int, id, kind.into());
             }
         } else {
@@ -189,6 +184,46 @@ fn named_transmit_triggers_compile_as_ids_and_decompile_as_names() {
             .1;
         assert_eq!(bytes, rebuilt);
     }
+}
+
+#[test]
+fn a_component_hook_reads_back_from_how_it_is_written() {
+    let mut registry = SymbolRegistry::new();
+    registry.set_script_id("clientscript", "callback", 2);
+    registry.register_script(
+        "callback".into(),
+        "clientscript".into(),
+        vec![Type::Component, Type::Boolean, Type::String, Type::Int],
+        vec![],
+    );
+    registry.register_constant("event_com".into(), Type::Int, Some(i32::MIN + 3), None);
+    registry.register_game_var("bank_open".into(), Type::Int, 90, "varp".into());
+    let values = vec![
+        HookValue::Int(2),
+        HookValue::Int(i32::MIN + 3),
+        HookValue::Int(1),
+        HookValue::String("a<br>b".into()),
+        HookValue::Int(-1),
+    ];
+    let signatures = HashMap::from([(
+        2,
+        decompile::Signature {
+            param_types: vec![Type::Component, Type::Boolean, Type::String, Type::Int],
+            ..decompile::Signature::default()
+        },
+    )]);
+    let text = decompile::component_hook_text(
+        &values,
+        Some(("varp", &[90])),
+        &signatures,
+        &TestNames,
+        &registry,
+    )
+    .unwrap();
+    assert_eq!(text, "callback(event_com, true, \"a<br>b\", -1){bank_open}");
+    let (read, transmits) = clientscript::component_hook(&text, Some("varp"), &registry).unwrap();
+    assert_eq!(read, values);
+    assert_eq!(transmits, [90]);
 }
 
 #[test]
@@ -356,6 +391,7 @@ fn hook_descriptors_restore_callback_parameter_types() {
     }];
     let signatures = decompile::infer_signatures(
         &scripts,
+        &[],
         &TestNames,
         &HashMap::new(),
         &commands,
@@ -394,6 +430,65 @@ fn hook_descriptors_restore_callback_parameter_types() {
             .remove(0)
             .1,
         original[&1]
+    );
+}
+
+#[test]
+fn a_zero_or_one_compare_reads_by_type_and_packs_the_same() {
+    let format = Format::parse(
+        "0=PushConstantInt\n1=PushVarp\n6=Branch\n7=BranchNot\n21=Return\n86=BranchIfTrue\n87=BranchIfFalse\n",
+    )
+    .unwrap();
+    let source = Source::parse(
+        "[proc,value]()\n\
+         if (%varp_1 = false) { return; }\n\
+         if (%varp_1 = true) { return; }\n\
+         if (%varp_2 = 0) { return; }\n\
+         if (%varp_2 = 1) { return; }\n\
+         if (%varp_2 ! 1) { return; }\n",
+        Path::new("virtual:input"),
+    )
+    .unwrap();
+    let ids = HashMap::from([("[proc,value]".into(), 1)]);
+    let mut registry = SymbolRegistry::new();
+    registry.register_game_var("varp_1".into(), Type::Boolean, 1, "varp".into());
+    registry.register_game_var("varp_2".into(), Type::Int, 2, "varp".into());
+    clientscript::register(&source.file, &ids, &mut registry).unwrap();
+    let original = source.compile(&registry, &format).unwrap().remove(0).1;
+    let script = Script::decode(&original, &format).unwrap();
+    let count = |opcode: u16| {
+        script
+            .opcodes
+            .iter()
+            .filter(|&&other| other == opcode)
+            .count()
+    };
+    assert_eq!((count(87), count(86), count(7)), (2, 2, 1));
+    let scripts = HashMap::from([(1, script)]);
+    let signatures = decompile::signatures(&scripts);
+    let text = decompile::decompile(
+        &scripts[&1],
+        1,
+        &TestNames,
+        &signatures,
+        &HashMap::new(),
+        &[],
+        &registry,
+    )
+    .unwrap();
+    for condition in [
+        "%varp_1 = false",
+        "%varp_1 = true",
+        "%varp_2 = 0",
+        "%varp_2 = 1",
+        "%varp_2 ! 1",
+    ] {
+        assert!(text.contains(condition), "{condition} in {text}");
+    }
+    let restored = Source::parse(&text, Path::new("virtual:restored")).unwrap();
+    assert_eq!(
+        original,
+        restored.compile(&registry, &format).unwrap().remove(0).1
     );
 }
 

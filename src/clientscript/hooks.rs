@@ -1,9 +1,125 @@
 use crate::arguments::{expression_types, stack_hints};
 use crate::lexer::Lexer;
-use crate::parser::{Expr, Parser, ScriptDeclaration};
+use crate::parser::{Expr, Parser, ScriptDeclaration, StringPart};
 use crate::symbol::{SymbolKind, SymbolRegistry, SymbolTable};
 use crate::types::{BaseVarType, Type};
 use std::path::PathBuf;
+
+/// A value a component's hook hands its script.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HookValue {
+    Int(i32),
+    String(String),
+}
+
+fn hook_value(
+    arg: &Expr,
+    hint: Option<Type>,
+    registry: &SymbolRegistry,
+) -> Result<HookValue, String> {
+    let string = hint.is_some_and(|ty| ty.base_type() == BaseVarType::String);
+    Ok(match arg {
+        Expr::IntLiteral(value) | Expr::CoordLiteral(value) => HookValue::Int(*value),
+        Expr::CharLiteral(value) => HookValue::Int(*value as i32),
+        Expr::BoolLiteral(value) => HookValue::Int(i32::from(*value)),
+        Expr::NullLiteral if string => HookValue::String("null".to_owned()),
+        Expr::NullLiteral => HookValue::Int(-1),
+        Expr::StringLiteral(name) => match hint
+            .filter(|_| !string)
+            .and_then(|ty| registry.lookup_reference(name, ty))
+        {
+            Some(id) => HookValue::Int(id),
+            None => HookValue::String(name.clone()),
+        },
+        Expr::JoinedString { parts } => {
+            let mut text = String::new();
+            for part in parts {
+                let StringPart::Literal(part) = part else {
+                    return Err("A hook argument must be a constant value".to_owned());
+                };
+                text.push_str(part);
+            }
+            HookValue::String(text)
+        }
+        Expr::Identifier(name) | Expr::ConstantVar(name, _) => {
+            let component = name
+                .split_once(':')
+                .and_then(|(interface, component)| registry.lookup_component(interface, component));
+            let reference = hint.and_then(|ty| registry.lookup_reference(name, ty));
+            if let Some(id) = component.or(reference) {
+                return Ok(HookValue::Int(id));
+            }
+            if let Some(SymbolKind::Constant {
+                int_value,
+                string_value,
+                ..
+            }) = registry.lookup_constant(name).map(|symbol| &symbol.kind)
+            {
+                if let Some(value) = int_value {
+                    return Ok(HookValue::Int(*value));
+                }
+                if let Some(value) = string_value {
+                    return Ok(HookValue::String(value.clone()));
+                }
+            }
+            match registry.lookup_entity_id(name) {
+                Some(entity) => HookValue::Int(entity.id),
+                None => return Err(format!("Unknown hook argument '{name}'")),
+            }
+        }
+        _ => return Err("A hook argument must be a constant value".to_owned()),
+    })
+}
+
+/// A component's hook as an interface writes it: `script(args){transmits}`.
+/// Gives the values the hook holds, its script first, and its transmit list.
+pub fn component_hook(
+    text: &str,
+    kind: Option<&str>,
+    registry: &SymbolRegistry,
+) -> Result<(Vec<HookValue>, Vec<i32>), String> {
+    let values = parse(text)?;
+    let Expr::Tuple(args) = &values[1] else {
+        unreachable!()
+    };
+    let (script, params) = match &values[0] {
+        Expr::IntLiteral(id) => (*id, Vec::new()),
+        Expr::Identifier(name) => {
+            let id = registry
+                .lookup_reference(name, Type::ClientScript)
+                .or_else(|| name.strip_prefix("script")?.parse().ok())
+                .ok_or_else(|| format!("Unknown clientscript '{name}'"))?;
+            let params = match registry
+                .lookup_script_by_trigger("clientscript", name)
+                .or_else(|| registry.lookup_script_by_trigger("proc", name))
+                .map(|symbol| &symbol.kind)
+            {
+                Some(SymbolKind::Script { param_types, .. }) => param_types.clone(),
+                _ => Vec::new(),
+            };
+            (id, params)
+        }
+        _ => unreachable!(),
+    };
+    let hints = stack_hints(registry, &params, args, &SymbolTable::new());
+    let mut hook = vec![HookValue::Int(script)];
+    for (arg, hint) in args.iter().zip(hints) {
+        hook.push(hook_value(arg, hint, registry)?);
+    }
+    let mut transmits = Vec::new();
+    if let Some(Expr::Tuple(list)) = values.get(2) {
+        let kind = kind.ok_or("This hook has no transmit list")?;
+        for value in list {
+            transmits.push(match value {
+                Expr::IntLiteral(id) => *id,
+                Expr::Identifier(name) => transmit_id(registry, kind, name)
+                    .ok_or_else(|| format!("Unknown {kind} transmit trigger '{name}'"))?,
+                _ => return Err("A transmit trigger must be a name".to_owned()),
+            });
+        }
+    }
+    Ok((hook, transmits))
+}
 
 pub(crate) fn transmit_kind(command: &str) -> Option<&'static str> {
     let command = command.trim_start_matches('.');
@@ -12,11 +128,21 @@ pub(crate) fn transmit_kind(command: &str) -> Option<&'static str> {
         .or_else(|| command.strip_prefix("if_"))?
     {
         "setonvartransmit" => Some("varp"),
-        "setonvarctransmit" => Some("varc_int"),
-        "setonvarcstrtransmit" => Some("varc_string"),
+        "setonvarctransmit" => Some("varc"),
+        "setonvarcstrtransmit" => Some("varcs"),
         "setoninvtransmit" => Some("inv"),
         "setonstattransmit" => Some("stat"),
         _ => None,
+    }
+}
+
+/// What a variable of a table goes by without a name of its own.
+pub(crate) fn var_placeholder(kind: &str) -> &str {
+    match kind {
+        "varp" => "varplayer",
+        "varbit" => "varplayerbit",
+        "varc" | "varcs" => "varclient",
+        other => other,
     }
 }
 
@@ -27,7 +153,7 @@ pub(crate) fn transmit_id(registry: &SymbolRegistry, kind: &str, name: &str) -> 
                 var_id, category, ..
             }) if category == kind => Some(*var_id),
             None => name
-                .strip_prefix(kind)?
+                .strip_prefix(var_placeholder(kind))?
                 .strip_prefix('_')?
                 .parse::<u16>()
                 .ok()
@@ -39,18 +165,22 @@ pub(crate) fn transmit_id(registry: &SymbolRegistry, kind: &str, name: &str) -> 
     }
 }
 
-fn transmit_name(registry: &SymbolRegistry, kind: &str, id: i32) -> Option<String> {
+pub(crate) fn transmit_name(registry: &SymbolRegistry, kind: &str, id: i32) -> Option<String> {
     if kind.starts_with("var") {
         registry
             .game_variables()
             .filter_map(|(name, symbol)| {
                 matches!(&symbol.kind, SymbolKind::GameVar { var_id, category, .. }
-                if *var_id == id && category == kind)
+                if *var_id == id && category == kind && !name.starts_with('.'))
                 .then_some(name)
             })
             .min()
             .map(str::to_owned)
-            .or_else(|| u16::try_from(id).ok().map(|_| format!("{kind}_{id}")))
+            .or_else(|| {
+                u16::try_from(id)
+                    .ok()
+                    .map(|_| format!("{}_{id}", var_placeholder(kind)))
+            })
     } else {
         let ty = Type::from_name(kind)?;
         registry
@@ -288,21 +418,31 @@ pub(crate) fn server_call(
     }))
 }
 
+/// What the script a hook runs takes: a hook is a clientscript before it's a proc.
+pub(crate) fn argument_hints(
+    registry: &SymbolRegistry,
+    script: &str,
+    args: &[Expr],
+    locals: &SymbolTable,
+) -> Vec<Option<Type>> {
+    match registry
+        .lookup_script_by_trigger("clientscript", script)
+        .or_else(|| registry.lookup_script_by_trigger("proc", script))
+        .map(|symbol| &symbol.kind)
+    {
+        Some(SymbolKind::Script { param_types, .. }) => {
+            stack_hints(registry, param_types, args, locals)
+        }
+        _ => vec![None; args.len()],
+    }
+}
+
 fn expand(values: &[Expr], registry: &SymbolRegistry, locals: &SymbolTable) -> Vec<Expr> {
     let Expr::Tuple(args) = &values[1] else {
         unreachable!()
     };
     let hints = if let Expr::Identifier(name) = &values[0] {
-        match registry
-            .lookup_script_by_trigger("clientscript", name)
-            .or_else(|| registry.lookup_script_by_trigger("proc", name))
-            .map(|symbol| &symbol.kind)
-        {
-            Some(SymbolKind::Script { param_types, .. }) => {
-                stack_hints(registry, param_types, args, locals)
-            }
-            _ => vec![None; args.len()],
-        }
+        argument_hints(registry, name, args, locals)
     } else {
         vec![None; args.len()]
     };
@@ -324,6 +464,22 @@ fn expand(values: &[Expr], registry: &SymbolRegistry, locals: &SymbolTable) -> V
     }
     lowered.push(Expr::StringLiteral(signature));
     lowered
+}
+
+/// Where the arguments of a hook's script end among a call's stack arguments.
+pub(crate) fn arguments_end(registry: &SymbolRegistry, name: &str, args: &[Expr]) -> Option<usize> {
+    let explicit = *registry.hook_commands.get(name.trim_start_matches('.'))?;
+    let signature_index = args.len().checked_sub(1 + usize::from(explicit))?;
+    let Expr::StringLiteral(signature) = &args[signature_index] else {
+        return None;
+    };
+    if !signature.ends_with('Y') {
+        return Some(signature_index);
+    }
+    let Expr::IntLiteral(count) = args.get(signature_index.checked_sub(1)?)? else {
+        return None;
+    };
+    signature_index.checked_sub(usize::try_from(*count).ok()? + 1)
 }
 
 pub(crate) fn compact(

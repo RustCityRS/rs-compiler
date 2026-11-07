@@ -334,6 +334,10 @@ impl<'a> TypeChecker<'a> {
                     );
                 }
 
+                // A client script's local already holds its default: its value can read it.
+                if self.stack_returns {
+                    locals.define_local(name.clone(), *var_type, false);
+                }
                 if let Some(init_expr) = value {
                     self.warn_if_bare_command_value(init_expr, *line);
                     let expr_type = self.infer_expr_type(init_expr, locals, *line, Some(*var_type));
@@ -1110,7 +1114,10 @@ impl<'a> TypeChecker<'a> {
                     return result;
                 }
 
-                if !self.current_script_is_test && Self::is_test_command(lookup_name) {
+                if !self.current_script_is_test
+                    && Self::is_test_command(lookup_name)
+                    && !self.registry.stack_commands.contains(lookup_name)
+                {
                     self.error(
                         *call_line,
                         msg::fmt(msg::TEST_COMMAND_FROM_PRODUCTION, &[lookup_name]),

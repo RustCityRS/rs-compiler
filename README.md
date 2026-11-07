@@ -110,7 +110,7 @@ Hooks take a quoted callback expression. Arguments inside it are code, so
 variables, constants and nested calls work normally:
 
 ```rs2
-if_setontimer("bank_v2_rebuild_delayed(%varc_int_193)", bank_v2_main:com93);
+if_setontimer("bank_v2_rebuild_delayed(%varc_193)", bank_v2_main:com93);
 if_setontimer(null, bank_v2_main:com93);
 ```
 
@@ -120,7 +120,7 @@ optional: `"callback"` and `"callback()"` both mean no arguments.
 Transmit hooks add a list of triggers inside the quotes:
 
 ```rs2
-if_setonvarctransmit("clientscript_1465(){varc_int_192, varc_int_1038, varc_int_1324}", bank_v2_main:com21);
+if_setonvarctransmit("clientscript_1465(){varc_192, varc_1038, varc_1324}", bank_v2_main:com21);
 ```
 
 Use bare names in `{...}`. These refer to trigger IDs, not the current values of
@@ -182,7 +182,18 @@ Map files to the servers as follows:
 The language server provides diagnostics, completion, hover, definitions,
 references, rename, syntax highlighting, signature help, inlay hints, formatting,
 quick fixes and Extract Proc. Changes refresh diagnostics in affected open files.
-Config and pack files can also be mapped to the server for navigation and editing.
+
+Config and pack files use language ID `rs2config` for navigation and editing. Any
+file mapped to it opens as a config file, so add a pattern for each extension in
+use: `*.anim`, `*.area`, `*.bas`, `*.billboard`, `*.category`, `*.config44`, `*.constant`,
+`*.controller`, `*.cursor`, `*.dbrow`, `*.dbtable`, `*.defaults`, `*.enum`, `*.flo`, `*.flu`,
+`*.fontmetrics`, `*.hashes`, `*.hitmark`, `*.hunt`, `*.idk`, `*.if`, `*.if3`, `*.inv`, `*.itemcode`,
+`*.jingle`, `*.light`, `*.loc`, `*.locshape`, `*.mel`, `*.mesanim`, `*.midi`,
+`*.model`, `*.msi`, `*.npc`, `*.obj`, `*.order`, `*.overlayinterface`, `*.pack`,
+`*.param`, `*.particleeffector`, `*.particleemitter`, `*.quest`, `*.quickchatcat`,
+`*.quickchatphrase`, `*.seq`, `*.spotanim`, `*.stat`, `*.struct`, `*.synth`,
+`*.varbit`, `*.varc`, `*.varclan`, `*.varclansetting`, `*.varcon`,
+`*.varn`, `*.varnbit`, `*.varobj`, `*.varp`, `*.vars` and `*.wma`.
 
 Optional color settings:
 

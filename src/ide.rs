@@ -2,6 +2,7 @@
 //! Locations and edits use UTF-8 byte ranges; `text::LineIndex` converts UTF-16.
 mod actions;
 mod config;
+mod fields;
 mod highlighting;
 mod hints;
 mod hooks;
@@ -147,4 +148,6 @@ pub(crate) struct Index {
     references: Vec<Reference>,
     compounds: HashSet<String>,
     hooks: HashMap<SourceId, Vec<hooks::Hook>>,
+    config_types: fields::ConfigTypes,
+    config_problems: HashMap<SourceId, Vec<(usize, String)>>,
 }

@@ -18,6 +18,7 @@ pub mod decompile;
 pub mod format;
 pub(crate) mod hooks;
 use format::{Format, Width};
+pub use hooks::{HookValue, component_hook};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
@@ -25,6 +26,7 @@ pub enum CommandKind {
     Hook,
     HookComponent,
     Enum,
+    EnumOutput,
     Param,
 }
 
@@ -152,11 +154,12 @@ pub fn compile_directory(source_dir: &Path, pack: &Path) -> Result<BTreeMap<u32,
     compile_registered_sources(&sources, pack, registry)
 }
 
-pub fn compile_registered_sources(
+/// Registers every script, giving the ones the pack doesn't name the next free ids.
+fn register_sources(
     sources: &[Source],
     pack: &Path,
-    mut registry: SymbolRegistry,
-) -> Result<BTreeMap<u32, Vec<u8>>> {
+    registry: &mut SymbolRegistry,
+) -> Result<Vec<(i32, String)>> {
     let mut ids = script_ids(pack)?;
     let mut next = ids.values().copied().max().unwrap_or(-1) + 1;
     for source in sources {
@@ -174,7 +177,6 @@ pub fn compile_registered_sources(
         }
     }
     let mut new_ids = Vec::new();
-    let format = Format::load(&pack.join("cs2_command.pack"))?;
     let mut declared = HashSet::new();
     for source in sources {
         std::sync::Arc::make_mut(&mut registry.visibility)
@@ -197,8 +199,18 @@ pub fn compile_registered_sources(
                     .ok_or_else(|| invalid("Clientscript ID overflow"))?;
             }
         }
-        register(&source.file, &ids, &mut registry)?;
+        register(&source.file, &ids, registry)?;
     }
+    Ok(new_ids)
+}
+
+pub fn compile_registered_sources(
+    sources: &[Source],
+    pack: &Path,
+    mut registry: SymbolRegistry,
+) -> Result<BTreeMap<u32, Vec<u8>>> {
+    let format = Format::load(&pack.join("cs2_command.pack"))?;
+    let new_ids = register_sources(sources, pack, &mut registry)?;
     let mut scripts = Vec::new();
     for source in sources {
         scripts.extend(checked_codegen(&source.file, &source.path, &registry)?);
@@ -282,6 +294,7 @@ pub fn commands(format: &Format, engine_text: &str, label: &Path) -> Result<Vec<
             "hook" => CommandKind::Hook,
             "hook_component" => CommandKind::HookComponent,
             "enum" => CommandKind::Enum,
+            "enum_output" => CommandKind::EnumOutput,
             "param" => CommandKind::Param,
             kind => return Err(invalid(format!("Unknown command kind {kind}"))),
         };
@@ -303,6 +316,13 @@ pub fn commands(format: &Format, engine_text: &str, label: &Path) -> Result<Vec<
         ));
     }
     Ok(commands)
+}
+
+/// The registry an interface's hooks read against: every script and what it takes.
+pub fn registry_with_scripts(source_dir: &Path, pack: &Path) -> Result<SymbolRegistry> {
+    let mut registry = registry(source_dir, pack)?;
+    register_sources(&load_sources(source_dir)?, pack, &mut registry)?;
+    Ok(registry)
 }
 
 pub fn registry(source_dir: &Path, pack: &Path) -> Result<SymbolRegistry> {
@@ -365,7 +385,7 @@ pub fn registry(source_dir: &Path, pack: &Path) -> Result<SymbolRegistry> {
     ] {
         registry.register_command(name.to_owned(), 0, Vec::new(), vec![ty]);
     }
-    for (kind, ty) in [("varc_int", Type::Int), ("varc_string", Type::String)] {
+    for (kind, ty) in [("varc", Type::Int), ("varcs", Type::String)] {
         let path = pack.join(format!("{kind}.pack"));
         if !path.exists() {
             continue;
@@ -421,9 +441,94 @@ pub fn registry(source_dir: &Path, pack: &Path) -> Result<SymbolRegistry> {
     let configs = crate::sources::config_files(source_dir);
     load_constant_files(&mut registry, &configs);
     load_game_var_types(&mut registry, &configs);
+    load_varc_types(&mut registry, &configs)?;
+    load_clan_settings(&mut registry, &configs, pack)?;
     registry.visibility =
         std::sync::Arc::new(crate::sources::Visibility::load(source_dir, &registry));
     Ok(registry)
+}
+
+/// `varc.pack` only says which stack a varc is on; its file declares its type.
+fn load_varc_types(registry: &mut SymbolRegistry, files: &[PathBuf]) -> Result<()> {
+    for file in files
+        .iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "varc"))
+    {
+        let mut section = None;
+        for line in fs::read_to_string(file)?.lines().map(str::trim) {
+            if let Some(name) = line
+                .strip_prefix('[')
+                .and_then(|line| line.strip_suffix(']'))
+            {
+                section = Some(name.to_owned());
+            } else if let Some(ty) = line.strip_prefix("type=").and_then(Type::from_name)
+                && let Some(SymbolKind::GameVar { var_type, .. }) = section
+                    .as_ref()
+                    .and_then(|name| registry.game_vars.get_mut(name))
+                    .map(|symbol| &mut symbol.kind)
+            {
+                *var_type = ty;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A clan setting's opcodes follow its type, which only its config declares:
+/// `basevar` for a bit range, otherwise `type`.
+fn load_clan_settings(registry: &mut SymbolRegistry, files: &[PathBuf], pack: &Path) -> Result<()> {
+    let ids: HashMap<String, i32> = fs::read_to_string(pack.join("varclansetting.pack"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .filter_map(|(id, name)| Some((name.trim().to_owned(), id.parse().ok()?)))
+        .collect();
+    let mut add = |name: &str, ty: Option<&str>, bits: bool| -> Result<()> {
+        let id = ids
+            .get(name)
+            .copied()
+            .or_else(|| name.strip_prefix("varclansetting_")?.parse().ok())
+            .ok_or_else(|| invalid(format!("Unknown clan setting {name}")))?;
+        let (category, ty) = match (bits, ty) {
+            (true, _) => ("clansetting_varbit", Type::Int),
+            (_, Some("int" | "bit")) => ("clansetting_int", Type::Int),
+            (_, Some("long")) => ("clansetting_long", Type::Long),
+            (_, Some("clanforumqfc")) => ("clansetting_long", Type::ClanForumQfc),
+            (_, Some("string")) => ("clansetting_string", Type::String),
+            _ => {
+                return Err(invalid(format!(
+                    "Clan setting {name} has no opcodes for type {ty:?}"
+                )));
+            }
+        };
+        registry.register_game_var(name.to_owned(), ty, id, category.to_owned());
+        Ok(())
+    };
+    for file in files {
+        if file.extension().is_none_or(|ext| ext != "varclansetting") {
+            continue;
+        }
+        let text = fs::read_to_string(file)?;
+        let mut section: Option<(&str, Option<&str>, bool)> = None;
+        for line in text.lines().map(str::trim) {
+            if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                if let Some((name, ty, bits)) = section {
+                    add(name, ty, bits)?;
+                }
+                section = Some((name, None, false));
+            } else if let Some((_, ty, bits)) = &mut section {
+                if let Some(value) = line.strip_prefix("type=") {
+                    *ty = Some(value.trim());
+                } else if line.starts_with("basevar=") {
+                    *bits = true;
+                }
+            }
+        }
+        if let Some((name, ty, bits)) = section {
+            add(name, ty, bits)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn parse(source: &str, path: &Path) -> Result<ScriptFile> {
@@ -441,7 +546,19 @@ pub fn register(
         for statement in &script.body {
             register_variables(statement, registry);
         }
-        if !matches!(script.trigger.as_str(), "proc" | "clientscript") {
+        if !matches!(
+            script.trigger.as_str(),
+            "proc"
+                | "clientscript"
+                | "opworldmapelement1"
+                | "opworldmapelement2"
+                | "opworldmapelement3"
+                | "opworldmapelement4"
+                | "opworldmapelement5"
+                | "worldmapelementmouseover"
+                | "worldmapelementmouseleave"
+                | "worldmapelementmouserepeat"
+        ) {
             return Err(invalid(format!(
                 "Invalid client trigger {}",
                 script.trigger
@@ -552,15 +669,11 @@ fn register_expr_variables(expr: &Expr, registry: &mut SymbolRegistry) {
             for (kind, ty) in [
                 ("varp", Type::Int),
                 ("varbit", Type::Int),
-                ("varc_int", Type::Int),
-                ("varc_string", Type::String),
-                ("clansetting_int", Type::Int),
-                ("clansetting_varbit", Type::Int),
-                ("clansetting_long", Type::Long),
-                ("clansetting_string", Type::String),
+                ("varc", Type::Int),
+                ("varcs", Type::String),
             ] {
                 if let Some(id) = name
-                    .strip_prefix(&format!("{kind}_"))
+                    .strip_prefix(&format!("{}_", hooks::var_placeholder(kind)))
                     .and_then(|s| s.parse::<u16>().ok())
                 {
                     registry.register_game_var(name.clone(), ty, id as i32, kind.to_owned());
@@ -836,4 +949,78 @@ pub fn write_string(out: &mut Vec<u8>, text: &str) -> Result<()> {
 
 fn invalid(message: impl ToString) -> Error {
     Error::new(ErrorKind::InvalidData, message.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clan_settings_take_their_opcodes_from_their_type() {
+        let dir = std::env::temp_dir().join(format!("runec_clan_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("all.varclansetting");
+        fs::write(
+            &file,
+            "// 0\n[varclansetting_0]\ntype=int\n\n// 1\n[named]\ntype=long\n\n\
+             // 2\n[varclansetting_2]\ntype=string\n\n\
+             // 3\n[varclansetting_3]\ntype=byte:0x01\nbasevar=2\nstartbit=0\nendbit=0\n",
+        )
+        .unwrap();
+        fs::write(dir.join("varclansetting.pack"), "1=named\n").unwrap();
+        let mut registry = SymbolRegistry::new();
+        load_clan_settings(&mut registry, std::slice::from_ref(&file), &dir).unwrap();
+        for (name, id, expected) in [
+            ("varclansetting_0", 0, "clansetting_int"),
+            ("named", 1, "clansetting_long"),
+            ("varclansetting_2", 2, "clansetting_string"),
+            ("varclansetting_3", 3, "clansetting_varbit"),
+        ] {
+            let Some(SymbolKind::GameVar {
+                var_id, category, ..
+            }) = registry.lookup_game_var(name).map(|symbol| &symbol.kind)
+            else {
+                panic!("{name} is not registered");
+            };
+            assert_eq!((*var_id, category.as_str()), (id, expected), "{name}");
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_varc_takes_the_type_its_file_declares() {
+        let dir = std::env::temp_dir().join(format!("runec-varc-types-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("all.varc");
+        fs::write(
+            &file,
+            "// 5\n[varclient_5]\ntype=boolean\n\n// 6\n[varclient_6]\ntype=byte:0x65\n\n// 7\n[varclient_7]\n",
+        )
+        .unwrap();
+        let mut registry = SymbolRegistry::new();
+        for id in 5..8 {
+            registry.register_game_var(format!("varclient_{id}"), Type::Int, id, "varc".into());
+        }
+        load_varc_types(&mut registry, std::slice::from_ref(&file)).unwrap();
+        let declared = |name: &str| match registry.lookup_game_var(name).map(|symbol| &symbol.kind)
+        {
+            Some(SymbolKind::GameVar { var_type, .. }) => *var_type,
+            _ => panic!("{name} is not registered"),
+        };
+        assert_eq!(declared("varclient_5"), Type::Boolean);
+        assert_eq!(declared("varclient_6"), Type::Int);
+        assert_eq!(declared("varclient_7"), Type::Int);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_transmit_name_is_never_the_dotted_alias() {
+        let mut registry = SymbolRegistry::new();
+        registry.register_game_var("bank_open".into(), Type::Int, 90, "varp".into());
+        registry.register_game_var(".bank_open".into(), Type::Int, 90, "varp".into());
+        assert_eq!(
+            hooks::transmit_name(&registry, "varp", 90).as_deref(),
+            Some("bank_open")
+        );
+    }
 }

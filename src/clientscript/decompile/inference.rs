@@ -1,8 +1,10 @@
 use super::Names;
 use super::source::script_name;
 use crate::arguments::{command_hints, command_returns, expression_types, proc_hints, stack_hints};
-use crate::clientscript::hooks;
-use crate::parser::{BinOp, Expr, ScriptDeclaration, ScriptFile, Statement, StringPart};
+use crate::clientscript::hooks::{self, HookValue};
+use crate::parser::{
+    BinOp, Expr, ScriptDeclaration, ScriptFile, Statement, StringPart, array_name,
+};
 use crate::symbol::{SymbolKind, SymbolRegistry, SymbolTable};
 use crate::types::{BaseVarType, Type};
 use std::collections::HashMap;
@@ -12,6 +14,10 @@ struct Node {
     kind: BaseVarType,
     ty: Option<Type>,
     conflict: bool,
+    /// Used as a plain number somewhere: an int kind it can't be.
+    numeric: bool,
+    /// A namedobj only by what takes it: holding one takes being given one.
+    only_taken: bool,
 }
 
 #[derive(Clone)]
@@ -20,19 +26,39 @@ struct Scope {
     symbols: SymbolTable,
     params: Vec<usize>,
     returns: Vec<usize>,
+    arrays: HashMap<i32, usize>,
+    /// Arrays the script reads without defining: they come in as parameters.
+    array_params: HashMap<i32, usize>,
 }
 
 pub struct Inferred {
     pub params: Vec<Type>,
     pub returns: Vec<Type>,
     pub locals: HashMap<String, Type>,
+    /// The stacks of the parameters, in the order the first caller pushes them.
+    pub order: Option<Vec<BaseVarType>>,
+}
+
+/// What a client event value holds.
+fn event_type(name: &str) -> Option<Type> {
+    Some(match name {
+        "event_com" | "event_com2" => Type::Component,
+        "event_keycode" => Type::Key,
+        "event_keychar" => Type::Char,
+        "event_opbase" => Type::String,
+        "event_mousex" | "event_mousey" | "event_op" | "event_comsubid" | "event_comsubid2" => {
+            Type::Int
+        }
+        _ => return None,
+    })
 }
 
 struct Inference<'a> {
     registry: &'a SymbolRegistry,
     nodes: Vec<Node>,
     scopes: HashMap<String, Scope>,
-    hook_params: HashMap<usize, Option<Type>>,
+    vars: HashMap<String, usize>,
+    orders: HashMap<String, Vec<BaseVarType>>,
 }
 
 impl Inference<'_> {
@@ -41,8 +67,12 @@ impl Inference<'_> {
         self.nodes.push(Node {
             parent: id,
             kind: ty.base_type(),
-            ty: (!matches!(ty, Type::Int | Type::Any)).then_some(ty),
+            // Nothing holds a chat filter: only its literals show it.
+            ty: (!matches!(ty, Type::Int | Type::Long | Type::Any | Type::ChatFilter))
+                .then_some(ty),
             conflict: false,
+            numeric: false,
+            only_taken: false,
         });
         id
     }
@@ -64,10 +94,28 @@ impl Inference<'_> {
         let (a, b) = (a.min(b), a.max(b));
         let left = self.nodes[a].ty;
         let right = self.nodes[b].ty;
+        let only_taken = match (left, right) {
+            (Some(_), Some(_)) => self.nodes[a].only_taken && self.nodes[b].only_taken,
+            (Some(_), None) => self.nodes[a].only_taken,
+            _ => self.nodes[b].only_taken,
+        };
+        self.nodes[a].only_taken = only_taken;
         self.nodes[b].parent = a;
-        self.nodes[a].conflict |=
-            self.nodes[b].conflict || left.zip(right).is_some_and(|(a, b)| a != b);
-        self.nodes[a].ty = left.or(right);
+        let named = |ty: Type| matches!(ty, Type::Obj | Type::NamedObj);
+        self.nodes[a].conflict |= self.nodes[b].conflict
+            || left
+                .zip(right)
+                .is_some_and(|(a, b)| a != b && !(named(a) && named(b)));
+        self.nodes[a].numeric |= self.nodes[b].numeric;
+        self.nodes[a].ty = match (left, right) {
+            (Some(Type::NamedObj), Some(Type::Obj)) => Some(Type::Obj),
+            _ => left.or(right),
+        };
+    }
+
+    fn numeric(&mut self, id: usize) {
+        let id = self.root(id);
+        self.nodes[id].numeric = true;
     }
 
     fn bind(&mut self, values: &[usize], targets: &[usize]) {
@@ -93,8 +141,13 @@ impl Inference<'_> {
         let node = &self.nodes[id];
         if !node.conflict
             && let Some(ty) = node.ty
+            && !(node.numeric && ty.is_int_kind())
         {
-            return ty;
+            return if ty == Type::NamedObj && node.only_taken {
+                Type::Obj
+            } else {
+                ty
+            };
         }
         match node.kind {
             BaseVarType::Integer => Type::Int,
@@ -117,6 +170,29 @@ impl Inference<'_> {
                             is_array: false,
                         },
                     );
+                }
+                Statement::ArrayDeclaration {
+                    name,
+                    element_type,
+                    size,
+                    ..
+                } => {
+                    let id = self.node(*element_type);
+                    scope.locals.insert(name.clone(), id);
+                    scope.symbols.define(
+                        name.clone(),
+                        SymbolKind::LocalVar {
+                            var_type: *element_type,
+                            slot: 0,
+                            is_array: true,
+                        },
+                    );
+                    if let Some((_, array)) = array_name(name) {
+                        scope.arrays.insert(array, id);
+                        if matches!(size, Expr::NullLiteral) {
+                            scope.array_params.insert(array, id);
+                        }
+                    }
                 }
                 Statement::If {
                     body,
@@ -146,6 +222,19 @@ impl Inference<'_> {
         }
     }
 
+    /// `&` and `|` in a calc work on numbers.
+    fn calc(&mut self, expr: &Expr, scope: &Scope) -> Vec<usize> {
+        if let Expr::LogicalOp { lhs, rhs, .. } = expr {
+            for side in [lhs, rhs] {
+                for id in self.calc(side, scope) {
+                    self.numeric(id);
+                }
+            }
+            return vec![self.node(Type::Int)];
+        }
+        self.expr(expr, scope, None)
+    }
+
     fn expr(&mut self, expr: &Expr, scope: &Scope, hint: Option<Type>) -> Vec<usize> {
         let values = match expr {
             Expr::LocalVar(name, _) => scope.locals.get(name).copied().into_iter().collect(),
@@ -154,21 +243,46 @@ impl Inference<'_> {
             Expr::BoolLiteral(_) => vec![self.node(Type::Boolean)],
             Expr::CoordLiteral(_) => vec![self.node(Type::Coord)],
             Expr::GameVar(name, _) => {
-                let ty = self
-                    .registry
-                    .lookup_game_var(name)
-                    .and_then(|symbol| {
-                        if let SymbolKind::GameVar { var_type, .. } = symbol.kind {
-                            Some(var_type)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(Type::Int);
-                vec![self.node(ty)]
+                if let Some(&id) = self.vars.get(name) {
+                    vec![id]
+                } else {
+                    // A variable is a boolean by being used as one, whatever it declares.
+                    let ty = self
+                        .registry
+                        .lookup_game_var(name)
+                        .and_then(|symbol| {
+                            if let SymbolKind::GameVar { var_type, .. } = symbol.kind {
+                                Some(var_type)
+                            } else {
+                                None
+                            }
+                        })
+                        .filter(|ty| *ty != Type::Boolean)
+                        .unwrap_or(Type::Int);
+                    let id = self.node(ty);
+                    self.vars.insert(name.clone(), id);
+                    vec![id]
+                }
             }
-            Expr::Calc(value) => self.expr(value, scope, None),
-            Expr::BinaryOp { lhs, rhs, .. } | Expr::LogicalOp { lhs, rhs, .. } => {
+            Expr::Calc(value) => self.calc(value, scope),
+            Expr::BinaryOp { op, lhs, rhs } => {
+                let left = self.expr(lhs, scope, None);
+                let right = self.expr(rhs, scope, None);
+                if matches!(
+                    op,
+                    BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq
+                ) {
+                    if let ([a], [b]) = (left.as_slice(), right.as_slice()) {
+                        self.join(*a, *b);
+                    }
+                } else {
+                    for id in left.into_iter().chain(right) {
+                        self.numeric(id);
+                    }
+                }
+                vec![self.node(Type::Int)]
+            }
+            Expr::LogicalOp { lhs, rhs, .. } => {
                 self.expr(lhs, scope, None);
                 self.expr(rhs, scope, None);
                 vec![self.node(Type::Int)]
@@ -187,45 +301,69 @@ impl Inference<'_> {
                     .ok()
                     .flatten();
                 let args = lowered.as_deref().unwrap_or(args);
-                if let Some(&explicit) = self.registry.hook_commands.get(name)
+                let hook = self.registry.hook_commands.get(name).copied();
+                if let Some(explicit) = hook
                     && let Some(Expr::Identifier(target)) = args.first()
                     && let Some(signature) = args
                         .len()
                         .checked_sub(1 + usize::from(explicit))
                         .and_then(|index| args.get(index))
                     && let Expr::StringLiteral(signature) = signature
-                    && let Some(callee) = self
-                        .scopes
-                        .get(&format!("clientscript:{target}"))
-                        .or_else(|| self.scopes.get(&format!("proc:{target}")))
-                        .cloned()
                 {
-                    let types: Vec<_> = signature
-                        .trim_end_matches('Y')
-                        .chars()
-                        .map(|ch| Type::from_char(ch).unwrap_or(Type::Int))
-                        .collect();
-                    for base in [BaseVarType::Integer, BaseVarType::String, BaseVarType::Long] {
-                        for (param, ty) in callee
-                            .params
+                    let key = self
+                        .scopes
+                        .contains_key(&format!("clientscript:{target}"))
+                        .then(|| format!("clientscript:{target}"))
+                        .or_else(|| {
+                            self.scopes
+                                .contains_key(&format!("proc:{target}"))
+                                .then(|| format!("proc:{target}"))
+                        });
+                    if let Some(key) = key {
+                        let callee = self.scopes[&key].clone();
+                        let types: Vec<_> = signature
+                            .trim_end_matches('Y')
+                            .chars()
+                            .map(|ch| Type::from_char(ch).unwrap_or(Type::Int))
+                            .collect();
+                        self.orders
+                            .entry(key)
+                            .or_insert_with(|| types.iter().map(Type::base_type).collect());
+                        let values: Vec<_> = args
                             .iter()
-                            .filter(|&&param| self.nodes[param].kind == base)
-                            .zip(types.iter().filter(|ty| ty.base_type() == base))
-                        {
-                            self.hook_params
-                                .entry(*param)
-                                .and_modify(|previous| {
-                                    if *previous != Some(*ty) {
-                                        *previous = None;
-                                    }
-                                })
-                                .or_insert(Some(*ty));
+                            .skip(1)
+                            .take(types.len())
+                            .flat_map(|arg| self.expr(arg, scope, None))
+                            .collect();
+                        self.bind(&values, &callee.params);
+                        for base in [BaseVarType::Integer, BaseVarType::String, BaseVarType::Long] {
+                            let params: Vec<_> = callee
+                                .params
+                                .iter()
+                                .copied()
+                                .filter(|&param| self.nodes[param].kind == base)
+                                .collect();
+                            for (param, ty) in params
+                                .into_iter()
+                                .zip(types.iter().filter(|ty| ty.base_type() == base))
+                            {
+                                if !matches!(ty, Type::Int) {
+                                    let target = self.node(*ty);
+                                    self.join(param, target);
+                                }
+                            }
                         }
                     }
                 }
                 let hints = command_hints(self.registry, name, args, &scope.symbols);
                 for (i, arg) in args.iter().enumerate() {
-                    self.expr(arg, scope, hints.get(i).copied().flatten());
+                    // A hook's own signature calls everything without a type an int.
+                    let hint = hints
+                        .get(i)
+                        .copied()
+                        .flatten()
+                        .filter(|ty| hook.is_none() || *ty != Type::Int);
+                    self.expr(arg, scope, hint);
                 }
                 command_returns(self.registry, name, args)
                     .into_iter()
@@ -244,18 +382,46 @@ impl Inference<'_> {
                     .collect()
             }
             Expr::ProcCall { name, args, .. } => {
-                let callee = self
-                    .scopes
-                    .get(&format!("proc:{name}"))
-                    .or_else(|| self.scopes.get(&format!("clientscript:{name}")))
-                    .cloned();
+                let key = if self.scopes.contains_key(&format!("proc:{name}")) {
+                    format!("proc:{name}")
+                } else {
+                    format!("clientscript:{name}")
+                };
+                let callee = self.scopes.get(&key).cloned();
                 let hints = proc_hints(self.registry, name, args, &scope.symbols);
                 let values: Vec<_> = args
                     .iter()
                     .enumerate()
-                    .flat_map(|(i, arg)| self.expr(arg, scope, hints.get(i).copied().flatten()))
+                    .flat_map(|(i, arg)| {
+                        let hint = hints
+                            .get(i)
+                            .copied()
+                            .flatten()
+                            .filter(|ty| *ty != Type::Int);
+                        self.expr(arg, scope, hint)
+                    })
                     .collect();
                 if let Some(callee) = callee {
+                    let kinds = values.iter().map(|&id| self.nodes[id].kind).collect();
+                    self.orders.entry(key).or_insert(kinds);
+                    // An array goes by its number: both sides name the same one.
+                    let mut slot = 0;
+                    for arg in args {
+                        if let Expr::IntLiteral(array) = arg
+                            && let Some(&target) = callee.array_params.get(&slot)
+                            && let Some(&source) = scope.arrays.get(array)
+                        {
+                            self.join(source, target);
+                        }
+                        if !matches!(
+                            arg,
+                            Expr::StringLiteral(_)
+                                | Expr::JoinedString { .. }
+                                | Expr::LongLiteral(_)
+                        ) {
+                            slot += 1;
+                        }
+                    }
                     self.bind(&values, &callee.params);
                     callee.returns
                 } else {
@@ -266,9 +432,15 @@ impl Inference<'_> {
                 .iter()
                 .flat_map(|expr| self.expr(expr, scope, None))
                 .collect(),
-            Expr::ArrayAccess { index, .. } => {
+            Expr::ArrayAccess { name, index } => {
                 self.expr(index, scope, None);
-                vec![self.node(Type::Int)]
+                match scope.locals.get(name) {
+                    Some(&id) => vec![id],
+                    None => vec![self.node(Type::Int)],
+                }
+            }
+            Expr::Identifier(name) if event_type(name).is_some() => {
+                vec![self.node(event_type(name).unwrap())]
             }
             _ => vec![self.node(hint.unwrap_or(Type::Int))],
         };
@@ -277,7 +449,11 @@ impl Inference<'_> {
             && values.len() == 1
         {
             let target = self.node(ty);
+            self.nodes[target].only_taken = ty == Type::NamedObj;
             self.join(values[0], target);
+        }
+        if hint == Some(Type::Int) && values.len() == 1 {
+            self.numeric(values[0]);
         }
         values
     }
@@ -354,12 +530,77 @@ impl Inference<'_> {
     }
 }
 
-pub fn infer(files: &[(u32, ScriptFile)], registry: &SymbolRegistry) -> HashMap<u32, Inferred> {
+pub(crate) fn collect_returns(body: &[Statement], returned: &mut [Vec<Expr>]) {
+    for statement in body {
+        match statement {
+            Statement::Return { values, .. } if values.len() == returned.len() => {
+                for (index, value) in values.iter().enumerate() {
+                    returned[index].push(value.clone());
+                }
+            }
+            Statement::If {
+                body,
+                else_if,
+                else_body,
+                ..
+            } => {
+                collect_returns(body, returned);
+                for (_, body, _) in else_if {
+                    collect_returns(body, returned);
+                }
+                if let Some(body) = else_body {
+                    collect_returns(body, returned);
+                }
+            }
+            Statement::While { body, .. } => collect_returns(body, returned),
+            Statement::Switch { cases, default, .. } => {
+                for case in cases {
+                    collect_returns(&case.body, returned);
+                }
+                if let Some(body) = default {
+                    collect_returns(body, returned);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The event a hook's value stands for.
+pub fn event_name(value: i32, registry: &SymbolRegistry) -> Option<&str> {
+    (i32::MIN + 1..=i32::MIN + 9)
+        .contains(&value)
+        .then(|| registry.integer_constant_name(value, "event_"))
+        .flatten()
+}
+
+/// A hook's int as a literal of the type its script takes.
+pub fn hook_literal(
+    value: i32,
+    ty: Option<Type>,
+    names: &dyn Names,
+    registry: &SymbolRegistry,
+) -> Expr {
+    if let Some(name) = event_name(value, registry) {
+        return Expr::Identifier(name.to_owned());
+    }
+    let mut literal = Expr::IntLiteral(value);
+    format_expr(&mut literal, ty, names, registry, &SymbolTable::new());
+    literal
+}
+
+/// The scripts' types, and what each variable they use turned out to be.
+pub fn infer(
+    files: &[(u32, ScriptFile)],
+    component_hooks: &[Vec<HookValue>],
+    registry: &SymbolRegistry,
+) -> (HashMap<u32, Inferred>, Vec<(String, Type)>) {
     let mut inference = Inference {
         registry,
         nodes: Vec::new(),
         scopes: HashMap::new(),
-        hook_params: HashMap::new(),
+        vars: HashMap::new(),
+        orders: HashMap::new(),
     };
     for (_, file) in files {
         let script = &file.scripts[0];
@@ -368,6 +609,8 @@ pub fn infer(files: &[(u32, ScriptFile)], registry: &SymbolRegistry) -> HashMap<
             symbols: SymbolTable::new(),
             params: Vec::new(),
             returns: Vec::new(),
+            arrays: HashMap::new(),
+            array_params: HashMap::new(),
         };
         for param in &script.params {
             let id = inference.node(param.param_type);
@@ -387,33 +630,99 @@ pub fn infer(files: &[(u32, ScriptFile)], registry: &SymbolRegistry) -> HashMap<
             .map(|&ty| inference.node(ty))
             .collect();
         inference.declarations(&script.body, &mut scope);
+        // A script ends in its type's default value: -1 for all but an int.
+        if let Some(Statement::Return { values, .. }) = script.body.last()
+            && values.len() == scope.returns.len()
+        {
+            let mut returned = vec![Vec::new(); values.len()];
+            collect_returns(&script.body, &mut returned);
+            for (index, value) in values.iter().enumerate() {
+                if matches!(value, Expr::IntLiteral(-1))
+                    && returned[index]
+                        .iter()
+                        .all(|value| matches!(value, Expr::IntLiteral(-1..=1)))
+                    && returned[index]
+                        .iter()
+                        .any(|value| matches!(value, Expr::IntLiteral(0 | 1)))
+                {
+                    let target = inference.node(Type::Boolean);
+                    inference.join(scope.returns[index], target);
+                }
+            }
+        }
         inference
             .scopes
             .insert(format!("{}:{}", script.trigger, script.name), scope);
     }
     for (_, file) in files {
         let script = &file.scripts[0];
-        let scope = inference.scopes[&format!("{}:{}", script.trigger, script.name)].clone();
+        let key = format!("{}:{}", script.trigger, script.name);
+        let scope = inference.scopes[&key].clone();
         inference.body(&script.body, &scope);
     }
-    files
+    let keys: HashMap<i32, String> = files
         .iter()
         .map(|(id, file)| {
             let script = &file.scripts[0];
-            let scope = inference.scopes[&format!("{}:{}", script.trigger, script.name)].clone();
+            (*id as i32, format!("{}:{}", script.trigger, script.name))
+        })
+        .collect();
+    for hook in component_hooks {
+        if let Some(HookValue::Int(script)) = hook.first()
+            && let Some(key) = keys.get(script)
+        {
+            let callee = inference.scopes[key].clone();
+            let values: Vec<_> = hook[1..]
+                .iter()
+                .map(|value| {
+                    let ty = match value {
+                        HookValue::String(_) => Type::String,
+                        HookValue::Int(value) => event_name(*value, registry)
+                            .and_then(event_type)
+                            .unwrap_or(Type::Int),
+                    };
+                    inference.node(ty)
+                })
+                .collect();
+            let kinds = values.iter().map(|&id| inference.nodes[id].kind).collect();
+            inference.orders.entry(key.clone()).or_insert(kinds);
+            inference.bind(&values, &callee.params);
+        }
+    }
+    let vars: Vec<_> = inference
+        .vars
+        .iter()
+        .map(|(name, &id)| (name.clone(), id))
+        .collect();
+    let vars = vars
+        .into_iter()
+        .map(|(name, id)| (name, inference.ty(id)))
+        .collect();
+    let scripts = files
+        .iter()
+        .map(|(id, file)| {
+            let script = &file.scripts[0];
+            let key = format!("{}:{}", script.trigger, script.name);
+            let scope = inference.scopes[&key].clone();
+            let order = inference.orders.get(&key).cloned();
+            let array_params = scope.array_params.clone();
+            let mut locals = scope.locals;
+            for (array, id) in scope.arrays {
+                locals.insert(format!("array{array}"), id);
+            }
             (
                 *id,
                 Inferred {
                     params: scope
                         .params
                         .into_iter()
-                        .map(|id| {
-                            inference
-                                .hook_params
-                                .get(&id)
-                                .copied()
-                                .flatten()
-                                .unwrap_or_else(|| inference.ty(id))
+                        .enumerate()
+                        .map(|(slot, id)| {
+                            if array_params.contains_key(&(slot as i32)) {
+                                Type::IntArray
+                            } else {
+                                inference.ty(id)
+                            }
                         })
                         .collect(),
                     returns: scope
@@ -421,15 +730,16 @@ pub fn infer(files: &[(u32, ScriptFile)], registry: &SymbolRegistry) -> HashMap<
                         .into_iter()
                         .map(|id| inference.ty(id))
                         .collect(),
-                    locals: scope
-                        .locals
+                    locals: locals
                         .into_iter()
                         .map(|(name, id)| (name, inference.ty(id)))
                         .collect(),
+                    order,
                 },
             )
         })
-        .collect()
+        .collect();
+    (scripts, vars)
 }
 
 pub fn named_literal(
@@ -456,6 +766,13 @@ pub fn named_literal(
             | Type::SetSize
             | Type::SetTextAlignH
             | Type::SetTextAlignV
+            | Type::Key
+            | Type::ChatType
+            | Type::ChatFilter
+            | Type::WindowMode
+            | Type::PlatformType
+            | Type::IntBool
+            | Type::IntArray
     ) {
         return None;
     }
@@ -508,9 +825,52 @@ fn format_expr(
     {
         *expr = Expr::IntLiteral(i32::from(*value));
     }
+    if matches!(expr, Expr::LongLiteral(-1)) && hint == Some(Type::ClanForumQfc) {
+        *expr = Expr::NullLiteral;
+        return;
+    }
     if let Expr::IntLiteral(value) = expr {
+        if *value == -1
+            && hint.is_some_and(|ty| {
+                matches!(ty, Type::Coord | Type::Char | Type::Boolean) || ty.is_int_kind()
+            })
+        {
+            *expr = Expr::NullLiteral;
+            return;
+        }
+        if hint == Some(Type::IntArray) {
+            let name = format!("array{value}");
+            let element = match locals.lookup(&name).map(|symbol| &symbol.kind) {
+                Some(SymbolKind::LocalVar { var_type, .. }) => *var_type,
+                _ => Type::Int,
+            };
+            *expr = Expr::Identifier(format!("{}{name}", element.name()));
+            return;
+        }
         if hint == Some(Type::Coord) && (0..=0x3fffffff).contains(value) {
             *expr = Expr::CoordLiteral(*value);
+            return;
+        }
+        let constant = match (*value, hint) {
+            (i32::MAX, _) => Some("max_32bit_int"),
+            (i32::MIN, _) => Some("min_32bit_int"),
+            (0, Some(Type::IntBool)) => Some("false"),
+            (1, Some(Type::IntBool)) => Some("true"),
+            _ => None,
+        };
+        let prefixed = match hint {
+            Some(Type::Key) => Some("key_"),
+            Some(Type::ChatType) => Some("chattype_"),
+            Some(Type::ChatFilter) => Some("chatfilter_"),
+            Some(Type::WindowMode) => Some("windowmode_"),
+            Some(Type::PlatformType) => Some("platformtype_"),
+            _ => None,
+        }
+        .and_then(|prefix| registry.integer_constant_name(*value, prefix));
+        if let Some(name) = constant.or(prefixed)
+            && registry.lookup_constant(name).is_some()
+        {
+            *expr = Expr::ConstantVar(name.to_owned(), 0);
             return;
         }
         if let Some(named) = hint.and_then(|ty| named_literal(*value, ty, names, registry)) {
@@ -587,7 +947,11 @@ fn format_expr(
             return;
         }
         if hint == Some(Type::Colour) {
-            *expr = Expr::Identifier(format!("0x{:06x}", *value as u32));
+            *expr = Expr::Identifier(if (*value as u32) > 0xffffff {
+                format!("0x{:08x}", *value as u32)
+            } else {
+                format!("0x{:06x}", *value as u32)
+            });
             return;
         }
     }
@@ -602,6 +966,15 @@ fn format_expr(
                     registry,
                     locals,
                 );
+            }
+            // What a hook's script takes says how its arguments print.
+            if let Some(end) = hooks::arguments_end(registry, name, args)
+                && let Some(Expr::Identifier(target)) = args.first().cloned()
+            {
+                let hints = hooks::argument_hints(registry, &target, &args[1..end], locals);
+                for (arg, hint) in args[1..end].iter_mut().zip(hints) {
+                    format_expr(arg, hint, names, registry, locals);
+                }
             }
             hooks::compact(registry, name, args, locals);
             if args.is_empty()
@@ -634,19 +1007,22 @@ fn format_expr(
             }
         }
         Expr::BinaryOp {
-            op: BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq,
+            op: op @ (BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq),
             lhs,
             rhs,
         } => {
-            let left = expression_types(lhs, registry, locals).first().copied();
-            let right = expression_types(rhs, registry, locals).first().copied();
-            let literal = matches!(rhs.as_ref(), Expr::BoolLiteral(_) | Expr::IntLiteral(0 | 1))
-                .then(|| rhs.clone());
+            // Only `=` and `!` read a value by the other side's type.
+            let equality = matches!(op, BinOp::Eq | BinOp::NotEq);
+            let left = expression_types(lhs, registry, locals)
+                .first()
+                .copied()
+                .filter(|_| equality);
+            let right = expression_types(rhs, registry, locals)
+                .first()
+                .copied()
+                .filter(|_| equality);
             format_expr(lhs, right, names, registry, locals);
             format_expr(rhs, left, names, registry, locals);
-            if let Some(literal) = literal {
-                *rhs = literal;
-            }
         }
         Expr::BinaryOp { lhs, rhs, .. } | Expr::LogicalOp { lhs, rhs, .. } => {
             format_expr(lhs, None, names, registry, locals);
@@ -759,7 +1135,7 @@ fn format_body(
                 if let Some(ty) = hint
                     && ty.allow_switch()
                 {
-                    *switch_type = format!("switch_{}", ty.name());
+                    *switch_type = format!("switch_{}", ty.declared_name());
                 }
                 format_expr(expr, None, names, registry, locals);
                 for case in cases {

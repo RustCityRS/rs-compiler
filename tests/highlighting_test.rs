@@ -147,6 +147,71 @@ fn incomplete_literals_comments_and_directives_remain_highlighted() {
 }
 
 #[test]
+fn config_values_that_name_types_are_types() {
+    let mut project = project();
+    let text = "[varc_1]\ntype=int\nscope=perm\n";
+    let doc = project.open_config("mem:all.varc", Scope::Global, 1, text, "varc");
+    let tokens = project.semantic_tokens(doc);
+    assert_eq!(at(text, &tokens, "int").kind, TokenKind::Type);
+    assert_eq!(at(text, &tokens, "perm").kind, TokenKind::EnumMember);
+
+    let text = "[enum_1]\ninputtype=namedobj\noutputtype=graphic\n";
+    let doc = project.open_config("mem:all.enum", Scope::Global, 1, text, "enum");
+    let tokens = project.semantic_tokens(doc);
+    for word in ["namedobj", "graphic"] {
+        assert_eq!(at(text, &tokens, word).kind, TokenKind::Type, "{word}");
+    }
+
+    let text = "[table]\ncolumn=string,coord,LIST\n";
+    let doc = project.open_config("mem:all.dbtable", Scope::Global, 1, text, "dbtable");
+    let tokens = project.semantic_tokens(doc);
+    assert_eq!(at(text, &tokens, "string").kind, TokenKind::EnumMember);
+    assert_eq!(at(text, &tokens, "coord").kind, TokenKind::Type);
+    assert_eq!(at(text, &tokens, "LIST").kind, TokenKind::EnumMember);
+}
+
+#[test]
+fn interface_values_read_by_their_keys() {
+    let mut project = project();
+    let text = "// 1:0\n[com_0]\nlayer=com_1\ngraphic=\"v2_stone,1\"\ntext=a // b, c\n\
+                onload=graphic_swapper(event_com, \"x<br>y\", ^white, 5){varplayer_2}\n";
+    let doc = project.open_config("mem:bank.if3", Scope::Global, 1, text, "if3");
+    let tokens = project.semantic_tokens(doc);
+    ordered(text, &tokens);
+    assert_eq!(at(text, &tokens, "// 1:0").kind, TokenKind::Comment);
+    assert_eq!(at(text, &tokens, "com_0").kind, TokenKind::Namespace);
+    assert_eq!(at(text, &tokens, "com_1").kind, TokenKind::EnumMember);
+    assert_eq!(at(text, &tokens, "v2_stone,1").kind, TokenKind::EnumMember);
+    assert_eq!(at(text, &tokens, "a // b, c").kind, TokenKind::String);
+    assert_eq!(
+        at(text, &tokens, "graphic_swapper").kind,
+        TokenKind::Function
+    );
+    assert_eq!(at(text, &tokens, "event_com").kind, TokenKind::EnumMember);
+    assert_eq!(at(text, &tokens, "\"x<br>y\"").kind, TokenKind::String);
+    assert_eq!(at(text, &tokens, "^white").kind, TokenKind::Variable);
+    assert_eq!(at(text, &tokens, "5").kind, TokenKind::Number);
+    assert_eq!(at(text, &tokens, "varplayer_2").kind, TokenKind::EnumMember);
+}
+
+#[test]
+fn config_text_is_one_string_and_stops_at_a_comment() {
+    let mut project = project();
+    let text = "[man]\nop1=Talk-to the man, slowly // spoken\nname=Man\nsize=2\nmembers=yes\n";
+    let doc = project.open_config("mem:all.npc", Scope::Global, 1, text, "npc");
+    let tokens = project.semantic_tokens(doc);
+    ordered(text, &tokens);
+    assert_eq!(
+        at(text, &tokens, "Talk-to the man, slowly").kind,
+        TokenKind::String
+    );
+    assert_eq!(at(text, &tokens, "// spoken").kind, TokenKind::Comment);
+    assert_eq!(at(text, &tokens, "Man").kind, TokenKind::String);
+    assert_eq!(at(text, &tokens, "2").kind, TokenKind::Number);
+    assert_eq!(at(text, &tokens, "yes").kind, TokenKind::Keyword);
+}
+
+#[test]
 fn configs_and_packs_preserve_sections_keys_constants_and_comments() {
     let mut project = project();
     let text = "/* hidden\n[not_a_definition]\n*/\n[cheese+tom_batta]\nname=\"Food 😀\"\ncost=-10\ncoord=0_50_50_10_10\nactive=yes\nparam=^unknown,%var\nmodel=food_model // comment\n";

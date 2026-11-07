@@ -1,8 +1,13 @@
 use runec::lsp::project_from_json;
-use runec::project::Project;
+use runec::project::{Project, SourceId};
 use runec::sources::Scope;
+use runec::symbol::SymbolRegistry;
+use runec::symloader::load_packs;
+use runec::types::Type;
 use serde_json::json;
 use std::cmp::Reverse;
+use std::fs;
+use std::path::Path;
 
 #[test]
 fn quoted_callbacks_have_code_navigation_completion_highlighting_and_diagnostics() {
@@ -106,10 +111,10 @@ fn transmit_lists_keep_outer_and_callback_hints_separate() {
             {"name":"if_setonvarctransmit","opcode":2407,"params":["clientscript","string","component"],"kind":"hook_component"}
         ],
         "variables":[
-            {"name":"varc_int_192","id":192,"type":"int","category":"varc_int","scope":"client"},
-            {"name":"varc_int_1038","id":1038,"type":"int","category":"varc_int","scope":"client"},
-            {"name":"varc_int_1324","id":1324,"type":"int","category":"varc_int","scope":"client"},
-            {"name":"varc_int_wrong","id":192,"type":"int","category":"varp","scope":"client"}
+            {"name":"varc_192","id":192,"type":"int","category":"varc","scope":"client"},
+            {"name":"varc_1038","id":1038,"type":"int","category":"varc","scope":"client"},
+            {"name":"varc_1324","id":1324,"type":"int","category":"varc","scope":"client"},
+            {"name":"varc_wrong","id":192,"type":"int","category":"varp","scope":"client"}
         ],
         "scriptIds":[
             {"trigger":"proc","name":"clientscript_1465","id":1465},
@@ -120,7 +125,7 @@ fn transmit_lists_keep_outer_and_callback_hints_separate() {
     })).unwrap();
     for empty in ["()", ""] {
         let text = format!(
-            "[proc,caller]\nif_setonvarctransmit(\"clientscript_1465{empty}{{varc_int_192, varc_int_1038, varc_int_1324}}\", 762:95);\nif_setonvarctransmit(\"callback(7){{varc_int_192, varc_int_1038}}\", 762:95);\n"
+            "[proc,caller]\nif_setonvarctransmit(\"clientscript_1465{empty}{{varc_192, varc_1038, varc_1324}}\", 762:95);\nif_setonvarctransmit(\"callback(7){{varc_192, varc_1038}}\", 762:95);\n"
         );
         let doc = project.open(
             format!("mem:caller:{empty}"),
@@ -152,15 +157,11 @@ fn transmit_lists_keep_outer_and_callback_hints_separate() {
                 .active_parameter,
             1
         );
-        let trigger = text.find("varc_int_192").unwrap();
+        let trigger = text.find("varc_192").unwrap();
         assert!(project.hover(doc, trigger).unwrap().detail.contains("192"));
-        let completions = project.completions(doc, trigger + "varc_int_".len(), 20);
-        assert!(completions.iter().any(|item| item.label == "varc_int_192"));
-        assert!(
-            !completions
-                .iter()
-                .any(|item| item.label == "varc_int_wrong")
-        );
+        let completions = project.completions(doc, trigger + "varc_".len(), 20);
+        assert!(completions.iter().any(|item| item.label == "varc_192"));
+        assert!(!completions.iter().any(|item| item.label == "varc_wrong"));
         project.close(doc);
     }
 }
@@ -403,6 +404,336 @@ fn qualified_config_references_preserve_column_and_component_declarations_on_ren
             .iter()
             .any(|edit| edit.replacement == "renamed:field:0")
     );
+}
+
+const CONFIG_TABLES: &[(&str, Type)] = &[
+    ("area", Type::Area),
+    ("bas", Type::Bas),
+    ("billboard", Type::Billboard),
+    ("particleeffector", Type::ParticleEffector),
+    ("particleemitter", Type::ParticleEmitter),
+    ("controller", Type::Controller),
+    ("cursor", Type::Cursor),
+    ("flo", Type::Flo),
+    ("flu", Type::Flu),
+    ("hitmark", Type::Hitmark),
+    ("hunt", Type::Hunt),
+    ("itemcode", Type::ItemCode),
+    ("light", Type::Light),
+    ("mel", Type::MapElement),
+    ("msi", Type::Msi),
+    ("quest", Type::Quest),
+    ("varc", Type::Varc),
+    ("varclan", Type::VarClan),
+    ("varclansetting", Type::VarClanSetting),
+    ("varcon", Type::VarCon),
+    ("config44", Type::Config44),
+    ("varnbit", Type::VarNBit),
+    ("varobj", Type::VarObj),
+];
+
+fn config_project() -> Project {
+    project_from_json(&json!({})).unwrap()
+}
+
+/// The definition of `word` where `after` ends in `text`.
+fn definition_after(project: &Project, doc: SourceId, text: &str, after: &str) -> Option<SourceId> {
+    let offset = text.find(after).unwrap() + after.len();
+    project.definition(doc, offset).map(|found| found.source)
+}
+
+#[test]
+fn a_config_value_resolves_by_the_type_its_key_holds() {
+    let mut project = config_project();
+    let hunt = project.open_config("mem:all.hunt", Scope::Global, 1, "[cow]\n", "hunt");
+    let seq = project.open_config("mem:all.seq", Scope::Global, 1, "[cow]\n", "seq");
+    let text = "[cow]\nhuntmode=cow\nreadyanim=cow\nname=cow\n";
+    let npc = project.open_config("mem:all.npc", Scope::Global, 1, text, "npc");
+    assert_eq!(
+        definition_after(&project, npc, text, "huntmode="),
+        Some(hunt)
+    );
+    assert_eq!(
+        definition_after(&project, npc, text, "readyanim="),
+        Some(seq)
+    );
+    assert_eq!(definition_after(&project, npc, text, "name="), None);
+    let found = project.references(npc, text.find("huntmode=").unwrap() + 9, true);
+    assert_eq!(found.len(), 2);
+}
+
+#[test]
+fn param_enum_and_dbrow_values_take_their_type_from_what_declares_them() {
+    let mut project = config_project();
+    let npc = project.open_config("mem:all.npc", Scope::Global, 1, "[cow]\n", "npc");
+    let obj = project.open_config("mem:all.obj", Scope::Global, 1, "[cow]\n", "obj");
+    project.open_config(
+        "mem:all.param",
+        Scope::Global,
+        1,
+        "[p_npc]\ntype=npc\n\n[p_obj]\ntype=obj\n\n[p_text]\ntype=string\n",
+        "param",
+    );
+    let text = "[s]\nparam=p_npc,cow\nparam=p_obj,cow\nparam=p_text,cow\n";
+    let doc = project.open_config("mem:all.struct", Scope::Global, 1, text, "struct");
+    assert_eq!(definition_after(&project, doc, text, "p_npc,"), Some(npc));
+    assert_eq!(definition_after(&project, doc, text, "p_obj,"), Some(obj));
+    assert_eq!(definition_after(&project, doc, text, "p_text,"), None);
+
+    let text = "[e]\ninputtype=npc\noutputtype=obj\nval=cow,cow\n";
+    let doc = project.open_config("mem:all.enum", Scope::Global, 1, text, "enum");
+    assert_eq!(definition_after(&project, doc, text, "val="), Some(npc));
+    assert_eq!(definition_after(&project, doc, text, "val=cow,"), Some(obj));
+
+    let table = project.open_config(
+        "mem:all.dbtable",
+        Scope::Global,
+        1,
+        "[t]\ncolumn=held,obj,npc,LIST\n",
+        "dbtable",
+    );
+    let text = "[r]\ntable=t\ndata=held,cow,cow\n";
+    let doc = project.open_config("mem:all.dbrow", Scope::Global, 1, text, "dbrow");
+    assert_eq!(definition_after(&project, doc, text, "table="), Some(table));
+    assert_eq!(definition_after(&project, doc, text, "data="), Some(table));
+    assert_eq!(definition_after(&project, doc, text, "held,"), Some(obj));
+    assert_eq!(
+        definition_after(&project, doc, text, "held,cow,"),
+        Some(npc)
+    );
+}
+
+#[test]
+fn a_sprite_name_keeps_its_comma() {
+    let mut project = config_project();
+    let sprites = project.open_config(
+        "mem:sprites.pack",
+        Scope::Global,
+        1,
+        "3=icon,2\n",
+        "pack:sprites",
+    );
+    let text = "[msi_0]\nsprite=icon,2\n";
+    let msi = project.open_config("mem:all.msi", Scope::Global, 1, text, "msi");
+    assert_eq!(
+        definition_after(&project, msi, text, "sprite="),
+        Some(sprites)
+    );
+}
+
+#[test]
+fn a_name_is_one_value_whatever_it_holds() {
+    let mut project = config_project();
+    let obj = project.open_config("mem:all.obj", Scope::Global, 1, "[na've_pouch]\n", "obj");
+    let text = "[inv_1]\nstock1=na've_pouch,5,100\n";
+    let inv = project.open_config("mem:all.inv", Scope::Global, 1, text, "inv");
+    assert_eq!(definition_after(&project, inv, text, "stock1="), Some(obj));
+    assert!(project.config_diagnostics().diagnostics().is_empty());
+}
+
+#[test]
+fn a_config_value_can_be_an_id_or_a_table_placeholder() {
+    let mut project = config_project();
+    project.open_config(
+        "mem:sprites.pack",
+        Scope::Global,
+        1,
+        "3=icon,2\n",
+        "pack:sprites",
+    );
+    project.open_config("mem:all.seq", Scope::Global, 1, "[walk]\n", "seq");
+    project.open_config(
+        "mem:all.msi",
+        Scope::Global,
+        1,
+        "[msi_0]\nsprite=1804\n\n[msi_1]\nsprite=sprites_168\n\n[msi_2]\nsprite=null\n",
+        "msi",
+    );
+    project.open_config(
+        "mem:all.bas",
+        Scope::Global,
+        1,
+        "[bas_0]\nwalkanim=seq_12\nreadyanim=seq_12_npc\nrunanim=12\n",
+        "bas",
+    );
+    let found = project
+        .config_diagnostics()
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect::<Vec<_>>();
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn a_config_value_of_the_wrong_type_is_reported() {
+    let mut project = config_project();
+    project.open_config("mem:all.hunt", Scope::Global, 1, "[cowardly]\n", "hunt");
+    project.open_config(
+        "mem:all.npc",
+        Scope::Global,
+        1,
+        "[cow]\nhuntmode=cow\n\n[bull]\nhuntmode=nothing\n\n[calf]\nhuntmode=cowardly\nhuntmode=7\nhuntmode=null\nreadyanim=no_seq_table_loaded\n",
+        "npc",
+    );
+    let mut found = project
+        .config_diagnostics()
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| (diagnostic.line, diagnostic.message.clone()))
+        .collect::<Vec<_>>();
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            (2, "'cow' is a npc, expected hunt".to_owned()),
+            (5, "Unknown hunt 'nothing'".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn config_completion_offers_what_the_key_holds() {
+    let mut project = config_project();
+    project.open_config("mem:all.hunt", Scope::Global, 1, "[cowardly]\n", "hunt");
+    let text = "[cow]\nhuntmode=co\nmembers=\nhun";
+    let npc = project.open_config("mem:all.npc", Scope::Global, 1, text, "npc");
+    let labels = |offset: usize| {
+        project
+            .completions(npc, offset, 20)
+            .into_iter()
+            .map(|item| item.label)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(labels(text.find("=co").unwrap() + 3), ["cowardly"]);
+    assert_eq!(labels(text.find("members=").unwrap() + 8), ["no", "yes"]);
+    assert_eq!(labels(text.len()), ["huntmode", "huntrange"]);
+}
+
+#[test]
+fn hovering_a_config_key_shows_what_it_holds() {
+    let mut project = config_project();
+    let text = "[man]\nreadyanim=x\nparam=a,b\nrecol1s=2\nunknownkey=3\n";
+    let npc = project.open_config("mem:all.npc", Scope::Global, 1, text, "npc");
+    let hover = |key: &str| {
+        project
+            .hover(npc, text.find(key).unwrap() + 1)
+            .map(|hover| hover.detail)
+    };
+    assert_eq!(hover("readyanim").as_deref(), Some("readyanim: seq"));
+    assert_eq!(hover("param").as_deref(), Some("param: param, param value"));
+    assert_eq!(hover("recol1s").as_deref(), Some("recol1s: int"));
+    assert_eq!(hover("unknownkey"), None);
+}
+
+#[test]
+fn every_config_table_is_a_type_scripts_can_navigate_and_complete() {
+    for &(extension, ty) in CONFIG_TABLES {
+        assert_eq!(Type::from_name(extension), Some(ty));
+        let name = format!("{extension}_0");
+        let mut project = project_from_json(&json!({
+            "commands":[{"name":"touch","opcode":1,"params":[extension]}],
+            "entities":[{"name":name,"type":extension,"id":0,"scope":"global"}],
+        }))
+        .unwrap();
+        let config = project.open_config(
+            format!("mem:all.{extension}"),
+            Scope::Global,
+            1,
+            format!("[{name}]\n"),
+            extension,
+        );
+        let text = format!("[proc,test]\ntouch({name});\n");
+        let doc = project.open("mem:test", Scope::Rune, 1, text.as_str());
+        let offset = text.find(&name).unwrap();
+        assert_eq!(
+            project.definition(doc, offset).map(|found| found.source),
+            Some(config),
+            "{extension}"
+        );
+        assert!(
+            project
+                .hover(doc, offset)
+                .is_some_and(|hover| hover.detail.contains(&name)),
+            "{extension}"
+        );
+        assert!(
+            project
+                .completions(doc, offset + extension.len(), 20)
+                .iter()
+                .any(|item| item.label == name),
+            "{extension}"
+        );
+    }
+}
+
+#[test]
+fn load_packs_reads_every_config_table() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("config_table_packs");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let tables = || {
+        CONFIG_TABLES
+            .iter()
+            .filter(|(extension, _)| !matches!(*extension, "varc" | "varclansetting"))
+    };
+    for (extension, _) in tables() {
+        fs::write(
+            dir.join(format!("{extension}.pack")),
+            format!("7={extension}_7\n"),
+        )
+        .unwrap();
+    }
+    let mut registry = SymbolRegistry::new();
+    load_packs(&mut registry, &dir);
+    for &(extension, ty) in tables() {
+        assert_eq!(
+            registry.lookup_reference(&format!("{extension}_7"), ty),
+            Some(7),
+            "{extension}"
+        );
+    }
+}
+
+#[test]
+fn var_tables_resolve_through_their_game_vars() {
+    let mut registry = SymbolRegistry::new();
+    registry.register_game_var("varc_1".into(), Type::Int, 1, "varc".into());
+    registry.register_game_var("varc_2".into(), Type::String, 2, "varcs".into());
+    registry.register_game_var("clan_3".into(), Type::Int, 3, "clansetting_int".into());
+    assert_eq!(registry.lookup_reference("varc_1", Type::Varc), Some(1));
+    assert_eq!(registry.lookup_reference("varc_2", Type::Varc), Some(2));
+    assert_eq!(
+        registry.lookup_reference("clan_3", Type::VarClanSetting),
+        Some(3)
+    );
+    assert_eq!(registry.lookup_reference("clan_3", Type::Varc), None);
+}
+
+#[test]
+fn scripts_reach_map_element_and_clan_setting_configs() {
+    let mut project = project_from_json(&json!({
+        "commands":[{"name":"touch","opcode":1,"params":["mapelement"]}],
+        "variables":[{"name":"varclansetting_0","type":"int","id":0,"category":"clansetting_int","scope":"global"}],
+    }))
+    .unwrap();
+    let mel = project.open_config("mem:all.mel", Scope::Global, 1, "[mel_5]\n", "mel");
+    let clan = project.open_config(
+        "mem:all.varclansetting",
+        Scope::Global,
+        1,
+        "[varclansetting_0]\ntype=int\n",
+        "varclansetting",
+    );
+    let text = "[proc,test]\ntouch(mel_5);\ndef_int $value = %varclansetting_0;\n";
+    let doc = project.open("mem:test", Scope::Rune, 1, text);
+    let definition = |project: &Project, word: &str| {
+        project
+            .definition(doc, text.find(word).unwrap())
+            .map(|location| location.source)
+    };
+    assert_eq!(definition(&project, "mel_5"), Some(mel));
+    assert_eq!(definition(&project, "varclansetting_0"), Some(clan));
 }
 
 #[test]

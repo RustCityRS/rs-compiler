@@ -54,6 +54,15 @@ pub enum Type {
     SetSize,
     SetTextAlignH,
     SetTextAlignV,
+    ClanForumQfc,
+    /// A parameter holding the number of one of the caller's arrays.
+    IntArray,
+    Key,
+    ChatType,
+    ChatFilter,
+    WindowMode,
+    PlatformType,
+    IntBool,
     Interface,
     TopLevelInterface,
     OverlayInterface,
@@ -73,6 +82,13 @@ pub enum Type {
     Varn,
     Vars,
     Varbit,
+    Varc,
+    VarClan,
+    VarClanSetting,
+    VarCon,
+    Config44,
+    VarNBit,
+    VarObj,
 
     // Map types
     MapZone,
@@ -89,6 +105,19 @@ pub enum Type {
     EntityOverlay,
     StringVector,
     WriteinvObj,
+
+    // Config tables
+    Bas,
+    Billboard,
+    ParticleEffector,
+    ParticleEmitter,
+    Cursor,
+    Flo,
+    Flu,
+    ItemCode,
+    Light,
+    Msi,
+    Quest,
 
     // Controller type (instanced area manager)
     Controller,
@@ -111,11 +140,18 @@ pub enum Type {
 
 impl Type {
     pub fn to_char(self) -> char {
-        "is§1clnoOpNAtPMjdmxKSIavgJyVÐþ`µzf«ke"
+        // A clan forum link is a long to the client.
+        if self == Self::ClanForumQfc {
+            return '§';
+        }
+        Self::CHARS
             .chars()
             .find(|&ch| Self::from_char(ch) == Some(self))
             .unwrap_or('i')
     }
+
+    /// Every character a script names a type by.
+    pub const CHARS: &'static str = "is§1clnoOpNAtPMjdmxKSIavgJyVÐþ`µzf«ke@\u{80}";
 
     pub fn from_char(ch: char) -> Option<Self> {
         Some(match ch {
@@ -156,6 +192,8 @@ impl Type {
             'þ' => Self::NpcStat,
             '`' => Self::MapArea,
             'µ' => Self::MapElement,
+            '@' => Self::Cursor,
+            '\u{80}' => Self::Bas,
             _ => return None,
         })
     }
@@ -164,7 +202,7 @@ impl Type {
     pub fn base_type(&self) -> BaseVarType {
         match self {
             Type::String => BaseVarType::String,
-            Type::Long => BaseVarType::Long,
+            Type::Long | Type::ClanForumQfc => BaseVarType::Long,
             _ => BaseVarType::Integer,
         }
     }
@@ -173,14 +211,8 @@ impl Type {
     /// Boolean and Int default to 0; all other int-based types default to -1 (null).
     pub fn default_int_value(&self) -> i32 {
         match self {
-            Type::Int
-            | Type::Boolean
-            | Type::IfType
-            | Type::SetPosH
-            | Type::SetPosV
-            | Type::SetSize
-            | Type::SetTextAlignH
-            | Type::SetTextAlignV => 0,
+            Type::Int | Type::Boolean => 0,
+            ty if ty.is_int_kind() => 0,
             _ => -1,
         }
     }
@@ -189,13 +221,8 @@ impl Type {
     /// Only Int pushes 0; everything else (including Boolean) pushes -1.
     pub fn default_return_value(&self) -> i32 {
         match self {
-            Type::Int
-            | Type::IfType
-            | Type::SetPosH
-            | Type::SetPosV
-            | Type::SetSize
-            | Type::SetTextAlignH
-            | Type::SetTextAlignV => 0,
+            Type::Int => 0,
+            ty if ty.is_int_kind() => 0,
             _ => -1,
         }
     }
@@ -215,6 +242,14 @@ impl Type {
             "long" => Some(Type::Long),
             "char" => Some(Type::Char),
             "colour" | "color" | "rgb" => Some(Type::Colour),
+            "clanforumqfc" => Some(Type::ClanForumQfc),
+            "intarray" => Some(Type::IntArray),
+            "key" => Some(Type::Key),
+            "chattype" => Some(Type::ChatType),
+            "chatfilter" => Some(Type::ChatFilter),
+            "windowmode" => Some(Type::WindowMode),
+            "platformtype" => Some(Type::PlatformType),
+            "intbool" => Some(Type::IntBool),
             "iftype" => Some(Type::IfType),
             "setposh" => Some(Type::SetPosH),
             "setposv" => Some(Type::SetPosV),
@@ -236,8 +271,8 @@ impl Type {
             "jingle" => Some(Type::Jingle),
             "graphic" => Some(Type::Graphic),
             "fontmetrics" => Some(Type::FontMetrics),
-            "chatcat" => Some(Type::ChatCat),
-            "chatphrase" => Some(Type::ChatPhrase),
+            "chatcat" | "quickchatcat" => Some(Type::ChatCat),
+            "chatphrase" | "quickchatphrase" => Some(Type::ChatPhrase),
             "model" => Some(Type::Model),
             "texture" => Some(Type::Texture),
             "idk" | "idkit" => Some(Type::IdKit),
@@ -260,9 +295,16 @@ impl Type {
             "varn" => Some(Type::Varn),
             "vars" => Some(Type::Vars),
             "varbit" => Some(Type::Varbit),
+            "varc" => Some(Type::Varc),
+            "varclan" => Some(Type::VarClan),
+            "varclansetting" => Some(Type::VarClanSetting),
+            "varcon" => Some(Type::VarCon),
+            "config44" => Some(Type::Config44),
+            "varnbit" => Some(Type::VarNBit),
+            "varobj" => Some(Type::VarObj),
             "mapzone" => Some(Type::MapZone),
-            "maparea" => Some(Type::MapArea),
-            "mapelement" => Some(Type::MapElement),
+            "wma" | "maparea" => Some(Type::MapArea),
+            "mapelement" | "mel" => Some(Type::MapElement),
             "locshape" | "loc_shape" => Some(Type::LocShape),
             "npc_mode" | "npcmode" => Some(Type::NpcMode),
             "npc_stat" | "npcstat" => Some(Type::NpcStat),
@@ -273,6 +315,17 @@ impl Type {
             "stringvector" => Some(Type::StringVector),
             "writeinvobj" => Some(Type::WriteinvObj),
             "controller" => Some(Type::Controller),
+            "bas" => Some(Type::Bas),
+            "billboard" => Some(Type::Billboard),
+            "particleeffector" => Some(Type::ParticleEffector),
+            "particleemitter" => Some(Type::ParticleEmitter),
+            "cursor" => Some(Type::Cursor),
+            "flo" => Some(Type::Flo),
+            "flu" => Some(Type::Flu),
+            "itemcode" => Some(Type::ItemCode),
+            "light" => Some(Type::Light),
+            "msi" => Some(Type::Msi),
+            "quest" => Some(Type::Quest),
             "regioncoord" => Some(Type::RegionCoord),
             // Script reference types (used when passing proc/label/queue references as params)
             "label" => Some(Type::Label),
@@ -290,6 +343,35 @@ impl Type {
         }
     }
 
+    /// An int that only differs in how its values print: declarations say `int`.
+    pub fn is_int_kind(&self) -> bool {
+        matches!(
+            self,
+            Type::Colour
+                | Type::Key
+                | Type::ChatType
+                | Type::ChatFilter
+                | Type::WindowMode
+                | Type::PlatformType
+                | Type::IntBool
+                | Type::IfType
+                | Type::SetPosH
+                | Type::SetPosV
+                | Type::SetSize
+                | Type::SetTextAlignH
+                | Type::SetTextAlignV
+        )
+    }
+
+    /// The name a declaration of this type gives.
+    pub fn declared_name(&self) -> &'static str {
+        if self.is_int_kind() {
+            "int"
+        } else {
+            self.name()
+        }
+    }
+
     /// Get the name of this type as used in RuneScript source.
     pub fn name(&self) -> &'static str {
         match self {
@@ -298,7 +380,15 @@ impl Type {
             Type::String => "string",
             Type::Long => "long",
             Type::Char => "char",
-            Type::Colour => "colour",
+            Type::Colour => "rgb",
+            Type::ClanForumQfc => "clanforumqfc",
+            Type::IntArray => "intarray",
+            Type::Key => "key",
+            Type::ChatType => "chattype",
+            Type::ChatFilter => "chatfilter",
+            Type::WindowMode => "windowmode",
+            Type::PlatformType => "platformtype",
+            Type::IntBool => "intbool",
             Type::Coord => "coord",
             Type::Loc => "loc",
             Type::Npc => "npc",
@@ -344,8 +434,15 @@ impl Type {
             Type::Varn => "varn",
             Type::Vars => "vars",
             Type::Varbit => "varbit",
+            Type::Varc => "varc",
+            Type::VarClan => "varclan",
+            Type::VarClanSetting => "varclansetting",
+            Type::VarCon => "varcon",
+            Type::Config44 => "config44",
+            Type::VarNBit => "varnbit",
+            Type::VarObj => "varobj",
             Type::MapZone => "mapzone",
-            Type::MapArea => "maparea",
+            Type::MapArea => "wma",
             Type::MapElement => "mapelement",
             Type::LocShape => "loc_shape",
             Type::NpcMode => "npc_mode",
@@ -357,6 +454,17 @@ impl Type {
             Type::StringVector => "stringvector",
             Type::WriteinvObj => "writeinvobj",
             Type::Controller => "controller",
+            Type::Bas => "bas",
+            Type::Billboard => "billboard",
+            Type::ParticleEffector => "particleeffector",
+            Type::ParticleEmitter => "particleemitter",
+            Type::Cursor => "cursor",
+            Type::Flo => "flo",
+            Type::Flu => "flu",
+            Type::ItemCode => "itemcode",
+            Type::Light => "light",
+            Type::Msi => "msi",
+            Type::Quest => "quest",
             Type::RegionCoord => "regioncoord",
             Type::Proc => "proc",
             Type::ClientScript => "clientscript",
@@ -429,6 +537,13 @@ impl Type {
             "def_varn",
             "def_vars",
             "def_varbit",
+            "def_varc",
+            "def_varclan",
+            "def_varclansetting",
+            "def_varcon",
+            "def_varconbit",
+            "def_varnbit",
+            "def_varobj",
             "def_mapzone",
             "def_maparea",
             "def_mapelement",
@@ -441,6 +556,18 @@ impl Type {
             "def_entityoverlay",
             "def_stringvector",
             "def_writeinvobj",
+            "def_controller",
+            "def_bas",
+            "def_billboard",
+            "def_effector",
+            "def_emitter",
+            "def_cursor",
+            "def_flo",
+            "def_flu",
+            "def_itemcode",
+            "def_light",
+            "def_msi",
+            "def_quest",
         ]
     }
 }

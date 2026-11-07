@@ -26,7 +26,9 @@ pub fn expression_types(expr: &Expr, registry: &SymbolRegistry, locals: &SymbolT
         Expr::GameVar(name, _) => registry.lookup_game_var(name.trim_start_matches('.')),
         Expr::ConstantVar(name, _) => registry.lookup_constant(name),
         Expr::CommandCall { name, args, .. } => return command_returns(registry, name, args),
-        Expr::Identifier(name) => registry.lookup_command(name.trim_start_matches('.')),
+        Expr::Identifier(name) => registry
+            .lookup_command(name.trim_start_matches('.'))
+            .or_else(|| registry.lookup_constant(name)),
         Expr::ProcCall { name, .. } => registry
             .lookup_script_by_trigger("proc", name)
             .or_else(|| registry.lookup_script_by_trigger("clientscript", name)),
@@ -97,6 +99,16 @@ pub fn command_hints(
         .unwrap_or_default();
     if !registry.stack_commands.contains(name) {
         return (0..args.len()).map(|i| params.get(i).copied()).collect();
+    }
+    // An enum's first argument names the type of its key.
+    if matches!(
+        registry.dynamic_returns.get(name),
+        Some(ReturnType::TypeArgument(1))
+    ) && let Some(Expr::Identifier(key)) = args.first()
+        && let Some(ty) = Type::from_name(key)
+        && let Some(slot) = params.last_mut()
+    {
+        *slot = ty;
     }
     if let Some(&explicit) = registry.hook_commands.get(name)
         && let Some(signature) = args.iter().rev().find_map(|arg| match arg {
@@ -169,6 +181,18 @@ pub fn stack_hints(
         .enumerate()
         .map(|(i, arg)| {
             let mut types = expression_types(arg, registry, locals);
+            // `null` is a string where the strings still to come can't fill the stack.
+            if matches!(arg, Expr::NullLiteral)
+                && (pending[0].is_empty()
+                    || pending[1].len()
+                        > args[i + 1..]
+                            .iter()
+                            .flat_map(|arg| expression_types(arg, registry, locals))
+                            .filter(|ty| stack(*ty) == 1)
+                            .count())
+            {
+                types = vec![Type::String];
+            }
             if let Expr::StringLiteral(name) | Expr::Identifier(name) = arg
                 && let Some(&ty) = pending[0].front()
                 && registry.lookup_reference(name, ty).is_some()

@@ -1,4 +1,4 @@
-use super::{Index, Location, Reference, Symbol, SymbolKind, config, highlighting, hooks};
+use super::{Index, Location, Reference, Symbol, SymbolKind, config, fields, highlighting, hooks};
 use crate::lexer::Lexer;
 use crate::parser::Statement;
 use crate::project::{Document, Project, SourceId};
@@ -487,7 +487,14 @@ impl Index {
             }
         }
         let mut references = Vec::new();
-        config::declarations(project, &mut symbols, &mut keys, &mut references);
+        let mut config_types = fields::ConfigTypes::default();
+        config::declarations(
+            project,
+            &mut symbols,
+            &mut keys,
+            &mut references,
+            &mut config_types,
+        );
         let compounds = symbols
             .iter()
             .map(|symbol| &symbol.name)
@@ -728,7 +735,15 @@ impl Index {
                 previous_symbol = resolved;
             }
         }
-        config::references(project, &keys, &symbols, &mut references);
+        let mut config_problems = HashMap::new();
+        config::references(
+            project,
+            &keys,
+            &symbols,
+            &mut references,
+            &config_types,
+            &mut config_problems,
+        );
         for symbol in &symbols {
             if symbol.kind != SymbolKind::Trigger {
                 continue;
@@ -761,6 +776,8 @@ impl Index {
             references,
             compounds,
             hooks,
+            config_types,
+            config_problems,
         }
     }
 

@@ -1,5 +1,6 @@
 use crate::arguments::{command_hints, command_returns, proc_hints, stack_hints};
 use crate::bytecode::*;
+use crate::clientscript::decompile::inference::collect_returns;
 use crate::clientscript::hooks;
 use crate::parser::*;
 use crate::symbol::{SymbolKind, SymbolRegistry, SymbolTable};
@@ -133,10 +134,42 @@ impl<'a> Compiler<'a> {
             self.compile_statement(stmt, &mut compiled, &mut locals);
         }
 
-        let implicit_return = self.implicit_return
-            && !(self.client
-                && !script.return_types.is_empty()
-                && matches!(script.body.last(), Some(Statement::Return { .. })));
+        // A script's end is written out when it isn't the one its types give
+        // it: a second return in a row, or defaults with a -1 among them where
+        // the script's other returns hand on values.
+        let written_end = match script.body.as_slice() {
+            [.., Statement::Return { .. }, Statement::Return { .. }] => true,
+            [rest @ .., Statement::Return { values, .. }] => {
+                let literal = |value: &Expr| {
+                    matches!(
+                        value,
+                        Expr::IntLiteral(_) | Expr::StringLiteral(_) | Expr::LongLiteral(_)
+                    )
+                };
+                let mut others = vec![Vec::new(); values.len()];
+                collect_returns(rest, &mut others);
+                values.len() > 1
+                    && values.len() == script.return_types.len()
+                    && values
+                        .iter()
+                        .any(|value| matches!(value, Expr::IntLiteral(-1)))
+                    && values
+                        .iter()
+                        .zip(&script.return_types)
+                        .all(|(value, ty)| match value {
+                            Expr::IntLiteral(value) => {
+                                *value == -1 || *value == ty.default_return_value()
+                            }
+                            Expr::StringLiteral(value) => value.is_empty(),
+                            Expr::LongLiteral(value) => *value == 0,
+                            _ => false,
+                        })
+                    && !others[0].is_empty()
+                    && others.iter().flatten().any(|value| !literal(value))
+            }
+            _ => false,
+        };
+        let implicit_return = self.implicit_return && !(self.client && written_end);
         for ret_type in script.return_types.iter().filter(|_| implicit_return) {
             match ret_type.base_type() {
                 BaseVarType::Integer => {
@@ -327,8 +360,13 @@ impl<'a> Compiler<'a> {
                         }
                     })
                     .unwrap_or_else(|| {
-                        out.local_table
-                            .push_local(name.clone(), *element_type, true)
+                        let slot = out
+                            .local_table
+                            .push_local(name.clone(), *element_type, true);
+                        match array_name(name) {
+                            Some((_, number)) if self.client => number,
+                            _ => slot,
+                        }
                     });
                 locals.define(
                     name.clone(),
@@ -559,7 +597,15 @@ impl<'a> Compiler<'a> {
                     Expr::Identifier(name) => Some(command_returns(self.registry, name, &[])),
                     _ => None,
                 };
-                if let Some(ret_types) = return_types {
+                if let Some(mut ret_types) = return_types {
+                    // A client script drops a call's values a stack at a time.
+                    if self.client {
+                        ret_types.sort_by_key(|ty| match ty.base_type() {
+                            BaseVarType::Integer => 0,
+                            BaseVarType::String => 1,
+                            BaseVarType::Long => 2,
+                        });
+                    }
                     for ret_type in ret_types.iter().rev() {
                         match ret_type.base_type() {
                             BaseVarType::Integer => {
@@ -839,8 +885,15 @@ impl<'a> Compiler<'a> {
                 let rhs_start = out.len();
                 self.compile_expr_hinted(rhs, out, locals, lhs_type_hint);
 
-                if matches!(rhs.as_ref(), Expr::BoolLiteral(_))
-                    && matches!(op, BinOp::Eq | BinOp::NotEq)
+                // The client's compiler turns any `= 0` or `= 1` into these
+                // branches, whatever the type, and never does for `!`.
+                let shortens = if self.client {
+                    *op == BinOp::Eq
+                } else {
+                    matches!(rhs.as_ref(), Expr::BoolLiteral(_))
+                        && matches!(op, BinOp::Eq | BinOp::NotEq)
+                };
+                if shortens
                     && let [
                         Instruction {
                             opcode: Opcode::PushConstantInt,
@@ -1220,6 +1273,8 @@ impl<'a> Compiler<'a> {
                 // For all other types, null is integer -1.
                 if matches!(type_hint, Some(Type::String)) {
                     out.push_string("null".to_string());
+                } else if type_hint.is_some_and(|ty| ty.base_type() == BaseVarType::Long) {
+                    out.push(Instruction::push_long(-1));
                 } else {
                     out.push(Instruction::push_int(-1));
                 }
@@ -1274,8 +1329,8 @@ impl<'a> Compiler<'a> {
                         "varn" => Opcode::PushVarn,
                         "vars" => Opcode::PushVars,
                         "varbit" => Opcode::PushVarbit,
-                        "varc_int" => Opcode::PushVarcInt,
-                        "varc_string" => Opcode::PushVarcString,
+                        "varc" => Opcode::PushVarcInt,
+                        "varcs" => Opcode::PushVarcString,
                         "clansetting_int" => Opcode::PushClanSettingInt,
                         "clansetting_varbit" => Opcode::PushClanSettingVarbit,
                         "clansetting_long" => Opcode::PushClanSettingLong,
@@ -1427,8 +1482,8 @@ impl<'a> Compiler<'a> {
                                 "varn" => Opcode::PushVarn,
                                 "vars" => Opcode::PushVars,
                                 "varbit" => Opcode::PushVarbit,
-                                "varc_int" => Opcode::PushVarcInt,
-                                "varc_string" => Opcode::PushVarcString,
+                                "varc" => Opcode::PushVarcInt,
+                                "varcs" => Opcode::PushVarcString,
                                 "clansetting_int" => Opcode::PushClanSettingInt,
                                 "clansetting_varbit" => Opcode::PushClanSettingVarbit,
                                 "clansetting_long" => Opcode::PushClanSettingLong,
@@ -1847,7 +1902,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn comparison_opcode(op: BinOp, ty: Option<Type>) -> Opcode {
-        match (op, ty == Some(Type::Long)) {
+        match (op, ty.is_some_and(|ty| ty.base_type() == BaseVarType::Long)) {
             (BinOp::Eq, false) => Opcode::BranchEquals,
             (BinOp::Eq, true) => Opcode::LongBranchEquals,
             (BinOp::NotEq, false) => Opcode::BranchNot,
@@ -2026,8 +2081,8 @@ impl<'a> Compiler<'a> {
                         "varn" => Opcode::PopVarn,
                         "vars" => Opcode::PopVars,
                         "varbit" => Opcode::PopVarbit,
-                        "varc_int" => Opcode::PopVarcInt,
-                        "varc_string" => Opcode::PopVarcString,
+                        "varc" => Opcode::PopVarcInt,
+                        "varcs" => Opcode::PopVarcString,
                         _ => Opcode::PopVarp,
                     };
                     let encoded_id = if secondary {

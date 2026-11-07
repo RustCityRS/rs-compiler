@@ -26,6 +26,18 @@ pub struct ScriptDeclaration {
 pub struct ParamDef {
     pub param_type: Type,
     pub name: String,
+    /// What an array parameter holds.
+    pub value_type: Option<Type>,
+}
+
+/// The element type and number in an array's name, like `componentarray3`.
+pub(crate) fn array_name(name: &str) -> Option<(Type, i32)> {
+    let number = name.trim_start_matches(|ch: char| !ch.is_ascii_digit());
+    let element = name
+        .strip_suffix(number)?
+        .strip_suffix("array")
+        .and_then(Type::from_name)?;
+    Some((element, number.parse().ok()?))
 }
 
 #[derive(Debug, Clone)]
@@ -361,7 +373,7 @@ impl Parser {
         self.expect(Kind::RBracket)?;
 
         // Parse optional parameter list
-        let params = if self.peek_kind() == Kind::LParen {
+        let mut params = if self.peek_kind() == Kind::LParen {
             self.parse_param_list()?
         } else {
             Vec::new()
@@ -400,6 +412,22 @@ impl Parser {
             }
             body.push(self.parse_statement()?);
         }
+
+        // An array parameter is an int holding the array's number, and the array.
+        let mut arrays = Vec::new();
+        for param in &mut params {
+            if let Some(element_type) = param.value_type {
+                arrays.push(Statement::ArrayDeclaration {
+                    element_type,
+                    name: param.name.clone(),
+                    size: Expr::NullLiteral,
+                    line,
+                });
+                param.param_type = Type::Int;
+                param.name = format!("_{}", param.name);
+            }
+        }
+        body.splice(0..0, arrays);
 
         Ok(ScriptDeclaration {
             trigger,
@@ -523,13 +551,20 @@ impl Parser {
 
             // Parse type
             let type_tok = self.next();
-            let param_type = Type::from_name(&type_tok.value).ok_or_else(|| {
-                SyntaxError::from_token(
-                    self.file_path.clone(),
-                    &type_tok,
-                    format!("Unknown parameter type: {}", type_tok.value),
-                )
-            })?;
+            let value_type = type_tok
+                .value
+                .strip_suffix("array")
+                .and_then(Type::from_name);
+            let param_type = value_type
+                .map(|_| Type::IntArray)
+                .or_else(|| Type::from_name(&type_tok.value))
+                .ok_or_else(|| {
+                    SyntaxError::from_token(
+                        self.file_path.clone(),
+                        &type_tok,
+                        format!("Unknown parameter type: {}", type_tok.value),
+                    )
+                })?;
 
             // Parse $name (optionally prefixed with _ to suppress unused warnings)
             let underscore_prefix = if self.peek_kind() == Kind::Underscore {
@@ -546,7 +581,11 @@ impl Parser {
                 name_tok.value.clone()
             };
 
-            params.push(ParamDef { param_type, name });
+            params.push(ParamDef {
+                param_type,
+                name,
+                value_type,
+            });
         }
 
         self.expect(Kind::RParen)?;
@@ -1660,6 +1699,9 @@ impl Parser {
                     }
                 }
 
+                if let Some((_, array)) = array_name(&name) {
+                    return Ok(Expr::IntLiteral(array));
+                }
                 Ok(Expr::Identifier(name))
             }
 
@@ -1838,6 +1880,12 @@ impl Parser {
                         && stripped
                             .chars()
                             .all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    // A number is a piece of literal text.
+                    if !expr_str.is_empty() && expr_str.bytes().all(|byte| byte.is_ascii_digit()) {
+                        parts.push(StringPart::Literal(expr_str.clone()));
+                        expr_str.clear();
+                        continue;
+                    }
                     let is_code = !is_string_tag(&expr_str)
                         && (expr_str.starts_with('$')
                             || expr_str.starts_with('"')

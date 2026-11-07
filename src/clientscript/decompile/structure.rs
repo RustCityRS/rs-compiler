@@ -423,7 +423,8 @@ fn switch(
 
 pub fn generate(
     source: &str,
-    local_counts: [u16; 3],
+    locals: &HashMap<String, Type>,
+    keep_end: bool,
     returns: &HashMap<String, usize>,
     names: &dyn Names,
     registry: &SymbolRegistry,
@@ -442,6 +443,7 @@ pub fn generate(
             }
         }
     }
+    fold_branch_values(&mut script.body, returns);
     script.body = reconstruct(&script.body, &references, None);
     let mut referenced = HashMap::new();
     collect_references(&script.body, &mut referenced);
@@ -450,31 +452,29 @@ pub fn generate(
     let mut arrays = BTreeMap::new();
     restore_arrays(&mut script.body, &mut arrays);
     fold_stack(&mut script.body, returns);
-    if let Some((&last, _)) = arrays.last_key_value() {
-        let defined_first = last == 0 && script.body.iter().find(|statement| statement_uses(statement,"array0")
-            || matches!(statement, Statement::ArrayDeclaration { name, .. } if name == "array0"))
-            .is_some_and(|statement| matches!(statement, Statement::ArrayDeclaration { .. }));
-        if !defined_first {
-            for id in (0..=last).rev() {
-                script.body.insert(
-                    0,
-                    Statement::ArrayDeclaration {
-                        element_type: arrays.get(&id).copied().unwrap_or(Type::Int),
-                        name: format!("array{id}"),
-                        size: Expr::NullLiteral,
-                        line: 0,
-                    },
-                );
-            }
+    // An array read before anything defines it came in as a parameter.
+    for (&id, &element) in arrays.iter().rev() {
+        let name = format!("array{id}");
+        let defined = script.body.iter().find(|statement| {
+            statement_uses(statement, &name)
+                || matches!(statement, Statement::ArrayDeclaration { name: declared, .. } if *declared == name)
+        });
+        if !defined.is_some_and(|statement| matches!(statement, Statement::ArrayDeclaration { .. }))
+        {
+            script.body.insert(
+                0,
+                Statement::ArrayDeclaration {
+                    element_type: locals.get(&name).copied().unwrap_or(element),
+                    name,
+                    size: Expr::NullLiteral,
+                    line: 0,
+                },
+            );
         }
     }
     merge_declarations(&mut script.body);
     if let Some(Statement::Return { values, .. }) = script.body.last()
-        && (script.return_types.is_empty()
-            || !matches!(
-                script.body.iter().rev().nth(1),
-                Some(Statement::Return { .. })
-            ))
+        && !keep_end
         && values.len() == script.return_types.len()
         && values
             .iter()
@@ -493,11 +493,19 @@ pub fn generate(
         script.body.pop();
     }
     inference::format_literals(script, names, registry);
-    rename_locals(script, local_counts);
+    declare_array_params(script);
+    rename_locals(script);
     let params = script
         .params
         .iter()
-        .map(|param| format!("{} ${}", param.param_type.name(), param.name))
+        .map(|param| {
+            let ty = if param.param_type == Type::IntArray {
+                param.name.trim_end_matches(|ch: char| ch.is_ascii_digit())
+            } else {
+                param.param_type.declared_name()
+            };
+            format!("{ty} ${}", param.name)
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let mut out = format!("[{},{}]", script.trigger, script.name);
@@ -511,7 +519,7 @@ pub fn generate(
             script
                 .return_types
                 .iter()
-                .map(Type::name)
+                .map(Type::declared_name)
                 .collect::<Vec<_>>()
                 .join(", ")
         )?;
@@ -521,7 +529,41 @@ pub fn generate(
     Ok(out)
 }
 
-fn rename_locals(script: &mut ScriptDeclaration, local_counts: [u16; 3]) {
+/// An array with no size of its own is the int parameter of its number.
+fn declare_array_params(script: &mut ScriptDeclaration) {
+    let mut declared = Vec::new();
+    script.body.retain(|statement| {
+        if let Statement::ArrayDeclaration {
+            name,
+            element_type,
+            size: Expr::NullLiteral,
+            ..
+        } = statement
+        {
+            declared.push((name.clone(), *element_type));
+            false
+        } else {
+            true
+        }
+    });
+    for (name, element) in declared {
+        let id = name.strip_prefix("array").unwrap_or_default();
+        if let Some(param) = script
+            .params
+            .iter_mut()
+            .find(|param| param.name == format!("int{id}"))
+        {
+            param.param_type = Type::IntArray;
+            param.name = name;
+            param.value_type = Some(element);
+        }
+    }
+}
+
+fn rename_locals(script: &mut ScriptDeclaration) {
+    fn array_name(name: &str, element: Type) -> String {
+        format!("{}{name}", element.name())
+    }
     fn renamed(name: &str, ty: Type) -> String {
         for base in ["int", "string", "long"] {
             if let Some(slot) = name
@@ -538,6 +580,11 @@ fn rename_locals(script: &mut ScriptDeclaration, local_counts: [u16; 3]) {
             match statement {
                 Statement::VarDeclaration { name, var_type, .. } => {
                     names.insert(name.clone(), renamed(name, *var_type));
+                }
+                Statement::ArrayDeclaration {
+                    name, element_type, ..
+                } => {
+                    names.insert(name.clone(), array_name(name, *element_type));
                 }
                 Statement::If {
                     body,
@@ -573,7 +620,13 @@ fn rename_locals(script: &mut ScriptDeclaration, local_counts: [u16; 3]) {
                     *name = new.clone();
                 }
             }
-            Expr::Calc(value) | Expr::ArrayAccess { index: value, .. } => expr(value, names),
+            Expr::ArrayAccess { name, index } => {
+                if let Some(new) = names.get(name) {
+                    *name = new.clone();
+                }
+                expr(index, names);
+            }
+            Expr::Calc(value) => expr(value, names),
             Expr::BinaryOp { lhs, rhs, .. } | Expr::LogicalOp { lhs, rhs, .. } => {
                 expr(lhs, names);
                 expr(rhs, names);
@@ -611,8 +664,13 @@ fn rename_locals(script: &mut ScriptDeclaration, local_counts: [u16; 3]) {
                     expr(target, names);
                     expr(value, names);
                 }
-                Statement::Expression { expr: value, .. }
-                | Statement::ArrayDeclaration { size: value, .. } => expr(value, names),
+                Statement::ArrayDeclaration { name, size, .. } => {
+                    if let Some(new) = names.get(name) {
+                        *name = new.clone();
+                    }
+                    expr(size, names);
+                }
+                Statement::Expression { expr: value, .. } => expr(value, names),
                 Statement::Return { values, .. } => {
                     for value in values {
                         expr(value, names);
@@ -663,19 +721,13 @@ fn rename_locals(script: &mut ScriptDeclaration, local_counts: [u16; 3]) {
     }
     let mut names = HashMap::new();
     for param in &script.params {
-        let name = renamed(&param.name, param.param_type);
+        let name = match param.value_type {
+            Some(element) => array_name(&param.name, element),
+            None => renamed(&param.name, param.param_type),
+        };
         names.insert(param.name.clone(), name);
     }
     collect(&script.body, &mut names);
-    for (base, count) in ["int", "string", "long"].into_iter().zip(local_counts) {
-        if count == 1
-            && let Some(value) = names.get_mut(&format!("{base}0"))
-        {
-            *value = value
-                .trim_end_matches(|ch: char| ch.is_ascii_digit())
-                .to_owned();
-        }
-    }
     for param in &mut script.params {
         param.name = names[&param.name].clone();
     }
@@ -903,7 +955,6 @@ fn merge_declarations(body: &mut Vec<Statement>) {
                         ..
                     } = &statement
                         && target == name
-                        && !uses(value, name)
                     {
                         *initial = Some(value.clone());
                         statement = Statement::Empty;
@@ -1057,6 +1108,32 @@ fn inline_prefix(expr: &mut Expr, values: &[Expr], count: usize) -> bool {
             inline_prefix(value, values, count)
         }
         _ => false,
+    }
+}
+
+/// What a branch compares can take several values at once, like a call's. In
+/// the branch by now, conditions read as the single expression they are.
+fn fold_branch_values(body: &mut Vec<Statement>, returns: &HashMap<String, usize>) {
+    let mut i = 0;
+    while i + 1 < body.len() {
+        if let Some(values) = call(&body[i], "__push")
+            && let Statement::Expression {
+                expr: Expr::CommandCall { name, args, .. },
+                ..
+            } = &mut body[i + 1]
+            && name == "__branch"
+            && args.len() > 2
+        {
+            let count = values.iter().map(|value| value_count(value, returns)).sum();
+            let mut compared = args.split_off(2);
+            let inlined = inline_values(&mut compared, &values, count);
+            args.extend(compared);
+            if inlined {
+                body.remove(i);
+                continue;
+            }
+        }
+        i += 1;
     }
 }
 
@@ -1252,7 +1329,7 @@ fn emit(out: &mut String, statements: &[Statement], depth: usize) -> Result<()> 
                 value,
                 ..
             } => {
-                write!(out, "def_{} ${name}", var_type.name())?;
+                write!(out, "def_{} ${name}", var_type.declared_name())?;
                 if let Some(value) = value {
                     write!(out, " = {}", expression(value)?)?;
                 }
@@ -1312,11 +1389,11 @@ fn emit(out: &mut String, statements: &[Statement], depth: usize) -> Result<()> 
                     if index == *default_index
                         && let Some(body) = default
                     {
-                        writeln!(out, "{indent}    case default:")?;
+                        writeln!(out, "{indent}    case default :")?;
                         emit(out, body, depth + 2)?;
                     }
                     if let Some(case) = cases.get(index) {
-                        writeln!(out, "{indent}    case {}:", expressions(&case.values)?)?;
+                        writeln!(out, "{indent}    case {} :", expressions(&case.values)?)?;
                         emit(out, &case.body, depth + 2)?;
                     }
                 }
@@ -1329,7 +1406,7 @@ fn emit(out: &mut String, statements: &[Statement], depth: usize) -> Result<()> 
     Ok(())
 }
 
-fn expressions(values: &[Expr]) -> Result<String> {
+pub(super) fn expressions(values: &[Expr]) -> Result<String> {
     Ok(values
         .iter()
         .map(expression)
@@ -1364,13 +1441,51 @@ fn literal_string(value: &str) -> String {
     }
 }
 
+/// A string a component's hook holds whole: its tags stay as they are written.
+pub(super) fn hook_string(value: &str) -> String {
+    if value == "null" || value == "event_opbase" {
+        return value.to_owned();
+    }
+    let text = format!("\"{}\"", escape_string(value));
+    let literal = match parse_string(&text) {
+        Some(Expr::StringLiteral(parsed)) => parsed == value,
+        Some(Expr::JoinedString { parts }) => {
+            let mut parsed = String::new();
+            parts.iter().all(|part| match part {
+                StringPart::Literal(part) => {
+                    parsed.push_str(part);
+                    true
+                }
+                StringPart::Expr(_) => false,
+            }) && parsed == value
+        }
+        _ => false,
+    };
+    if literal {
+        text
+    } else {
+        format!("\"{}\"", escape_string(value).replace('<', "\\<"))
+    }
+}
+
 fn joined_string(args: &[Expr]) -> Result<String> {
     let mut text = String::from("\"");
+    let mut previous: Option<&str> = None;
     for arg in args {
         if let Expr::StringLiteral(value) = arg {
-            text.push_str(&escape_string(value));
+            // A tag ends a piece of text by itself: a number only needs marking without one.
+            if previous.is_some_and(|text| !text.ends_with('>'))
+                && !value.is_empty()
+                && value.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                write!(text, "<{value}>")?;
+            } else {
+                text.push_str(&escape_string(value));
+            }
+            previous = Some(value);
         } else {
-            write!(text, "<{}>", escape_string(&expression(arg)?))?;
+            write!(text, "<{}>", expression(arg)?)?;
+            previous = None;
         }
     }
     text.push('"');
@@ -1397,21 +1512,28 @@ fn arithmetic(expr: &Expr, parent: u8) -> Result<String> {
         return arithmetic(expr, parent);
     }
     let node = match expr {
+        Expr::LogicalOp { op, lhs, rhs, .. } => Some(if *op == LogicOp::And {
+            ("&", 2, lhs.as_ref(), rhs.as_ref())
+        } else {
+            ("|", 1, lhs.as_ref(), rhs.as_ref())
+        }),
         Expr::BinaryOp { op, lhs, rhs } => match op {
-            BinOp::Add => Some(("+", 1, lhs.as_ref(), rhs.as_ref())),
-            BinOp::Sub => Some(("-", 1, lhs.as_ref(), rhs.as_ref())),
-            BinOp::Mul => Some(("*", 2, lhs.as_ref(), rhs.as_ref())),
-            BinOp::Div => Some(("/", 2, lhs.as_ref(), rhs.as_ref())),
-            BinOp::Mod => Some(("%", 2, lhs.as_ref(), rhs.as_ref())),
+            BinOp::Add => Some(("+", 3, lhs.as_ref(), rhs.as_ref())),
+            BinOp::Sub => Some(("-", 3, lhs.as_ref(), rhs.as_ref())),
+            BinOp::Mul => Some(("*", 4, lhs.as_ref(), rhs.as_ref())),
+            BinOp::Div => Some(("/", 4, lhs.as_ref(), rhs.as_ref())),
+            BinOp::Mod => Some(("%", 4, lhs.as_ref(), rhs.as_ref())),
             _ => None,
         },
         Expr::CommandCall { name, args, .. } => {
             let op = match name.as_str() {
-                "add" => Some(("+", 1)),
-                "sub" => Some(("-", 1)),
-                "multiply" => Some(("*", 2)),
-                "divide" => Some(("/", 2)),
-                "modulo" => Some(("%", 2)),
+                "or" => Some(("|", 1)),
+                "and" => Some(("&", 2)),
+                "add" => Some(("+", 3)),
+                "sub" => Some(("-", 3)),
+                "multiply" => Some(("*", 4)),
+                "divide" => Some(("/", 4)),
+                "modulo" => Some(("%", 4)),
                 _ => None,
             };
             if let (Some((op, prec)), [lhs, rhs]) = (op, args.as_slice()) {
@@ -1449,7 +1571,7 @@ fn condition_text(expr: &Expr, parent: u8) -> Result<String> {
     let text = format!(
         "{} {op} {}",
         condition_text(lhs, prec)?,
-        condition_text(rhs, prec + 1)?
+        condition_text(rhs, prec)?
     );
     Ok(if prec < parent {
         format!("({text})")
@@ -1470,6 +1592,7 @@ fn expression(expr: &Expr) -> Result<String> {
             value & 0x3f
         ),
         Expr::LongLiteral(value) => format!("{value}L"),
+        Expr::StringLiteral(value) if value == "null" || value == "event_opbase" => value.clone(),
         Expr::StringLiteral(value) => literal_string(value),
         Expr::BoolLiteral(value) => value.to_string(),
         Expr::NullLiteral => "null".into(),
@@ -1505,7 +1628,10 @@ fn expression(expr: &Expr) -> Result<String> {
                 return joined_string(args);
             }
             if name == "__hook" {
-                let mut text = format!("{}({})", expression(&args[0])?, expression(&args[1])?);
+                let mut text = expression(&args[0])?;
+                if !matches!(&args[1], Expr::Tuple(values) if values.is_empty()) {
+                    write!(text, "({})", expression(&args[1])?)?;
+                }
                 if let Some(transmits) = args.get(2) {
                     write!(text, "{{{}}}", expression(transmits)?)?;
                 }
@@ -1517,6 +1643,8 @@ fn expression(expr: &Expr) -> Result<String> {
                 "multiply" => Some("*"),
                 "divide" => Some("/"),
                 "modulo" => Some("%"),
+                "and" => Some("&"),
+                "or" => Some("|"),
                 _ => None,
             };
             if op.is_some() && args.len() == 2 {

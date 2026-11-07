@@ -50,7 +50,7 @@ fn client_frame_defaults_keep_explicit_initializers_and_loop_resets() {
             .iter()
             .filter(|&&op| op == Opcode::Return)
             .count(),
-        1
+        2
     );
     let server = Compiler::new(&registry).compile_script(&file.scripts[0]);
     let stores: Vec<_> = server

@@ -125,6 +125,24 @@ pub fn editor_project(
     let mut files = sources::config_files(&dir);
     if let Some(pack) = &pack {
         symloader::collect_all_files(pack, &mut files);
+        // Interfaces, world maps and defaults live beside the scripts they're for.
+        if let Some(content) = pack.parent() {
+            for (folder, extension) in [
+                ("interfaces", "if3"),
+                ("worldmap_data", "wma"),
+                ("defaults", "defaults"),
+            ] {
+                let Ok(entries) = fs::read_dir(content.join(folder)) else {
+                    continue;
+                };
+                files.extend(
+                    entries
+                        .flatten()
+                        .map(|entry| entry.path())
+                        .filter(|path| path.extension().is_some_and(|ext| ext == extension)),
+                );
+            }
+        }
     }
     files.sort();
     files.dedup();
@@ -151,23 +169,8 @@ pub(crate) fn config_kind(path: &Path) -> Option<String> {
     if matches!(extension, "pack" | "order" | "hashes") {
         return Some(format!("pack:{}", path.file_stem()?.to_str()?));
     }
-    (matches!(
-        extension,
-        "constant"
-            | "if"
-            | "flo"
-            | "flu"
-            | "anim"
-            | "varc"
-            | "varcstr"
-            | "mel"
-            | "bas"
-            | "cursor"
-            | "light"
-            | "msi"
-            | "quest"
-            | "varclansetting"
-    ) || types::Type::from_name(extension).is_some()
+    (matches!(extension, "constant" | "if" | "if3" | "defaults" | "anim")
+        || types::Type::from_name(extension).is_some()
         || extension
             .strip_prefix("config")
             .is_some_and(|number| number.parse::<u32>().is_ok()))

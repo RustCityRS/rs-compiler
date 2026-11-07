@@ -4,14 +4,16 @@ use super::structure;
 use crate::bytecode::Opcode;
 use crate::clientscript::decode::Script;
 use crate::clientscript::decode::is_branch;
+use crate::clientscript::hooks::{self, HookValue};
 use crate::clientscript::{self, Command, CommandKind};
 use crate::parser::Expr;
-use crate::symbol::SymbolRegistry;
+use crate::symbol::{SymbolKind, SymbolRegistry};
 use crate::types::{BaseVarType, Type};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write;
 use std::path::Path;
+use std::slice::from_ref;
 
 #[derive(Clone, Default)]
 pub struct Signature {
@@ -20,6 +22,10 @@ pub struct Signature {
     pub param_types: Vec<Type>,
     pub return_types: Vec<Type>,
     pub locals: HashMap<String, Type>,
+    /// The stack of each parameter in order, when a caller shows it.
+    pub order: Option<Vec<BaseVarType>>,
+    /// The stack of each return value in order, as the script's end pushes them.
+    pub return_order: Vec<BaseVarType>,
 }
 
 fn types(counts: [usize; 3], inferred: &[Type]) -> Vec<Type> {
@@ -35,12 +41,21 @@ fn types(counts: [usize; 3], inferred: &[Type]) -> Vec<Type> {
 
 pub fn infer_signatures(
     scripts: &HashMap<u32, Script>,
+    component_hooks: &[Vec<HookValue>],
     names: &dyn Names,
     params: &HashMap<i32, bool>,
     commands: &[Command],
     registry: &mut SymbolRegistry,
 ) -> Result<HashMap<u32, Signature>> {
     let mut signatures = signatures(scripts);
+    // A variable is a boolean by being used as one, whatever it declares.
+    for symbol in registry.game_vars.values_mut() {
+        if let SymbolKind::GameVar { var_type, .. } = &mut symbol.kind
+            && *var_type == Type::Boolean
+        {
+            *var_type = Type::Int;
+        }
+    }
     let ids = scripts
         .keys()
         .map(|&id| (script_key(names, id), id as i32))
@@ -64,13 +79,28 @@ pub fn infer_signatures(
         clientscript::register(&file, &ids, registry)?;
         files.push((id, file));
     }
-    let mut inferred = inference::infer(&files, registry);
+    let (mut inferred, vars) = inference::infer(&files, component_hooks, registry);
+    for (name, ty) in vars {
+        if let Some(SymbolKind::GameVar { var_type, .. }) = registry
+            .game_vars
+            .get_mut(&name)
+            .map(|symbol| &mut symbol.kind)
+        {
+            *var_type = ty;
+        }
+    }
     for (id, mut file) in files {
         let info = inferred.remove(&id).unwrap();
         let signature = signatures.get_mut(&id).unwrap();
         signature.param_types = info.params;
         signature.return_types = info.returns;
         signature.locals = info.locals;
+        signature.order = info.order.filter(|order| {
+            let count = |kind: BaseVarType| order.iter().filter(|ty| **ty == kind).count();
+            count(BaseVarType::Integer) == signature.params[0]
+                && count(BaseVarType::String) == signature.params[1]
+                && count(BaseVarType::Long) == signature.params[2]
+        });
         for base in ["int", "string", "long"] {
             if let Some(ty) = signature.locals.remove(base) {
                 signature.locals.insert(format!("{base}0"), ty);
@@ -87,6 +117,51 @@ pub fn infer_signatures(
         clientscript::register(&file, &ids, registry)?;
     }
     Ok(signatures)
+}
+
+/// How an interface writes a component's hook: `script(args){transmits}`.
+pub fn component_hook_text(
+    values: &[HookValue],
+    transmits: Option<(&str, &[i32])>,
+    signatures: &HashMap<u32, Signature>,
+    names: &dyn Names,
+    registry: &SymbolRegistry,
+) -> Result<String> {
+    let Some(HookValue::Int(script)) = values.first() else {
+        bail!("A hook must start with its script");
+    };
+    let script = u32::try_from(*script).context("Hook with a negative script")?;
+    let mut text = script_name(names, script);
+    if values.len() > 1 {
+        let mut ints = signatures
+            .get(&script)
+            .map_or(&[][..], |signature| signature.param_types.as_slice())
+            .iter()
+            .filter(|ty| ty.base_type() == BaseVarType::Integer);
+        let args = values[1..]
+            .iter()
+            .map(|value| {
+                Ok(match value {
+                    HookValue::Int(value) => structure::expressions(&[inference::hook_literal(
+                        *value,
+                        ints.next().copied(),
+                        names,
+                        registry,
+                    )])?,
+                    HookValue::String(value) => structure::hook_string(value),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        write!(text, "({})", args.join(", "))?;
+    }
+    if let Some((kind, list)) = transmits {
+        let list: Vec<_> = list
+            .iter()
+            .map(|&id| hooks::transmit_name(registry, kind, id).unwrap_or_else(|| id.to_string()))
+            .collect();
+        write!(text, "{{{}}}", list.join(", "))?;
+    }
+    Ok(text)
 }
 
 pub fn script_name(names: &dyn Names, id: u32) -> String {
@@ -116,6 +191,7 @@ pub fn signatures(scripts: &HashMap<u32, Script>) -> HashMap<u32, Signature> {
         .iter()
         .map(|(&id, script)| {
             let mut returns = [0; 3];
+            let mut return_order = Vec::new();
             for &opcode in script.operations.iter().rev().skip(1) {
                 let kind = match opcode {
                     Opcode::PushConstantInt | Opcode::PushIntLocal => 0,
@@ -124,6 +200,10 @@ pub fn signatures(scripts: &HashMap<u32, Script>) -> HashMap<u32, Signature> {
                     _ => break,
                 };
                 returns[kind] += 1;
+                return_order.insert(
+                    0,
+                    [BaseVarType::Integer, BaseVarType::String, BaseVarType::Long][kind],
+                );
             }
             (
                 id,
@@ -134,6 +214,7 @@ pub fn signatures(scripts: &HashMap<u32, Script>) -> HashMap<u32, Signature> {
                         script.long_param_count as usize,
                     ],
                     returns,
+                    return_order,
                     ..Signature::default()
                 },
             )
@@ -188,7 +269,7 @@ pub fn decompile(
         .get(&id)
         .with_context(|| format!("Missing signature for script {id}"))?;
     if !sig.param_types.is_empty() && sig.param_types.len() != sig.params.iter().sum::<usize>() {
-        anyhow::bail!("Parameter types do not match stack counts for script {id}");
+        bail!("Parameter types do not match stack counts for script {id}");
     }
     let mut dc = Decompiler {
         names,
@@ -226,7 +307,7 @@ pub fn decompile(
     if labels.contains(&script.operations.len()) {
         writeln!(dc.body, "__label(L{});", script.operations.len())?;
     }
-    anyhow::ensure!(
+    ensure!(
         script.name.is_empty(),
         "Named bytecode requires an explicit source name"
     );
@@ -234,16 +315,50 @@ pub fn decompile(
     let base_names = ["int", "string", "long"];
     let mut params = Vec::new();
     let param_types = types(sig.params, &sig.param_types);
-    let mut param_types = param_types.iter();
-    for (kind, ty) in base_names.iter().enumerate() {
-        for i in 0..sig.params[kind] {
-            params.push(format!("{} ${ty}{i}", param_types.next().unwrap().name()));
-        }
+    let mut by_stack: [Vec<Type>; 3] = Default::default();
+    for ty in &param_types {
+        by_stack[counts(from_ref(ty))
+            .iter()
+            .position(|&count| count == 1)
+            .unwrap()]
+        .push(*ty);
     }
-    let returns: Vec<_> = types(sig.returns, &sig.return_types)
-        .into_iter()
-        .map(|ty| ty.name())
-        .collect();
+    let order: Vec<usize> = match &sig.order {
+        Some(order) => order
+            .iter()
+            .map(|kind| match kind {
+                BaseVarType::Integer => 0,
+                BaseVarType::String => 1,
+                BaseVarType::Long => 2,
+            })
+            .collect(),
+        None => (0..3)
+            .flat_map(|kind| vec![kind; sig.params[kind]])
+            .collect(),
+    };
+    let mut slots = [0; 3];
+    for kind in order {
+        let slot = slots[kind];
+        slots[kind] += 1;
+        // An array parameter is declared by generate: here it's an int.
+        let ty = match by_stack[kind][slot] {
+            Type::IntArray => "int",
+            ty => ty.name(),
+        };
+        params.push(format!("{ty} ${}{slot}", base_names[kind]));
+    }
+    let returns: Vec<_> = if sig.return_types.is_empty() {
+        sig.return_order
+            .iter()
+            .map(|kind| match kind {
+                BaseVarType::Integer => "int",
+                BaseVarType::String => "string",
+                BaseVarType::Long => "long",
+            })
+            .collect()
+    } else {
+        sig.return_types.iter().map(Type::name).collect()
+    };
     out.push_str(&params.join(", "));
     out.push(')');
     if !returns.is_empty() {
@@ -286,13 +401,11 @@ pub fn decompile(
             returns.insert(command.name.clone(), command.returns.len());
         }
     }
+    // Until its types are known, a script's end still shows what they are.
     structure::generate(
         &out,
-        [
-            script.local_int_count,
-            script.local_string_count,
-            script.local_long_count,
-        ],
+        &sig.locals,
+        sig.return_types.is_empty() && !sig.return_order.is_empty(),
         &returns,
         names,
         registry,
@@ -339,8 +452,8 @@ impl Decompiler<'_> {
         let Some(id) = value.int else {
             return;
         };
-        if hook && let Some(name) = self.registry.integer_constant_name(id, "event_") {
-            value.text = format!("^{name}");
+        if hook && let Some(name) = inference::event_name(id, self.registry) {
+            value.text = name.to_owned();
             return;
         }
         if ty == Type::ClientScript && id >= 0 && !self.signatures.contains_key(&(id as u32)) {
@@ -471,12 +584,12 @@ impl Decompiler<'_> {
             }
             Opcode::PushVarp => Some((variable("varp"), 0)),
             Opcode::PushVarbit => Some((variable("varbit"), 0)),
-            Opcode::PushVarcInt => Some((variable("varc_int"), 0)),
-            Opcode::PushVarcString => Some((variable("varc_string"), 1)),
-            Opcode::PushClanSettingInt => Some((variable("clansetting_int"), 0)),
-            Opcode::PushClanSettingVarbit => Some((variable("clansetting_varbit"), 0)),
-            Opcode::PushClanSettingLong => Some((variable("clansetting_long"), 2)),
-            Opcode::PushClanSettingString => Some((variable("clansetting_string"), 1)),
+            Opcode::PushVarcInt => Some((variable("varc"), 0)),
+            Opcode::PushVarcString => Some((variable("varcs"), 1)),
+            Opcode::PushClanSettingInt => Some((variable("varclansetting"), 0)),
+            Opcode::PushClanSettingVarbit => Some((variable("varclansetting"), 0)),
+            Opcode::PushClanSettingLong => Some((variable("varclansetting"), 2)),
+            Opcode::PushClanSettingString => Some((variable("varclansetting"), 1)),
             Opcode::PushIntLocal => Some((local(0), 0)),
             Opcode::PushStringLocal => Some((local(1), 1)),
             Opcode::PushLongLocal => Some((local(2), 2)),
@@ -504,8 +617,8 @@ impl Decompiler<'_> {
                 let (target, kind) = match opcode {
                     Opcode::PopVarp => (variable("varp"), 0),
                     Opcode::PopVarbit => (variable("varbit"), 0),
-                    Opcode::PopVarcInt => (variable("varc_int"), 0),
-                    Opcode::PopVarcString => (variable("varc_string"), 1),
+                    Opcode::PopVarcInt => (variable("varc"), 0),
+                    Opcode::PopVarcString => (variable("varcs"), 1),
                     Opcode::PopIntLocal => (local(0), 0),
                     Opcode::PopStringLocal => (local(1), 1),
                     _ => (local(2), 2),
@@ -712,6 +825,23 @@ impl Decompiler<'_> {
                     &types,
                     matches!(command.kind, CommandKind::Hook | CommandKind::HookComponent),
                 );
+                let type_args = match command.kind {
+                    CommandKind::Enum => 2,
+                    CommandKind::EnumOutput => 1,
+                    _ => 0,
+                };
+                if type_args > 0 {
+                    // These say what the enum maps between, as types.
+                    for arg in args.iter_mut().take(type_args) {
+                        if let Some(ty) = arg
+                            .int
+                            .and_then(|value| char::from_u32(value as u32))
+                            .and_then(Type::from_char)
+                        {
+                            arg.text = ty.name().to_owned();
+                        }
+                    }
+                }
                 self.expression(
                     format!(
                         "{name}({})",

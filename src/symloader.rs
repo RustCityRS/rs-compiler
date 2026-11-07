@@ -305,7 +305,27 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) {
     // e.g. "stafforb" is in struct.pack (id=45) AND obj.pack (id=567);
     //      obj.pack wins so inv_add(..., stafforb, ...) resolves to 567.
     for (file, type_hint) in &[
-        // Lowest priority — category overridden by UI types, synth, and all above
+        // Lowest priority — tables scripts rarely name, then category overridden
+        // by UI types, synth, and all above
+        ("area.pack", Type::Area),
+        ("bas.pack", Type::Bas),
+        ("billboard.pack", Type::Billboard),
+        ("particleeffector.pack", Type::ParticleEffector),
+        ("particleemitter.pack", Type::ParticleEmitter),
+        ("cursor.pack", Type::Cursor),
+        ("flo.pack", Type::Flo),
+        ("flu.pack", Type::Flu),
+        ("hitmark.pack", Type::Hitmark),
+        ("itemcode.pack", Type::ItemCode),
+        ("light.pack", Type::Light),
+        ("mel.pack", Type::MapElement),
+        ("msi.pack", Type::Msi),
+        ("quest.pack", Type::Quest),
+        ("varclan.pack", Type::VarClan),
+        ("varcon.pack", Type::VarCon),
+        ("config44.pack", Type::Config44),
+        ("varnbit.pack", Type::VarNBit),
+        ("varobj.pack", Type::VarObj),
         ("category.pack", Type::Category),
         // UI types (override category)
         ("idk.pack", Type::IdKit),
@@ -321,7 +341,7 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) {
         ("model.pack", Type::Model),
         ("sprites.pack", Type::Graphic),
         ("texture.pack", Type::Texture),
-        ("maparea.pack", Type::MapArea),
+        ("wma.pack", Type::MapArea),
         ("mapelement.pack", Type::MapElement),
         ("fontmetrics.pack", Type::FontMetrics),
         ("chatcat.pack", Type::ChatCat),
@@ -1128,6 +1148,14 @@ fn register_type_chars(registry: &mut SymbolRegistry) {
     ];
     for (name, val) in type_chars {
         registry.type_chars.insert(name.to_string(), *val);
+    }
+    for ch in Type::CHARS.chars() {
+        if let Some(ty) = Type::from_char(ch) {
+            registry
+                .type_chars
+                .entry(ty.name().to_string())
+                .or_insert(ch as i32);
+        }
     }
 }
 

@@ -515,7 +515,7 @@ impl Server {
             self.request_id += 1;
             write_message(
                 output,
-                json!({"jsonrpc":"2.0","id":format!("runec/watch/{}",self.request_id),"method":"client/registerCapability","params":{"registrations":[{"id":"runec/files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.{rs2,cs2,gs2,pack,constant,obj,npc,loc,inv,enum,struct,param,dbtable,dbrow,varp,varn,vars,varbit,varc,varcstr,seq,spotanim,mesanim,hunt,if,interface,idk,flo,flu,anim,mel,order,hashes,config*}","kind":7}]}}]}}),
+                json!({"jsonrpc":"2.0","id":format!("runec/watch/{}",self.request_id),"method":"client/registerCapability","params":{"registrations":[{"id":"runec/files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.{rs2,cs2,gs2,pack,constant,obj,npc,loc,inv,enum,struct,param,dbtable,dbrow,varp,varn,vars,varbit,varc,seq,spotanim,mesanim,hunt,if,interface,idk,flo,flu,anim,mel,order,hashes,config*}","kind":7}]}}]}}),
             )?;
         }
         let result = if method == "workspace/executeCommand" && self.apply_supported {
@@ -698,7 +698,15 @@ impl Server {
             "textDocument/didOpen" => {
                 let doc = &params["textDocument"];
                 let uri = field(doc, "uri")?;
-                let config = config_kind(Path::new(uri));
+                let config = config_kind(Path::new(uri)).or_else(|| {
+                    (doc["languageId"] == "rs2config").then(|| {
+                        Path::new(uri)
+                            .extension()
+                            .and_then(|extension| extension.to_str())
+                            .unwrap_or("config")
+                            .to_string()
+                    })
+                });
                 let scope = if config.is_some() {
                     self.source(params)
                         .ok()
@@ -939,7 +947,8 @@ impl Server {
             }
             "textDocument/diagnostic" => {
                 let label = document.label.clone();
-                let analysis = self.project.check();
+                let mut analysis = self.project.check();
+                analysis.diagnostics.merge(self.project.config_diagnostics());
                 let document = self.project.document(source).unwrap();
                 json!({"kind":"full","items":analysis.diagnostics.diagnostics().iter().filter(|d|d.file==label).map(|d|json!({"range":self.range(source,document.lines.diagnostic_range(&document.text,d.line,d.column)),"message":d.message,"source":"runec","code":d.code(),"severity":if d.severity==Severity::Error{1}else{2}})).collect::<Vec<_>>()})
             }
@@ -1124,10 +1133,17 @@ impl Server {
         Ok(())
     }
 
-    fn publish_analysis(&mut self, analysis: Analysis, output: &mut impl Write) -> io::Result<()> {
+    fn publish_analysis(
+        &mut self,
+        mut analysis: Analysis,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
         if analysis.cancelled {
             return Ok(());
         }
+        analysis
+            .diagnostics
+            .merge(self.project.config_diagnostics());
         let current = self
             .project
             .documents()
