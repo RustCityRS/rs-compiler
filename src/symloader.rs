@@ -8,6 +8,7 @@ use std::path::Path;
 
 use tracing::{info, warn};
 
+use crate::clientscript::{self, hooks};
 use crate::symbol::{SymbolKind, SymbolRegistry};
 use crate::types::Type;
 
@@ -169,7 +170,7 @@ fn load_script_pack(registry: &mut SymbolRegistry, path: &Path) {
 }
 
 /// Generate/update script.pack from .rs2 files, matching 2004scape's regenScriptPack().
-/// Scans all [trigger,name] declarations, preserves existing IDs, assigns new ones.
+/// Scans all `[trigger,name]` declarations, preserves existing IDs, assigns new ones.
 pub fn generate_script_pack(
     scripts_dir: &Path,
     pack_dir: &Path,
@@ -204,9 +205,7 @@ pub fn generate_script_pack(
     }
 
     // Scan .rs2 files for [trigger,name] declarations
-    let mut rs2_files = Vec::new();
-    collect_rs2_files(scripts_dir, &mut rs2_files);
-    rs2_files.sort();
+    let rs2_files = crate::sources::script_files(scripts_dir, "rs2").unwrap_or_default();
 
     for path in &rs2_files {
         // Skip engine.rs2 (command signatures, not compiled scripts)
@@ -271,31 +270,6 @@ pub fn generate_script_pack(
     }
 }
 
-fn collect_rs2_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    // Keep each entry's file-type (free from the directory enumeration)
-    // alongside its path so the recursion avoids a metadata syscall per entry,
-    // while still sorting by path to preserve the previous traversal order.
-    let mut sorted: Vec<(std::path::PathBuf, bool)> = entries
-        .flatten()
-        .map(|e| {
-            let p = e.path();
-            let is_dir = entry_is_dir(&e, &p);
-            (p, is_dir)
-        })
-        .collect();
-    sorted.sort_by(|a, b| a.0.cmp(&b.0));
-    for (path, is_dir) in sorted {
-        if is_dir {
-            collect_rs2_files(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs2") {
-            out.push(path);
-        }
-    }
-}
-
 /// Load all .pack files from `pack_dir` into `registry`.
 ///
 /// Pack files use 2004scape format: `id=name` (one per line).
@@ -345,11 +319,18 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) {
         ("param.pack", Type::Param),
         // Audio / animation / model types (medium priority)
         ("model.pack", Type::Model),
+        ("sprites.pack", Type::Graphic),
+        ("texture.pack", Type::Texture),
+        ("maparea.pack", Type::MapArea),
+        ("mapelement.pack", Type::MapElement),
         ("fontmetrics.pack", Type::FontMetrics),
+        ("chatcat.pack", Type::ChatCat),
+        ("chatphrase.pack", Type::ChatPhrase),
         ("mesanim.pack", Type::MesAnim),
         ("jingle.pack", Type::Jingle),
         ("midi.pack", Type::Midi),
         ("synth.pack", Type::Synth),
+        ("vorbis.pack", Type::Vorbis),
         ("spotanim.pack", Type::Spotanim),
         ("seq.pack", Type::Seq),
         // Core game entity types (highest priority — overwrite everything above)
@@ -394,7 +375,7 @@ pub fn load_script_ids(registry: &mut SymbolRegistry, pack_dir: &Path) {
 
 /// Load clientscript.pack: `id=[clientscript,name]` — registers CS2 script IDs
 /// directly so server-side RS2 can reference them by name
-/// (e.g. `runclientscript(playerdesign4_open_name_entry)` resolves to 3943).
+/// (e.g. `runclientscript("playerdesign4_open_name_entry()")` resolves to 3943).
 fn load_clientscript_pack(registry: &mut SymbolRegistry, path: &Path) {
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
@@ -418,18 +399,45 @@ fn load_clientscript_pack(registry: &mut SymbolRegistry, path: &Path) {
             continue;
         }
         let inner = &rest[1..rest.len() - 1];
-        let (_trigger, name) = match inner.split_once(',') {
+        let (trigger, name) = match inner.split_once(',') {
             Some(pair) => pair,
             None => continue,
         };
         if name.is_empty() {
             continue;
         }
-        registry.script_ids.insert(name.to_string(), id);
-        registry
-            .trigger_script_ids
-            .insert(format!("clientscript:{}", name), id);
+        if trigger == "clientscript" {
+            registry.script_ids.insert(name.to_string(), id);
+            registry
+                .trigger_script_ids
+                .insert(format!("clientscript:{name}"), id);
+        } else {
+            registry.script_ids.entry(name.to_string()).or_insert(id);
+            registry
+                .trigger_script_ids
+                .entry(format!("clientscript:{name}"))
+                .or_insert(id);
+        }
     }
+}
+
+pub(crate) fn load_clientscript_signatures(registry: &mut SymbolRegistry, dir: &Path) {
+    let Ok(files) = crate::sources::script_files(dir, "cs2") else {
+        return;
+    };
+    let mut sources = Vec::new();
+    for path in files
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "cs2"))
+    {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(file) = clientscript::parse(&text, &path) {
+            sources.push(file);
+        }
+    }
+    hooks::register_callbacks(registry, sources.iter().flat_map(|file| &file.scripts));
 }
 
 /// Load a game var pack file: `id=name`
@@ -525,7 +533,7 @@ pub fn load_dbtable_configs(
 
         let mut current_table: Option<String> = None;
         let mut col_idx: u16 = 0;
-        for line in &lines {
+        for line in lines {
             // Section header: [tablename]
             if line.starts_with('[') && line.ends_with(']') {
                 let name = line[1..line.len() - 1].trim().to_string();
@@ -628,7 +636,7 @@ pub fn load_constant_files(registry: &mut SymbolRegistry, files: &[std::path::Pa
             Err(_) => continue,
         };
         let lines = strip_comments(&text);
-        for line in &lines {
+        for line in lines {
             // Split on '=' into name and value
             let eq_pos = match line.find('=') {
                 Some(i) => i,
@@ -677,60 +685,90 @@ fn register_constant_value(registry: &mut SymbolRegistry, name: String, val_str:
 
 /// Strip `//` single-line and `/* */` multi-line comments from source text,
 /// matching 2004scape's `loadFileFull()` behavior.
-fn strip_comments(text: &str) -> Vec<String> {
-    let mut result = Vec::new();
-    let mut multi_depth: usize = 0;
+pub(crate) fn strip_comments(text: &str) -> impl Iterator<Item = std::borrow::Cow<'_, str>> {
+    let mut comments = Comments::default();
+    text.lines().filter_map(move |line| comments.line(line))
+}
 
-    for line in text.lines() {
-        let mut line = line.trim().to_string();
+#[derive(Default)]
+pub(crate) struct Comments {
+    depth: usize,
+}
 
-        // Handle continuation of multi-line comments
-        if multi_depth > 0 {
-            while let Some(start) = line.find("/*") {
-                line = line[start + 2..].trim_start().to_string();
-                multi_depth += 1;
-            }
-            while let Some(end) = line.find("*/") {
-                line = line[end + 2..].trim_start().to_string();
-                multi_depth -= 1;
-                if multi_depth == 0 {
-                    break;
+impl Comments {
+    pub(crate) fn line<'a>(&mut self, raw: &'a str) -> Option<std::borrow::Cow<'a, str>> {
+        use std::borrow::Cow;
+        let line = raw.trim();
+        if self.depth == 0 && !line.contains("//") && !line.contains("/*") {
+            return (!line.is_empty()).then_some(Cow::Borrowed(line));
+        }
+        let bytes = line.as_bytes();
+        let mut output = Cow::Borrowed("");
+        let mut start = 0;
+        let mut i = 0;
+        let mut quoted = false;
+        let append = |output: &mut Cow<'_, str>, part: &str| {
+            output.to_mut().push_str(part);
+        };
+        while i < bytes.len() {
+            if self.depth > 0 {
+                if bytes[i..].starts_with(b"/*") {
+                    self.depth += 1;
+                    i += 2;
+                } else if bytes[i..].starts_with(b"*/") {
+                    self.depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
                 }
-            }
-            if multi_depth > 0 {
-                continue;
-            }
-        }
-
-        if line.is_empty() {
-            continue;
-        }
-
-        // Strip single-line comments
-        if let Some(idx) = line.find("//") {
-            line = line[..idx].trim_end().to_string();
-            if line.is_empty() {
-                continue;
-            }
-        }
-
-        // Strip inline multi-line comments
-        if let Some(start) = line.find("/*") {
-            if let Some(end) = line.find("*/") {
-                line = format!("{}{}", &line[..start], &line[end + 2..]);
+                start = i;
+            } else if quoted {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                } else {
+                    if bytes[i] == b'"' {
+                        quoted = false;
+                    }
+                    i += 1;
+                }
+            } else if bytes[i] == b'"' {
+                quoted = true;
+                i += 1;
+            } else if bytes[i..].starts_with(b"//") {
+                if output.is_empty() {
+                    output = Cow::Borrowed(&line[start..i]);
+                } else {
+                    append(&mut output, &line[start..i]);
+                }
+                start = bytes.len();
+                break;
+            } else if bytes[i..].starts_with(b"/*") {
+                if output.is_empty() {
+                    output = Cow::Borrowed(&line[start..i]);
+                } else {
+                    append(&mut output, &line[start..i]);
+                }
+                self.depth = 1;
+                i += 2;
+                start = i;
             } else {
-                line = line[..start].to_string();
-                multi_depth += 1;
-            }
-            if line.is_empty() {
-                continue;
+                i += 1;
             }
         }
-
-        result.push(line);
+        if self.depth == 0 && start < bytes.len() {
+            if output.is_empty() {
+                output = Cow::Borrowed(&line[start..]);
+            } else {
+                append(&mut output, &line[start..]);
+            }
+        }
+        match output {
+            Cow::Borrowed(value) => (!value.trim().is_empty()).then(|| Cow::Borrowed(value.trim())),
+            Cow::Owned(value) => {
+                (!value.trim().is_empty()).then(|| Cow::Owned(value.trim().to_owned()))
+            }
+        }
     }
-
-    result
 }
 
 /// Scan `.varp`/`.varn`/`.vars`/`.varbit` configs and refine the type

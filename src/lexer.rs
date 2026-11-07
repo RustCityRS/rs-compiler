@@ -1,5 +1,5 @@
 use crate::error::LexingError;
-use crate::token::{Kind, Token};
+use crate::token::{ESCAPED_LT, Kind, Token};
 use crate::types::Type;
 use std::path::PathBuf;
 
@@ -56,7 +56,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn read_string_literal(&mut self) -> Result<Token, LexingError> {
+    fn read_string_literal(&mut self, raw: bool) -> Result<Token, LexingError> {
         let start_line = self.line;
         let start_col = self.col;
         self.advance(); // consume opening quote
@@ -72,11 +72,11 @@ impl<'a> Lexer<'a> {
                         break;
                     }
                 }
-                Some(b'<') => {
+                Some(b'<') if !raw => {
                     interp_depth += 1;
                     value.push('<');
                 }
-                Some(b'>') => {
+                Some(b'>') if !raw => {
                     interp_depth = interp_depth.saturating_sub(1);
                     value.push('>');
                 }
@@ -84,7 +84,7 @@ impl<'a> Lexer<'a> {
                     // RuneScript only escapes \\, \", and \< (matching ANTLR grammar)
                     Some(b'\\') => value.push('\\'),
                     Some(b'"') => value.push('"'),
-                    Some(b'<') => value.push('<'),
+                    Some(b'<') => value.push(if raw { '<' } else { ESCAPED_LT }),
                     Some(ch) => {
                         value.push('\\');
                         value.push(ch as char);
@@ -104,21 +104,21 @@ impl<'a> Lexer<'a> {
                         value.push(ch as char);
                     } else if ch >= 0xC0 {
                         // Start of multi-byte UTF-8: decode properly
-                        let mut bytes = vec![ch];
+                        let start = self.pos - 1;
                         while let Some(&next) = self.source.get(self.pos) {
                             if (0x80..0xC0).contains(&next) {
-                                bytes.push(next);
                                 self.pos += 1;
                                 self.col += 1;
                             } else {
                                 break;
                             }
                         }
-                        if let Ok(s) = std::str::from_utf8(&bytes) {
+                        let bytes = &self.source[start..self.pos];
+                        if let Ok(s) = std::str::from_utf8(bytes) {
                             value.push_str(s);
                         } else {
                             // Fallback: push as Latin-1
-                            for b in bytes {
+                            for &b in bytes {
                                 value.push(b as char);
                             }
                         }
@@ -137,7 +137,16 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        Ok(self.token(Kind::StringLiteral, value, start_line, start_col))
+        Ok(self.token(
+            if raw {
+                Kind::RawStringLiteral
+            } else {
+                Kind::StringLiteral
+            },
+            value,
+            start_line,
+            start_col,
+        ))
     }
 
     fn read_char_literal(&mut self) -> Result<Token, LexingError> {
@@ -319,7 +328,41 @@ impl<'a> Lexer<'a> {
 
     pub fn tokenize(&mut self) -> Result<Vec<Token>, LexingError> {
         let mut tokens = Vec::new();
+        self.tokenize_into(&mut tokens, &mut None)?;
+        Ok(tokens)
+    }
 
+    /// Recover tokens and byte ranges for editor documents, including after
+    /// invalid characters. Ranges refer to the original, unescaped source.
+    pub fn tokenize_spanned(
+        &mut self,
+    ) -> (Vec<Token>, Vec<std::ops::Range<usize>>, Vec<LexingError>) {
+        let mut tokens = Vec::new();
+        let mut spans = Some(Vec::new());
+        let mut errors = Vec::new();
+        loop {
+            let before = self.pos;
+            match self.tokenize_into(&mut tokens, &mut spans) {
+                Ok(()) => break,
+                Err(error) => {
+                    errors.push(error);
+                    if self.pos == before || self.peek().is_some() {
+                        self.advance();
+                        while self.peek().is_some_and(|b| (0x80..0xc0).contains(&b)) {
+                            self.advance();
+                        }
+                    }
+                }
+            }
+        }
+        (tokens, spans.unwrap(), errors)
+    }
+
+    fn tokenize_into(
+        &mut self,
+        tokens: &mut Vec<Token>,
+        spans: &mut Option<Vec<std::ops::Range<usize>>>,
+    ) -> Result<(), LexingError> {
         loop {
             self.skip_whitespace();
 
@@ -329,6 +372,8 @@ impl<'a> Lexer<'a> {
 
             let start_line = self.line;
             let start_col = self.col;
+            let start = self.pos;
+            let count = tokens.len();
 
             match ch {
                 b'[' => {
@@ -526,7 +571,13 @@ impl<'a> Lexer<'a> {
                 }
 
                 b'"' => {
-                    let tok = self.read_string_literal()?;
+                    let tok = self.read_string_literal(false)?;
+                    tokens.push(tok);
+                }
+
+                b'r' if self.peek_ahead(1) == Some(b'"') => {
+                    self.advance();
+                    let tok = self.read_string_literal(true)?;
                     tokens.push(tok);
                 }
 
@@ -673,6 +724,9 @@ impl<'a> Lexer<'a> {
                     ));
                 }
             }
+            if let Some(spans) = spans {
+                spans.extend((count..tokens.len()).map(|_| start..self.pos));
+            }
         }
 
         tokens.push(Token::new(
@@ -681,6 +735,9 @@ impl<'a> Lexer<'a> {
             self.line,
             self.col,
         ));
-        Ok(tokens)
+        if let Some(spans) = spans {
+            spans.push(self.pos..self.pos);
+        }
+        Ok(())
     }
 }

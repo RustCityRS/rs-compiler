@@ -1,10 +1,10 @@
 [package]
 name = "rs-runec"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.95.0"
 authors = ["Tyler Telis <xlitersps@gmail.com>", "RustCityRS <https://github.com/RustCityRS>"]
-description = "A RuneScript 2 Compiler and Linter Built Entirely in Rust"
+description = "Compiler, linter, and language server for RuneScript, ClientScript, and GlobalScript, with ClientScript decompilation"
 license = "MIT"
 repository = "https://github.com/RustCityRS/rs-compiler"
 homepage = "https://github.com/RustCityRS/rs-compiler"
@@ -19,7 +19,9 @@ name = "runec"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
+anyhow = "1"
+serde_json = "1"
+clap = { version = "4.6", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -28,10 +30,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # default so the shipped binary is unaffected; enable with `--features memprof`
 # to log per-phase live heap and the global peak. Adds no dependencies.
 memprof = []
-
-[dev-dependencies]
-ctor = "0.2"
-lazy_static = "1.4"
 
 # Release profile tuned for runtime speed. These only affect how the optimizer
 # compiles identical source — no behavior change. Fat LTO + a single codegen

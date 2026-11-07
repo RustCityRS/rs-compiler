@@ -17,6 +17,7 @@ pub enum Type {
     String,
     Long,
     Char,
+    Colour,
     Coord,
 
     // Game entity types
@@ -31,10 +32,13 @@ pub enum Type {
     Seq,
     Spotanim,
     Synth,
+    Vorbis,
     Midi,
     Jingle,
     Graphic,
     FontMetrics,
+    ChatCat,
+    ChatPhrase,
     Model,
     Texture,
     IdKit,
@@ -44,6 +48,12 @@ pub enum Type {
     // UI types
     Stat,
     Component,
+    IfType,
+    SetPosH,
+    SetPosV,
+    SetSize,
+    SetTextAlignH,
+    SetTextAlignV,
     Interface,
     TopLevelInterface,
     OverlayInterface,
@@ -86,6 +96,7 @@ pub enum Type {
 
     // Script reference types (for parameters that hold script IDs)
     Proc,
+    ClientScript,
     Label,
     Queue,
     SoftTimer,
@@ -99,6 +110,56 @@ pub enum Type {
 }
 
 impl Type {
+    pub fn to_char(self) -> char {
+        "is§1clnoOpNAtPMjdmxKSIavgJyVÐþ`µzf«ke"
+            .chars()
+            .find(|&ch| Self::from_char(ch) == Some(self))
+            .unwrap_or('i')
+    }
+
+    pub fn from_char(ch: char) -> Option<Self> {
+        Some(match ch {
+            'i' => Self::Int,
+            's' => Self::String,
+            '§' => Self::Long,
+            'z' => Self::Char,
+            'f' => Self::FontMetrics,
+            '«' => Self::Vorbis,
+            'k' => Self::ChatCat,
+            'e' => Self::ChatPhrase,
+            '1' => Self::Boolean,
+            'c' => Self::Coord,
+            'l' => Self::Loc,
+            'n' => Self::Npc,
+            'o' => Self::Obj,
+            'O' => Self::NamedObj,
+            'p' => Self::PlayerUid,
+            'N' => Self::NpcUid,
+            'A' => Self::Seq,
+            't' => Self::Spotanim,
+            'P' => Self::Synth,
+            'M' => Self::Midi,
+            'j' => Self::Jingle,
+            'd' => Self::Graphic,
+            'm' => Self::Model,
+            'x' => Self::Texture,
+            'K' => Self::IdKit,
+            'S' => Self::Stat,
+            'I' => Self::Component,
+            'a' => Self::Interface,
+            'v' => Self::Inv,
+            'g' => Self::Enum,
+            'J' => Self::Struct,
+            'y' => Self::Category,
+            'V' => Self::Varp,
+            'Ð' => Self::DbRow,
+            'þ' => Self::NpcStat,
+            '`' => Self::MapArea,
+            'µ' => Self::MapElement,
+            _ => return None,
+        })
+    }
+
     /// Returns the base var type (determines which stack to use).
     pub fn base_type(&self) -> BaseVarType {
         match self {
@@ -112,7 +173,14 @@ impl Type {
     /// Boolean and Int default to 0; all other int-based types default to -1 (null).
     pub fn default_int_value(&self) -> i32 {
         match self {
-            Type::Int | Type::Boolean => 0,
+            Type::Int
+            | Type::Boolean
+            | Type::IfType
+            | Type::SetPosH
+            | Type::SetPosV
+            | Type::SetSize
+            | Type::SetTextAlignH
+            | Type::SetTextAlignV => 0,
             _ => -1,
         }
     }
@@ -121,7 +189,13 @@ impl Type {
     /// Only Int pushes 0; everything else (including Boolean) pushes -1.
     pub fn default_return_value(&self) -> i32 {
         match self {
-            Type::Int => 0,
+            Type::Int
+            | Type::IfType
+            | Type::SetPosH
+            | Type::SetPosV
+            | Type::SetSize
+            | Type::SetTextAlignH
+            | Type::SetTextAlignV => 0,
             _ => -1,
         }
     }
@@ -140,6 +214,13 @@ impl Type {
             "string" => Some(Type::String),
             "long" => Some(Type::Long),
             "char" => Some(Type::Char),
+            "colour" | "color" | "rgb" => Some(Type::Colour),
+            "iftype" => Some(Type::IfType),
+            "setposh" => Some(Type::SetPosH),
+            "setposv" => Some(Type::SetPosV),
+            "setsize" => Some(Type::SetSize),
+            "settextalignh" => Some(Type::SetTextAlignH),
+            "settextalignv" => Some(Type::SetTextAlignV),
             "coord" => Some(Type::Coord),
             "loc" => Some(Type::Loc),
             "npc" => Some(Type::Npc),
@@ -150,10 +231,13 @@ impl Type {
             "seq" => Some(Type::Seq),
             "spotanim" => Some(Type::Spotanim),
             "synth" => Some(Type::Synth),
+            "vorbis" => Some(Type::Vorbis),
             "midi" => Some(Type::Midi),
             "jingle" => Some(Type::Jingle),
             "graphic" => Some(Type::Graphic),
             "fontmetrics" => Some(Type::FontMetrics),
+            "chatcat" => Some(Type::ChatCat),
+            "chatphrase" => Some(Type::ChatPhrase),
             "model" => Some(Type::Model),
             "texture" => Some(Type::Texture),
             "idk" | "idkit" => Some(Type::IdKit),
@@ -193,6 +277,7 @@ impl Type {
             // Script reference types (used when passing proc/label/queue references as params)
             "label" => Some(Type::Label),
             "proc" => Some(Type::Proc),
+            "clientscript" => Some(Type::ClientScript),
             "command" => Some(Type::Int),
             "queue" => Some(Type::Queue),
             "softtimer" => Some(Type::SoftTimer),
@@ -213,6 +298,7 @@ impl Type {
             Type::String => "string",
             Type::Long => "long",
             Type::Char => "char",
+            Type::Colour => "colour",
             Type::Coord => "coord",
             Type::Loc => "loc",
             Type::Npc => "npc",
@@ -223,10 +309,13 @@ impl Type {
             Type::Seq => "seq",
             Type::Spotanim => "spotanim",
             Type::Synth => "synth",
+            Type::Vorbis => "vorbis",
             Type::Midi => "midi",
             Type::Jingle => "jingle",
             Type::Graphic => "graphic",
             Type::FontMetrics => "fontmetrics",
+            Type::ChatCat => "chatcat",
+            Type::ChatPhrase => "chatphrase",
             Type::Model => "model",
             Type::Texture => "texture",
             Type::IdKit => "idkit",
@@ -234,6 +323,12 @@ impl Type {
             Type::Hitmark => "hitmark",
             Type::Stat => "stat",
             Type::Component => "component",
+            Type::IfType => "iftype",
+            Type::SetPosH => "setposh",
+            Type::SetPosV => "setposv",
+            Type::SetSize => "setsize",
+            Type::SetTextAlignH => "settextalignh",
+            Type::SetTextAlignV => "settextalignv",
             Type::Interface => "interface",
             Type::TopLevelInterface => "toplevelinterface",
             Type::OverlayInterface => "overlayinterface",
@@ -264,6 +359,7 @@ impl Type {
             Type::Controller => "controller",
             Type::RegionCoord => "regioncoord",
             Type::Proc => "proc",
+            Type::ClientScript => "clientscript",
             Type::Label => "label",
             Type::Queue => "queue",
             Type::SoftTimer => "softtimer",

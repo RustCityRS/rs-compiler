@@ -1,3 +1,5 @@
+pub(crate) const ESCAPED_LT: char = '\0';
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct Token {
     pub line: usize,
@@ -17,7 +19,7 @@ impl Token {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Kind {
     // Brackets and delimiters
     LBracket,  // [
@@ -67,10 +69,11 @@ pub enum Kind {
     Number,        // Numeric literals (integer)
     LongLiteral,   // Long literals (suffixed with L)
     StringLiteral, // "string contents"
-    BooleanTrue,   // true
-    BooleanFalse,  // false
-    CharLiteral,   // 'x'
-    CoordLiteral,  // coordinate literal (0_0_0_0_0)
+    RawStringLiteral,
+    BooleanTrue,  // true
+    BooleanFalse, // false
+    CharLiteral,  // 'x'
+    CoordLiteral, // coordinate literal (0_0_0_0_0)
 
     // Comments
     SingleLineComment,

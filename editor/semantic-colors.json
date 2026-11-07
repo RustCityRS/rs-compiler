@@ -1,0 +1,24 @@
+{
+  "editor.semanticHighlighting.enabled": true,
+  "editor.semanticTokenColorCustomizations": {
+    "rules": {
+      "keyword": "#cc7832",
+      "type": "#cc7832",
+      "macro": "#cc7832",
+      "decorator": "#ffc66d",
+      "function": "#569cd6",
+      "function.defaultLibrary": "#ffc66d",
+      "namespace": "#569cd6",
+      "variable.static": { "foreground": "#be84d1", "italic": true },
+      "variable.static.readonly": { "foreground": "#be84d1", "italic": true },
+      "enumMember": "#be84d1",
+      "property": "#ff6b68",
+      "string": "#6a8759",
+      "number": "#6897bb",
+      "comment": "#808080",
+      "variable": "#a9b7c6",
+      "parameter": "#a9b7c6",
+      "operator": "#a9b7c6"
+    }
+  }
+}

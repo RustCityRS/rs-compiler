@@ -1,9 +1,12 @@
+use crate::arguments::{command_hints, command_returns, proc_hints, stack_hints};
+use crate::clientscript::hooks;
 use crate::diagnostic_messages as msg;
 use crate::diagnostics::{DiagnosticsCollector, Phase};
 use crate::parser::*;
 use crate::symbol::{SymbolKind, SymbolRegistry, SymbolTable};
 use crate::types::{BaseVarType, Type};
 use std::path::{Path, PathBuf};
+use std::slice::from_ref;
 
 const TEST_COMMAND_PREFIXES: &[&str] = &[
     "assert_",
@@ -28,19 +31,23 @@ fn is_literal_type(t: Type) -> bool {
 }
 
 pub struct TypeChecker<'a> {
+    stack_returns: bool,
     pub diagnostics: DiagnosticsCollector,
     pub registry: &'a SymbolRegistry,
     file_path: PathBuf,
     current_script_is_test: bool,
+    current_script_is_proc: bool,
 }
 
 impl<'a> TypeChecker<'a> {
     pub fn new(registry: &'a SymbolRegistry) -> Self {
         TypeChecker {
+            stack_returns: false,
             diagnostics: DiagnosticsCollector::new(),
             registry,
             file_path: PathBuf::new(),
             current_script_is_test: false,
+            current_script_is_proc: false,
         }
     }
 
@@ -71,6 +78,18 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_script(&mut self, script: &ScriptDeclaration) {
+        self.current_script_is_proc = script.trigger == "proc";
+        if let Some(message) =
+            self.registry
+                .visibility
+                .declaration(&self.file_path, &script.trigger, &script.name)
+        {
+            self.error(script.line, message);
+        }
+        self.stack_returns = self
+            .registry
+            .stack_scripts
+            .contains(&format!("{}:{}", script.trigger, script.name));
         let mut locals = SymbolTable::new();
 
         // Check for duplicate parameter names and invalid parameter types
@@ -97,6 +116,28 @@ impl<'a> TypeChecker<'a> {
 
         // Validate trigger constraints
         self.check_trigger_constraints(script);
+        if !script.name.starts_with('_')
+            && let Some(ty) = self
+                .registry
+                .trigger(&script.trigger)
+                .and_then(|trigger| trigger.subject_type)
+            && let Some(message) = self.registry.visibility.reference(
+                &self.file_path,
+                &script
+                    .name
+                    .parse::<i32>()
+                    .map(Expr::IntLiteral)
+                    .unwrap_or_else(|_| Expr::Identifier(script.name.clone())),
+                Some(if script.name.contains(':') {
+                    Type::Component
+                } else {
+                    ty
+                }),
+                self.registry,
+            )
+        {
+            self.error(script.line, message);
+        }
 
         for stmt in &script.body {
             self.check_statement(stmt, &mut locals, Some(&script.return_types));
@@ -312,7 +353,9 @@ impl<'a> TypeChecker<'a> {
                 line,
             } => {
                 // SCRIPT_LOCAL_REDECLARATION
-                if locals.lookup(name).is_some() {
+                if locals.lookup(name).is_some_and(|symbol| {
+                    !matches!(symbol.kind, SymbolKind::LocalVar { is_array: true, .. })
+                }) {
                     self.error(*line, msg::fmt(msg::SCRIPT_LOCAL_REDECLARATION, &[name]));
                 }
                 // LOCAL_DECLARATION_INVALID_TYPE + LOCAL_ARRAY_INVALID_TYPE
@@ -344,6 +387,57 @@ impl<'a> TypeChecker<'a> {
                 line,
             } => {
                 self.warn_if_bare_command_value(value, *line);
+                if matches!(target, Expr::MultiAssign(..)) || matches!(value, Expr::Tuple(_)) {
+                    let targets = match target {
+                        Expr::MultiAssign(targets, _) => targets.as_slice(),
+                        _ => from_ref(target),
+                    };
+                    let values = match value {
+                        Expr::Tuple(values) => values.as_slice(),
+                        _ => from_ref(value),
+                    };
+                    let expected: Vec<_> = targets
+                        .iter()
+                        .filter_map(|target| self.infer_expr_type(target, locals, *line, None))
+                        .collect();
+                    let hints = stack_hints(self.registry, &expected, values, locals);
+                    let actual: Vec<_> = values
+                        .iter()
+                        .zip(hints)
+                        .map(|(value, hint)| self.infer_expr_type(value, locals, *line, hint))
+                        .collect();
+                    let actual = self.expand_call_types(values, &actual);
+                    if actual
+                        .iter()
+                        .any(|ty| ty.is_none() || *ty == Some(Type::Any))
+                    {
+                        return;
+                    }
+                    for base in [BaseVarType::Integer, BaseVarType::String, BaseVarType::Long] {
+                        let expected: Vec<_> = expected
+                            .iter()
+                            .copied()
+                            .filter(|ty| ty.base_type() == base)
+                            .collect();
+                        let actual: Vec<_> = actual
+                            .iter()
+                            .filter_map(|ty| *ty)
+                            .filter(|ty| ty.base_type() == base)
+                            .collect();
+                        if expected.len() != actual.len() {
+                            self.error(
+                                *line,
+                                "Assignment value count does not match its targets".into(),
+                            );
+                        }
+                        for (actual, expected) in actual.into_iter().zip(expected) {
+                            if !self.types_compatible(actual, expected) {
+                                self.emit_type_mismatch(*line, actual, expected);
+                            }
+                        }
+                    }
+                    return;
+                }
                 let target_type = self.infer_expr_type(target, locals, *line, None);
                 let value_type = self.infer_expr_type(value, locals, *line, target_type);
                 if let (Some(tt), Some(vt)) = (target_type, value_type)
@@ -431,6 +525,23 @@ impl<'a> TypeChecker<'a> {
                         return;
                     }
                 };
+                if self.stack_returns {
+                    let hints = stack_hints(self.registry, script_returns, values, locals);
+                    let actual: Vec<_> = values
+                        .iter()
+                        .zip(hints)
+                        .map(|(value, hint)| self.infer_expr_type(value, locals, *line, hint))
+                        .collect();
+                    self.check_call_arguments(
+                        "return",
+                        script_returns,
+                        &actual,
+                        values,
+                        *line,
+                        CallKind::Proc,
+                    );
+                    return;
+                }
                 let is_single_proc_call = values.len() == 1
                     && matches!(&values[0], Expr::ProcCall { .. } | Expr::CommandCall { .. });
                 if values.len() != script_returns.len() && !is_single_proc_call {
@@ -538,7 +649,14 @@ impl<'a> TypeChecker<'a> {
                 self.check_condition(rhs, locals, line);
             }
             _ => {
-                self.error(line, msg::CONDITION_INVALID_NODE_TYPE.to_string());
+                if let Some(ty) = self.infer_expr_type(expr, locals, line, None)
+                    && ty.base_type() != BaseVarType::Integer
+                {
+                    self.error(
+                        line,
+                        format!("Condition requires a boolean or integer, got {}", ty.name()),
+                    );
+                }
             }
         }
     }
@@ -599,6 +717,14 @@ impl<'a> TypeChecker<'a> {
         line: usize,
         hint: Option<Type>,
     ) -> Option<Type> {
+        if let Some(message) =
+            self.registry
+                .visibility
+                .reference(&self.file_path, expr, hint, self.registry)
+        {
+            self.error(line, message);
+            return Some(Type::Error);
+        }
         match expr {
             Expr::IntLiteral(_) => {
                 // Matching TS visitIntegerLiteral: if hint is a non-literal type,
@@ -634,7 +760,7 @@ impl<'a> TypeChecker<'a> {
                     //      e.g. obj ⊂ namedobj)
                     //   3. proc/script registries (for proc/label/
                     //      queue/timer/walktrigger hints)
-                    let typed_ok = self.registry.lookup_entity_id_typed(s, h).is_some();
+                    let typed_ok = self.registry.lookup_reference(s, h).is_some();
                     let untyped_ok = self.registry.lookup_entity_id(s).is_some();
                     let script_ok = self.registry.proc_script_id(s).is_some()
                         || self.registry.script_id(s).is_some();
@@ -755,7 +881,7 @@ impl<'a> TypeChecker<'a> {
                 if let Some(h) = hint
                     && h != Type::Error
                     && h != Type::Any
-                    && self.registry.lookup_entity_id_typed(name, h).is_some()
+                    && self.registry.lookup_reference(name, h).is_some()
                 {
                     return Some(h);
                 }
@@ -840,7 +966,10 @@ impl<'a> TypeChecker<'a> {
                             //      params)
                             let resolved = self.registry.lookup_entity_id_typed(name, h).is_some()
                                 || self.registry.lookup_entity_id(name).is_some()
-                                || crate::trigger_table::byte(name).is_some()
+                                || self
+                                    .registry
+                                    .trigger(name)
+                                    .is_some_and(|trigger| trigger.byte.is_some())
                                 || (h == Type::Int && self.registry.command_opcode(name).is_some())
                                 || self.registry.proc_script_id(name).is_some()
                                 || self.registry.script_id(name).is_some();
@@ -941,7 +1070,45 @@ impl<'a> TypeChecker<'a> {
                 call_line,
                 ..
             } => {
+                let call = match hooks::server_call(self.registry, name, args, locals, *call_line) {
+                    Ok(call) => call,
+                    Err(error) => {
+                        self.error(*call_line, error);
+                        return Some(Type::Error);
+                    }
+                };
+                let (name, args, call_line) = match &call {
+                    Some(Expr::CommandCall {
+                        name,
+                        args,
+                        call_line,
+                        ..
+                    }) => (name, args, call_line),
+                    _ => (name, args, call_line),
+                };
                 let lookup_name = name.strip_prefix('.').unwrap_or(name);
+                if lookup_name.starts_with("__") {
+                    let (values, result): (Vec<&Expr>, Option<Type>) = match lookup_name {
+                        "__label" | "__jump" | "__opcode" => (vec![], None),
+                        "__branch" => (args.iter().skip(2).collect(), None),
+                        "__switch" => (args.first().into_iter().collect(), None),
+                        "__push" => (args.iter().collect(), None),
+                        "__pop_int" => (vec![], Some(Type::Int)),
+                        "__pop_string" => (vec![], Some(Type::String)),
+                        "__pop_long" => (vec![], Some(Type::Long)),
+                        "__join" => (args.iter().collect(), Some(Type::String)),
+                        "__get_array" => (args.iter().collect(), Some(Type::Int)),
+                        "__set_array" | "__define_array" => (args.iter().collect(), None),
+                        _ => {
+                            self.error(*call_line, format!("Unknown intrinsic {name}"));
+                            (vec![], None)
+                        }
+                    };
+                    for value in values {
+                        self.infer_expr_type(value, locals, *call_line, None);
+                    }
+                    return result;
+                }
 
                 if !self.current_script_is_test && Self::is_test_command(lookup_name) {
                     self.error(
@@ -950,19 +1117,22 @@ impl<'a> TypeChecker<'a> {
                     );
                 }
 
-                // Look up command param types for hinting (same as compiler.rs:1345-1399)
-                let param_types: Vec<Type> = self
-                    .registry
-                    .command_param_types
-                    .get(lookup_name)
-                    .cloned()
-                    .unwrap_or_default();
+                let lowered =
+                    match hooks::lower(self.registry, lookup_name, args, locals, *call_line) {
+                        Ok(args) => args,
+                        Err(error) => {
+                            self.error(*call_line, error);
+                            return Some(Type::Error);
+                        }
+                    };
+                let args = lowered.as_deref().unwrap_or(args);
+                let hints = command_hints(self.registry, lookup_name, args, locals);
 
                 let arg_types: Vec<Option<Type>> = args
                     .iter()
                     .enumerate()
                     .map(|(i, a)| {
-                        let arg_hint = param_types.get(i).copied();
+                        let arg_hint = hints.get(i).copied().flatten();
                         self.infer_expr_type(a, locals, *call_line, arg_hint)
                     })
                     .collect();
@@ -981,11 +1151,70 @@ impl<'a> TypeChecker<'a> {
                 if let Some(sym) = cmd_sym {
                     if let SymbolKind::Command {
                         param_types: cmd_params,
-                        return_types,
                         ..
                     } = &sym.kind
                     {
-                        if !is_variadic {
+                        if self.registry.stack_commands.contains(lookup_name) {
+                            let counts = |types: &[Type]| {
+                                let mut counts = [0usize; 3];
+                                for ty in types {
+                                    counts[match ty.base_type() {
+                                        BaseVarType::Integer => 0,
+                                        BaseVarType::String => 1,
+                                        BaseVarType::Long => 2,
+                                    }] += 1;
+                                }
+                                counts
+                            };
+                            let expanded = self.expand_call_types(args, &arg_types);
+                            let actual =
+                                counts(&expanded.iter().filter_map(|t| *t).collect::<Vec<_>>());
+                            let mut expected = counts(cmd_params);
+                            if let Some(&explicit) = self.registry.hook_commands.get(lookup_name) {
+                                if let Some(Expr::StringLiteral(signature)) = args
+                                    .iter()
+                                    .rev()
+                                    .find(|arg| matches!(arg, Expr::StringLiteral(_)))
+                                {
+                                    expected = [1 + usize::from(explicit), 1, 0];
+                                    for ch in signature.trim_end_matches('Y').chars() {
+                                        expected[match ch {
+                                            's' => 1,
+                                            '§' => 2,
+                                            _ => 0,
+                                        }] += 1;
+                                    }
+                                    if signature.ends_with('Y') {
+                                        let ints: Vec<_> = args
+                                            .iter()
+                                            .zip(&arg_types)
+                                            .filter_map(|(arg, ty)| {
+                                                ty.is_some_and(|ty| {
+                                                    ty.base_type() == BaseVarType::Integer
+                                                })
+                                                .then_some(arg)
+                                            })
+                                            .collect();
+                                        let index =
+                                            ints.len().checked_sub(1 + usize::from(explicit));
+                                        if let Some(Expr::IntLiteral(n)) =
+                                            index.and_then(|index| ints.get(index).copied())
+                                            && *n >= 0
+                                        {
+                                            expected[0] += *n as usize + 1;
+                                        }
+                                    }
+                                } else {
+                                    self.error(
+                                        *call_line,
+                                        "Client hook needs a constant signature".into(),
+                                    );
+                                }
+                            }
+                            if actual != expected {
+                                self.error(*call_line, format!("{name} expects {expected:?} int/string/long arguments, got {actual:?}"));
+                            }
+                        } else if !is_variadic {
                             self.check_call_arguments(
                                 name,
                                 cmd_params,
@@ -995,7 +1224,9 @@ impl<'a> TypeChecker<'a> {
                                 CallKind::Command,
                             );
                         }
-                        return return_types.first().copied();
+                        return command_returns(self.registry, lookup_name, args)
+                            .first()
+                            .copied();
                     }
                 } else {
                     self.error(
@@ -1017,9 +1248,10 @@ impl<'a> TypeChecker<'a> {
                 let script_sym = self
                     .registry
                     .lookup_script_by_trigger("proc", name)
+                    .or_else(|| self.registry.lookup_script_by_trigger("clientscript", name))
                     .cloned();
 
-                if self.registry.proc_script_id(name).is_none() {
+                if self.registry.proc_script_id(name).is_none() && script_sym.is_none() {
                     self.error(
                         *call_line,
                         msg::fmt(msg::PROC_REFERENCE_UNRESOLVED, &[name]),
@@ -1053,11 +1285,12 @@ impl<'a> TypeChecker<'a> {
                     (vec![], vec![])
                 };
 
+                let hints = proc_hints(self.registry, name, args, locals);
                 let arg_types: Vec<Option<Type>> = args
                     .iter()
                     .enumerate()
                     .map(|(i, a)| {
-                        let arg_hint = p_types.get(i).copied();
+                        let arg_hint = hints.get(i).copied().flatten();
                         self.infer_expr_type(a, locals, *call_line, arg_hint)
                     })
                     .collect();
@@ -1081,6 +1314,9 @@ impl<'a> TypeChecker<'a> {
                 call_line,
                 ..
             } => {
+                if self.current_script_is_proc {
+                    self.error(*call_line, msg::fmt(msg::JUMP_IN_PROC, &[name]));
+                }
                 let script_sym = self
                     .registry
                     .lookup_script_by_trigger("label", name)
@@ -1145,6 +1381,12 @@ impl<'a> TypeChecker<'a> {
                 Some(Type::String)
             }
 
+            Expr::Tuple(values) => {
+                for value in values {
+                    self.infer_expr_type(value, locals, line, None);
+                }
+                None
+            }
             Expr::MultiAssign(targets, _) => {
                 // ASSIGN_MULTI_ARRAY: arrays are not allowed in multi-assignment
                 for target in targets {
@@ -1159,6 +1401,73 @@ impl<'a> TypeChecker<'a> {
 
     // ──────────────────── Call argument validation ────────────────────
 
+    fn stack_arguments(&self, name: &str, kind: CallKind) -> bool {
+        let trigger = match kind {
+            CallKind::Command => {
+                return self
+                    .registry
+                    .stack_commands
+                    .contains(name.trim_start_matches('.'));
+            }
+            CallKind::Proc if name == "return" => return self.stack_returns,
+            CallKind::Proc
+                if self
+                    .registry
+                    .lookup_script_by_trigger("proc", name)
+                    .is_some() =>
+            {
+                "proc"
+            }
+            CallKind::Proc => "clientscript",
+            CallKind::Jump => "label",
+        };
+        self.registry
+            .stack_scripts
+            .contains(&format!("{trigger}:{name}"))
+    }
+
+    fn expand_call_types(&self, args: &[Expr], types: &[Option<Type>]) -> Vec<Option<Type>> {
+        args.iter()
+            .zip(types)
+            .flat_map(|(expr, ty)| {
+                let symbol = match expr {
+                    Expr::Identifier(name) if self.registry.lookup_command(name.trim_start_matches('.')).is_some() => {
+                        let returns = command_returns(self.registry,name,&[]);
+                        return if returns.len() > 1 && returns.first() == ty.as_ref()
+                            && !ty.is_some_and(|ty| self.registry.lookup_reference(name,ty).is_some()) {
+                            returns.into_iter().map(Some).collect()
+                        } else { vec![*ty] };
+                    }
+                    Expr::ProcCall { name, .. } => self
+                        .registry
+                        .lookup_script_by_trigger("proc", name)
+                        .or_else(|| self.registry.lookup_script_by_trigger("clientscript", name)),
+                    Expr::CommandCall { name, args, .. } => {
+                        let name = name.trim_start_matches('.');
+                        if !self.registry.stack_commands.contains(name)
+                            && matches!(self.registry.lookup_command(name).map(|symbol| &symbol.kind),
+                                Some(SymbolKind::Command { return_types, .. })
+                                if return_types.is_empty()) {
+                            return vec![None];
+                        }
+                        return command_returns(self.registry, name, args)
+                            .into_iter()
+                            .map(Some)
+                            .collect();
+                    }
+                    _ => None,
+                };
+                match symbol.map(|symbol| &symbol.kind) {
+                    Some(
+                        SymbolKind::Script { return_types, .. }
+                        | SymbolKind::Command { return_types, .. },
+                    ) => return_types.iter().copied().map(Some).collect(),
+                    _ => vec![*ty],
+                }
+            })
+            .collect()
+    }
+
     fn check_call_arguments(
         &mut self,
         name: &str,
@@ -1168,6 +1477,36 @@ impl<'a> TypeChecker<'a> {
         line: usize,
         kind: CallKind,
     ) {
+        if self.stack_arguments(name, kind) {
+            let actual_types = self.expand_call_types(args, actual_types);
+            for base in [BaseVarType::Integer, BaseVarType::String, BaseVarType::Long] {
+                let expected: Vec<_> = expected_types
+                    .iter()
+                    .filter(|ty| ty.base_type() == base)
+                    .collect();
+                let actual: Vec<_> = actual_types
+                    .iter()
+                    .flatten()
+                    .filter(|ty| ty.base_type() == base)
+                    .collect();
+                if expected.len() != actual.len() {
+                    self.error(
+                        line,
+                        format!(
+                            "{name} expects {} {base:?} values, got {}",
+                            expected.len(),
+                            actual.len()
+                        ),
+                    );
+                }
+                for (actual, expected) in actual.into_iter().zip(expected) {
+                    if !self.types_compatible(*actual, *expected) {
+                        self.emit_type_mismatch(line, *actual, *expected);
+                    }
+                }
+            }
+            return;
+        }
         // For commands, empty param_types means "signature unknown"
         if expected_types.is_empty() {
             if kind == CallKind::Command {

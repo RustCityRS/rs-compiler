@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::bytecode::{CompiledScript, Opcode, Operand};
+use crate::bytecode::{CompiledScript, Instruction, Opcode, Operand};
 use crate::types::Type;
 
 // ── CS2 Neptune binary format constants ────────────────────────────────────
@@ -86,6 +86,7 @@ fn encode_rs2_string(s: &str) -> Vec<u8> {
 /// Encode a single compiled script to the CS2 Neptune binary format.
 ///
 /// Layout:
+/// ```text
 ///   [header]  scriptName\0 + sourceFilePath\0 + lookupKey(i32) +
 ///             paramTypeCount(u8) + paramTypes(u8[]) +
 ///             lineTableLen(u16) + lineTable(pc+line pairs)
@@ -93,7 +94,47 @@ fn encode_rs2_string(s: &str) -> Vec<u8> {
 ///   [trailer] _instructions(i32) + intLocals(u16) + strLocals(u16) +
 ///             intArgs(u16) + strArgs(u16) + switches(u8) + tables...
 ///   [last2]   trailerLen(u16)
+/// ```
 pub fn encode_script(script: &CompiledScript) -> Vec<u8> {
+    if script.instructions.iter().any(|instruction| {
+        matches!(
+            instruction.opcode,
+            Opcode::BranchIfTrue | Opcode::BranchIfFalse
+        )
+    }) {
+        let mut lowered = script.clone();
+        let mut positions = Vec::with_capacity(script.instructions.len() + 1);
+        lowered.instructions.clear();
+        for instruction in &script.instructions {
+            positions.push(lowered.instructions.len());
+            if matches!(
+                instruction.opcode,
+                Opcode::BranchIfTrue | Opcode::BranchIfFalse
+            ) {
+                lowered.instructions.push(Instruction::push_int(i32::from(
+                    instruction.opcode == Opcode::BranchIfTrue,
+                )));
+                lowered.instructions.push(Instruction::new(
+                    Opcode::BranchEquals,
+                    instruction.operand.clone(),
+                ));
+            } else {
+                lowered.instructions.push(instruction.clone());
+            }
+        }
+        positions.push(lowered.instructions.len());
+        for instruction in &mut lowered.instructions {
+            if let Operand::JumpTarget(target) = &mut instruction.operand {
+                *target = positions[*target];
+            }
+        }
+        for table in &mut lowered.switch_tables {
+            for (_, target) in table.iter_mut() {
+                *target = positions[*target];
+            }
+        }
+        return encode_script(&lowered);
+    }
     // ── collect switch tables and assign indices ────────────────────────────
     // We scan instructions for SwitchTable operands, extract them, and
     // replace their operands with the table index.
@@ -439,6 +480,27 @@ pub fn encode_script(script: &CompiledScript) -> Vec<u8> {
 
 // ── PackedWriter: writes script.dat + script.idx ───────────────────────────
 
+/// Encode the server container without accessing storage. Each entry is a
+/// script ID slot; supply an empty vector for missing IDs.
+pub fn encode_bundle(encoded: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
+    let slot_count = encoded.len();
+
+    let mut dat: Vec<u8> = Vec::new();
+    dat.extend_from_slice(&(slot_count as u32).to_be_bytes());
+    dat.extend_from_slice(&COMPILER_VERSION.to_be_bytes());
+    for bytes in encoded {
+        dat.extend_from_slice(bytes);
+    }
+
+    let mut idx: Vec<u8> = Vec::new();
+    idx.extend_from_slice(&(slot_count as u32).to_be_bytes());
+    for bytes in encoded {
+        idx.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    }
+
+    (dat, idx)
+}
+
 /// Writes compiled scripts to script.dat and script.idx in the output directory.
 pub struct ScriptWriter {
     output_dir: String,
@@ -531,22 +593,7 @@ impl ScriptWriter {
     /// header + sparse-by-id layout, so it is byte-for-byte equal to `build_all`
     /// for the same scripts.
     pub fn build_encoded(&self, encoded: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
-        let slot_count = encoded.len();
-
-        let mut dat: Vec<u8> = Vec::new();
-        dat.extend_from_slice(&(slot_count as u32).to_be_bytes());
-        dat.extend_from_slice(&COMPILER_VERSION.to_be_bytes());
-        for bytes in encoded {
-            dat.extend_from_slice(bytes);
-        }
-
-        let mut idx: Vec<u8> = Vec::new();
-        idx.extend_from_slice(&(slot_count as u32).to_be_bytes());
-        for bytes in encoded {
-            idx.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-        }
-
-        (dat, idx)
+        encode_bundle(encoded)
     }
 
     pub fn build_all(&self, scripts: &[CompiledScript]) -> io::Result<(Vec<u8>, Vec<u8>)> {

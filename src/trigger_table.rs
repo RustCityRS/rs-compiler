@@ -348,6 +348,14 @@ pub fn lookup(name: &str) -> Option<TriggerInfo> {
     table().get(name).copied()
 }
 
+pub fn names() -> impl Iterator<Item = &'static str> {
+    TRIGGERS
+        .iter()
+        .map(|trigger| trigger.name)
+        .chain(NAME_KEYED_TRIGGERS.iter().copied())
+        .chain(EXTENDED_TRIGGERS.iter().copied())
+}
+
 pub fn byte(name: &str) -> Option<u8> {
     lookup(name).map(|t| t.byte)
 }

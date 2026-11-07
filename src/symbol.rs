@@ -2,6 +2,18 @@ use crate::types::{BaseVarType, Type};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub(crate) fn normalize_entity_name(name: &str) -> std::borrow::Cow<'_, str> {
+    if name.is_ascii()
+        && !name
+            .bytes()
+            .any(|byte| byte.is_ascii_uppercase() || byte == b' ')
+    {
+        std::borrow::Cow::Borrowed(name)
+    } else {
+        std::borrow::Cow::Owned(name.to_lowercase().replace(' ', "_"))
+    }
+}
+
 // ── LocalTable ─────────────────────────────────────────────────────────────
 // Matches RuneScriptTS `LocalTable` (RuneScript.ts): a flat ordered list of
 // all variable declarations within a script, used for slot assignment via
@@ -446,6 +458,13 @@ impl SymbolTable {
 /// without breaking the lib's public surface.
 #[derive(Debug, Clone)]
 pub struct SymbolRegistry {
+    pub(crate) profile: Option<Arc<crate::environment::EngineProfile>>,
+    pub(crate) visibility: Arc<crate::sources::Visibility>,
+    pub(crate) dynamic_returns: HashMap<String, ReturnType>,
+    pub(crate) param_types: HashMap<i32, Type>,
+    pub(crate) stack_commands: HashSet<String>,
+    pub(crate) stack_scripts: HashSet<String>,
+    pub(crate) hook_commands: HashMap<String, bool>,
     /// All registered scripts by name (last registration wins). The `Symbol` is
     /// shared (`Arc`) with `scripts_by_trigger` so each script's symbol — and its
     /// param/return type vectors — is stored once, not once per map.
@@ -495,6 +514,7 @@ pub struct SymbolRegistry {
     /// Scripts defined below `#testscript` — keyed by "trigger:name".
     pub(crate) test_scripts: HashSet<String>,
     /// Next available script ID.
+    pub(crate) client_script_params: HashMap<String, Vec<Type>>,
     next_script_id: i32,
 }
 
@@ -504,9 +524,116 @@ impl Default for SymbolRegistry {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ReturnType {
+    TypeArgument(usize),
+    ParamArgument(usize),
+}
+
 impl SymbolRegistry {
+    pub fn set_engine_profile(&mut self, profile: crate::environment::EngineProfile) {
+        self.profile = Some(Arc::new(profile));
+    }
+
+    pub fn trigger(&self, name: &str) -> Option<crate::environment::Trigger> {
+        if let Some(profile) = &self.profile {
+            return profile.triggers.get(name).cloned();
+        }
+        crate::trigger_table::is_valid_trigger(name).then(|| crate::environment::Trigger {
+            byte: crate::trigger_table::byte(name),
+            subject_type: crate::trigger_table::subject_type(name),
+            validates_subject: crate::trigger_table::validates_subject(name),
+            is_button: crate::trigger_table::is_button(name),
+            allows_returns: crate::trigger_table::allows_returns(name),
+        })
+    }
+
+    pub fn set_visibility(&mut self, mut visibility: crate::sources::Visibility) {
+        visibility.index_registry(self);
+        self.visibility = Arc::new(visibility);
+    }
+
+    /// Supply stable IDs without reading or updating a pack file.
+    pub fn set_script_id(&mut self, trigger: &str, name: &str, id: i32) {
+        self.preloaded_script_ids
+            .insert(format!("{trigger}:{name}"), id);
+    }
+
+    /// Stack argument order is shared by client scripts and their global procs.
+    pub fn set_stack_script(&mut self, trigger: &str, name: &str) {
+        self.stack_scripts.insert(format!("{trigger}:{name}"));
+    }
+
+    pub fn set_command_behavior(
+        &mut self,
+        name: &str,
+        stack: bool,
+        hook: Option<bool>,
+        returns: Option<ReturnType>,
+    ) {
+        if stack {
+            self.stack_commands.insert(name.to_owned());
+        } else {
+            self.stack_commands.remove(name);
+        }
+        if let Some(explicit_component) = hook {
+            self.hook_commands
+                .insert(name.to_owned(), explicit_component);
+        } else {
+            self.hook_commands.remove(name);
+        }
+        if let Some(returns) = returns {
+            self.dynamic_returns.insert(name.to_owned(), returns);
+        } else {
+            self.dynamic_returns.remove(name);
+        }
+    }
+
+    pub fn commands(&self) -> impl Iterator<Item = (&str, &Symbol)> {
+        self.commands
+            .iter()
+            .map(|(name, symbol)| (name.as_str(), symbol))
+    }
+
+    pub fn constants(&self) -> impl Iterator<Item = (&str, &Symbol)> {
+        self.constants
+            .iter()
+            .map(|(name, symbol)| (name.as_str(), symbol))
+    }
+
+    pub(crate) fn remove_script(&mut self, trigger: &str, name: &str) {
+        self.scripts_by_trigger.remove(&format!("{trigger}:{name}"));
+        self.scripts.remove(name);
+        self.stack_scripts.remove(&format!("{trigger}:{name}"));
+        self.test_scripts.remove(&format!("{trigger}:{name}"));
+        if trigger == "proc" {
+            self.proc_script_ids.remove(name);
+        }
+        if trigger == "label" {
+            self.label_script_ids.remove(name);
+        }
+    }
+
+    /// Re-index source ownership after an importer has written config files.
+    pub fn load_visibility(&mut self, source_dir: &std::path::Path) {
+        self.visibility = Arc::new(crate::sources::Visibility::load(source_dir, self));
+    }
+
+    pub fn game_variables(&self) -> impl Iterator<Item = (&str, &Symbol)> {
+        self.game_vars
+            .iter()
+            .map(|(name, symbol)| (name.as_str(), symbol))
+    }
+
     pub fn new() -> Self {
         SymbolRegistry {
+            profile: None,
+            visibility: Arc::default(),
+            dynamic_returns: HashMap::new(),
+            param_types: HashMap::new(),
+            stack_commands: HashSet::new(),
+            stack_scripts: HashSet::new(),
+            hook_commands: HashMap::new(),
             scripts: HashMap::new(),
             commands: HashMap::new(),
             game_vars: HashMap::new(),
@@ -524,8 +651,15 @@ impl SymbolRegistry {
             components: HashMap::new(),
             interface_ids: HashMap::new(),
             test_scripts: HashSet::new(),
+            client_script_params: HashMap::new(),
             next_script_id: 0,
         }
+    }
+
+    pub fn register_clientscript(&mut self, name: String, id: i32, params: Vec<Type>) {
+        self.trigger_script_ids
+            .insert(format!("clientscript:{name}"), id);
+        self.client_script_params.insert(name, params);
     }
 
     /// Register a script by name with its type information.
@@ -592,6 +726,10 @@ impl SymbolRegistry {
                 },
             },
         );
+    }
+
+    pub fn register_param_type(&mut self, id: i32, ty: Type) {
+        self.param_types.insert(id, ty);
     }
 
     /// Register a game variable.
@@ -669,11 +807,43 @@ impl SymbolRegistry {
     /// name is not registered for that type.
     /// Normalizes the name (lowercase + spaces→underscores) matching TS normalizeName for Basic symbols.
     pub fn lookup_entity_id_typed(&self, name: &str, expected: Type) -> Option<i32> {
-        let normalized = name.to_lowercase().replace(' ', "_");
+        let normalized = normalize_entity_name(name);
         self.entity_ids
-            .get(&normalized)
+            .get(normalized.as_ref())
             .and_then(|e| e.variants.iter().find(|(t, _)| *t == expected))
             .map(|(_, id)| *id)
+    }
+
+    pub fn lookup_reference(&self, name: &str, expected: Type) -> Option<i32> {
+        match expected {
+            Type::Component => name
+                .split_once(':')
+                .and_then(|(iface, com)| self.lookup_component(iface, com))
+                .or_else(|| self.lookup_entity_id_typed(name, expected)),
+            Type::ClientScript => self
+                .script_id_for_trigger("clientscript", name)
+                .or_else(|| self.script_id_for_trigger("proc", name)),
+            Type::Proc => self.proc_script_id(name),
+            Type::Model => self.lookup_entity_id_typed(name, expected).or_else(|| {
+                name.strip_prefix("model_")
+                    .and_then(|id| id.parse::<i32>().ok())
+                    .filter(|id| *id >= 0)
+            }),
+            Type::Varp | Type::Varn | Type::Vars | Type::Varbit => {
+                self.lookup_game_var(name).and_then(|symbol| {
+                    if let SymbolKind::GameVar {
+                        var_id, category, ..
+                    } = &symbol.kind
+                        && category == expected.name()
+                    {
+                        Some(*var_id)
+                    } else {
+                        None
+                    }
+                })
+            }
+            _ => self.lookup_entity_id_typed(name, expected),
+        }
     }
 
     /// Look up a script by name (last registration wins if multiple triggers share the name).
@@ -683,6 +853,11 @@ impl SymbolRegistry {
 
     /// Look up a script by trigger and name (avoids name collisions between triggers).
     pub fn lookup_script_by_trigger(&self, trigger: &str, name: &str) -> Option<&Symbol> {
+        if let Some(symbol) = self.scripts.get(name)
+            && matches!(&symbol.kind, SymbolKind::Script { trigger: found, .. } if found == trigger)
+        {
+            return Some(symbol);
+        }
         self.scripts_by_trigger
             .get(&format!("{}:{}", trigger, name))
             .map(|s| s.as_ref())
@@ -703,11 +878,20 @@ impl SymbolRegistry {
         self.constants.get(name)
     }
 
+    pub fn integer_constant_name(&self, value: i32, prefix: &str) -> Option<&str> {
+        self.constants.values().filter(|symbol| symbol.name.starts_with(prefix)).filter_map(|symbol| {
+            matches!(&symbol.kind, SymbolKind::Constant { int_value: Some(id), .. } if *id == value)
+                .then_some(symbol.name.as_str())
+        }).min()
+    }
+
     /// Look up an entity ID by name (from stat.pack, npc.pack, etc.).
     /// Normalizes the name matching TS normalizeName for Basic symbols.
     pub fn lookup_entity_id(&self, name: &str) -> Option<EntityRef> {
-        let normalized = name.to_lowercase().replace(' ', "_");
-        self.entity_ids.get(&normalized).and_then(|e| e.primary)
+        let normalized = normalize_entity_name(name);
+        self.entity_ids
+            .get(normalized.as_ref())
+            .and_then(|e| e.primary)
     }
 
     /// Free registration-only scratch once every script is registered. The
@@ -751,7 +935,10 @@ impl SymbolRegistry {
         }
         // Fallback: clientscript-pack ids (keyed `clientscript:name`), never
         // registered as RS2 scripts.
-        self.trigger_script_ids.get(&key).copied()
+        self.trigger_script_ids
+            .get(&key)
+            .or_else(|| self.preloaded_script_ids.get(&key))
+            .copied()
     }
 
     pub fn command_opcode(&self, name: &str) -> Option<i32> {
