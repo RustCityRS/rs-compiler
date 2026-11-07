@@ -232,3 +232,37 @@ return($x, "hello");
     assert_eq!(file.scripts.len(), 1);
     assert_eq!(file.scripts[0].return_types.len(), 2);
 }
+
+/// The string parts of the first `return(...)` in `source`, as Debug text.
+fn returned_string(source: &str) -> String {
+    let file = parse_source(source);
+    format!("{:?}", file.scripts[0].body)
+}
+
+#[test]
+fn string_formatting_tags_stay_literal() {
+    // Neptune's STRING_TAG: <br>, <str>, <shad>, <u>, <gt>, <lt> are tags,
+    // not calls to commands of those names.
+    for tag in [
+        "br", "str", "shad", "u", "gt", "lt", "/str", "/u", "/shad", "/col",
+    ] {
+        let body = returned_string(&format!("[proc,tagged]()(string)\nreturn(\"a<{tag}>b\");"));
+        assert!(
+            body.contains(&format!("Literal(\"<{tag}>\")")),
+            "<{tag}> should be a literal part: {body}"
+        );
+        assert!(
+            !body.contains("Identifier"),
+            "<{tag}> parsed as code: {body}"
+        );
+    }
+}
+
+#[test]
+fn bare_identifiers_that_are_not_tags_are_still_commands() {
+    let body = returned_string("[proc,named]()(string)\nreturn(\"hi <displayname>\");");
+    assert!(
+        !body.contains("Literal(\"<displayname>\")"),
+        "<displayname> is a command call: {body}"
+    );
+}

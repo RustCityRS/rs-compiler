@@ -80,16 +80,19 @@ const TRIGGERS: &[TriggerInfo] = &[
     obj("opobj5", 42),
     obj("opobju", 43),
     obj("opobjt", 44),
-    obj("ai_apobj1", 45),
-    obj("ai_apobj2", 46),
-    obj("ai_apobj3", 47),
-    obj("ai_apobj4", 48),
-    obj("ai_apobj5", 49),
-    obj("ai_opobj1", 52),
-    obj("ai_opobj2", 53),
-    obj("ai_opobj3", 54),
-    obj("ai_opobj4", 55),
-    obj("ai_opobj5", 56),
+    // An npc's AI triggers name the npc (or `_category`) whatever its target:
+    // the engine keys them by the acting npc's type, and RuneScriptTS gives them
+    // SubjectMode.Type(NPC).
+    npc("ai_apobj1", 45),
+    npc("ai_apobj2", 46),
+    npc("ai_apobj3", 47),
+    npc("ai_apobj4", 48),
+    npc("ai_apobj5", 49),
+    npc("ai_opobj1", 52),
+    npc("ai_opobj2", 53),
+    npc("ai_opobj3", 54),
+    npc("ai_opobj4", 55),
+    npc("ai_opobj5", 56),
     // ── Loc triggers ─────────────────────────────────────────────────
     loc("aploc1", 59),
     loc("aploc2", 60),
@@ -105,16 +108,19 @@ const TRIGGERS: &[TriggerInfo] = &[
     loc("oploc5", 70),
     loc("oplocu", 71),
     loc("oploct", 72),
-    loc("ai_aploc1", 73),
-    loc("ai_aploc2", 74),
-    loc("ai_aploc3", 75),
-    loc("ai_aploc4", 76),
-    loc("ai_aploc5", 77),
-    loc("ai_oploc1", 80),
-    loc("ai_oploc2", 81),
-    loc("ai_oploc3", 82),
-    loc("ai_oploc4", 83),
-    loc("ai_oploc5", 84),
+    // An npc's AI triggers name the npc (or `_category`) whatever its target:
+    // the engine keys them by the acting npc's type, and RuneScriptTS gives them
+    // SubjectMode.Type(NPC).
+    npc("ai_aploc1", 73),
+    npc("ai_aploc2", 74),
+    npc("ai_aploc3", 75),
+    npc("ai_aploc4", 76),
+    npc("ai_aploc5", 77),
+    npc("ai_oploc1", 80),
+    npc("ai_oploc2", 81),
+    npc("ai_oploc3", 82),
+    npc("ai_oploc4", 83),
+    npc("ai_oploc5", 84),
     // ── Player triggers (no preferred type — fall through to flat lookup) ──
     flat("applayer1", 87),
     flat("applayer2", 88),
@@ -130,16 +136,19 @@ const TRIGGERS: &[TriggerInfo] = &[
     flat("opplayer5", 98),
     flat("opplayeru", 99),
     flat("opplayert", 100),
-    flat("ai_applayer1", 101),
-    flat("ai_applayer2", 102),
-    flat("ai_applayer3", 103),
-    flat("ai_applayer4", 104),
-    flat("ai_applayer5", 105),
-    flat("ai_opplayer1", 108),
-    flat("ai_opplayer2", 109),
-    flat("ai_opplayer3", 110),
-    flat("ai_opplayer4", 111),
-    flat("ai_opplayer5", 112),
+    // An npc's AI triggers name the npc (or `_category`) whatever its target:
+    // the engine keys them by the acting npc's type, and RuneScriptTS gives them
+    // SubjectMode.Type(NPC).
+    npc("ai_applayer1", 101),
+    npc("ai_applayer2", 102),
+    npc("ai_applayer3", 103),
+    npc("ai_applayer4", 104),
+    npc("ai_applayer5", 105),
+    npc("ai_opplayer1", 108),
+    npc("ai_opplayer2", 109),
+    npc("ai_opplayer3", 110),
+    npc("ai_opplayer4", 111),
+    npc("ai_opplayer5", 112),
     // ── AI queue / timer (NPC-keyed, but historically not validated) ──
     npc_no_validate("ai_queue1", 117),
     npc_no_validate("ai_queue2", 118),
@@ -161,7 +170,7 @@ const TRIGGERS: &[TriggerInfo] = &[
     npc_no_validate("ai_queue18", 134),
     npc_no_validate("ai_queue19", 135),
     npc_no_validate("ai_queue20", 136),
-    flat_no_validate("ai_timer", 139),
+    npc_no_validate("ai_timer", 139),
     // ── Held / inventory item triggers ───────────────────────────────
     obj("opheld1", 140),
     obj("opheld2", 141),
@@ -204,8 +213,9 @@ const TRIGGERS: &[TriggerInfo] = &[
     flat_no_validate("zone", 163),
     flat_no_validate("zoneexit", 164),
     stat("changestat", 165),
-    flat("ai_spawn", 166),
-    flat("ai_despawn", 167),
+    // An npc's spawn and despawn name the npc, as its other AI triggers do.
+    npc("ai_spawn", 166),
+    npc("ai_despawn", 167),
 ];
 
 // ── Constructor helpers ──────────────────────────────────────────────
@@ -438,6 +448,27 @@ mod tests {
         // registered last under that name (e.g. a hunt) instead of the stat.
         assert_eq!(subject_type("advancestat"), Some(Type::Stat));
         assert_eq!(subject_type("changestat"), Some(Type::Stat));
+    }
+
+    /// Every npc AI trigger's subject is the acting npc, whatever it targets
+    /// (RuneScriptTS: SubjectMode.Type(NPC); the engine keys them by npc type).
+    #[test]
+    fn npc_ai_triggers_take_an_npc_subject() {
+        let mut names: Vec<String> = Vec::new();
+        for target in ["player", "loc", "obj", "npc"] {
+            for op in ["ap", "op"] {
+                for i in 1..=5 {
+                    names.push(format!("ai_{op}{target}{i}"));
+                }
+            }
+        }
+        for i in 1..=20 {
+            names.push(format!("ai_queue{i}"));
+        }
+        names.extend(["ai_timer", "ai_spawn", "ai_despawn"].map(String::from));
+        for name in &names {
+            assert_eq!(subject_type(name), Some(Type::Npc), "{name}");
+        }
     }
 
     #[test]
