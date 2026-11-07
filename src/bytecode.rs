@@ -1,6 +1,6 @@
 /// RS2 opcodes matching the actual wire format.
 /// These values correspond to the opcodes used by the RuneScape 2 script engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Opcode {
     PushConstantInt = 0,
     PushVarp = 1,
@@ -32,9 +32,13 @@ pub enum Opcode {
     PopStringDiscard = 39,
     GosubWithParams = 40,
     JumpWithParams = 41,
+    PushVarcInt = 42,
+    PopVarcInt = 43,
     DefineArray = 44,
     PushArrayInt = 45,
     PopArrayInt = 46,
+    PushVarcString = 47,
+    PopVarcString = 48,
     PushConstantLong = 54,
     PushLongLocal = 55,
     PopLongLocal = 56,
@@ -49,6 +53,10 @@ pub enum Opcode {
     // Object/string branch operations
     ObjBranchEquals = 86,
     ObjBranchNot = 87,
+    PushClanSettingInt = 112,
+    PushClanSettingVarbit = 113,
+    PushClanSettingLong = 114,
+    PushClanSettingString = 115,
     // Arithmetic operations (4600+ range — engine commands)
     Add = 4600,
     Sub = 4601,
@@ -82,8 +90,74 @@ pub enum Opcode {
     // String operations (4200+ range)
     // Command is used for engine commands - opcode is looked up dynamically
     Command = 65535,
+    Raw = 65533,
+    BranchIfTrue = 65532,
+    BranchIfFalse = 65531,
     // Line number metadata (not a real opcode, used for debugging)
     LineNumber = 65534,
+}
+
+impl Opcode {
+    pub fn core(name: &str) -> Option<Self> {
+        match name {
+            "PushConstantInt" => Some(Self::PushConstantInt),
+            "PushConstantString" => Some(Self::PushConstantString),
+            "PushConstantLong" => Some(Self::PushConstantLong),
+            "PushVarp" => Some(Self::PushVarp),
+            "PopVarp" => Some(Self::PopVarp),
+            "PushVarn" => Some(Self::PushVarn),
+            "PopVarn" => Some(Self::PopVarn),
+            "PushVars" => Some(Self::PushVars),
+            "PopVars" => Some(Self::PopVars),
+            "PushVarbit" => Some(Self::PushVarbit),
+            "PopVarbit" => Some(Self::PopVarbit),
+            "PushVarcInt" => Some(Self::PushVarcInt),
+            "PopVarcInt" => Some(Self::PopVarcInt),
+            "PushVarcString" => Some(Self::PushVarcString),
+            "PopVarcString" => Some(Self::PopVarcString),
+            "PushClanSettingInt" => Some(Self::PushClanSettingInt),
+            "PushClanSettingVarbit" => Some(Self::PushClanSettingVarbit),
+            "PushClanSettingLong" => Some(Self::PushClanSettingLong),
+            "PushClanSettingString" => Some(Self::PushClanSettingString),
+            "Branch" => Some(Self::Branch),
+            "BranchNot" => Some(Self::BranchNot),
+            "BranchEquals" => Some(Self::BranchEquals),
+            "BranchLessThan" => Some(Self::BranchLessThan),
+            "BranchGreaterThan" => Some(Self::BranchGreaterThan),
+            "BranchLessThanOrEquals" => Some(Self::BranchLessThanOrEquals),
+            "BranchGreaterThanOrEquals" => Some(Self::BranchGreaterThanOrEquals),
+            "LongBranchNot" => Some(Self::LongBranchNot),
+            "LongBranchEquals" => Some(Self::LongBranchEquals),
+            "LongBranchLessThan" => Some(Self::LongBranchLessThan),
+            "LongBranchGreaterThan" => Some(Self::LongBranchGreaterThan),
+            "LongBranchLessThanOrEquals" => Some(Self::LongBranchLessThanOrEquals),
+            "LongBranchGreaterThanOrEquals" => Some(Self::LongBranchGreaterThanOrEquals),
+            "BranchIfTrue" => Some(Self::BranchIfTrue),
+            "BranchIfFalse" => Some(Self::BranchIfFalse),
+            "ObjBranchEquals" => Some(Self::ObjBranchEquals),
+            "ObjBranchNot" => Some(Self::ObjBranchNot),
+            "Return" => Some(Self::Return),
+            "Gosub" => Some(Self::Gosub),
+            "GosubWithParams" => Some(Self::GosubWithParams),
+            "Jump" => Some(Self::Jump),
+            "JumpWithParams" => Some(Self::JumpWithParams),
+            "Switch" => Some(Self::Switch),
+            "PushIntLocal" => Some(Self::PushIntLocal),
+            "PopIntLocal" => Some(Self::PopIntLocal),
+            "PushStringLocal" => Some(Self::PushStringLocal),
+            "PopStringLocal" => Some(Self::PopStringLocal),
+            "PushLongLocal" => Some(Self::PushLongLocal),
+            "PopLongLocal" => Some(Self::PopLongLocal),
+            "PopIntDiscard" => Some(Self::PopIntDiscard),
+            "PopStringDiscard" => Some(Self::PopStringDiscard),
+            "PopLongDiscard" => Some(Self::PopLongDiscard),
+            "JoinString" => Some(Self::JoinString),
+            "DefineArray" => Some(Self::DefineArray),
+            "PushArrayInt" => Some(Self::PushArrayInt),
+            "PopArrayInt" => Some(Self::PopArrayInt),
+            _ => None,
+        }
+    }
 }
 
 /// A single instruction in the compiled bytecode.

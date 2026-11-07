@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use crate::bytecode::{CompiledScript, Instruction, Opcode, Operand};
+use crate::clientscript;
 use crate::diagnostic_messages as msg;
 use crate::diagnostics::{
     Applicability, Diagnostic, DiagnosticsCollector, Help, Phase, Severity, Suggestion,
@@ -196,6 +197,7 @@ impl ScriptAnalysis {
 /// so this (command-table-sized) data is built once per compile instead of once
 /// per thread — the pointer-check pass otherwise rebuilt all of it ~N-cores times.
 pub(crate) struct SharedMaps {
+    client: bool,
     cmd_pointers: HashMap<String, PointerHolder>,
     /// Reverse map: command opcode -> command name (lowercase).
     opcode_to_name: HashMap<i32, String>,
@@ -232,7 +234,11 @@ impl SharedMaps {
     /// Build the read-only lookup tables from the script identities (id, name) +
     /// registry. Taking `(id, name)` idents rather than the compiled slice lets
     /// the recompile mode build these from lightweight metas (no held bytecode).
-    fn build<'b>(idents: impl Iterator<Item = (i32, &'b str)>, registry: &SymbolRegistry) -> Self {
+    fn build<'b>(
+        idents: impl Iterator<Item = (i32, &'b str)>,
+        registry: &SymbolRegistry,
+        client: bool,
+    ) -> Self {
         // Build reverse opcode -> name map from registry.commands
         let mut opcode_to_name = HashMap::new();
         for (name, sym) in &registry.commands {
@@ -264,7 +270,17 @@ impl SharedMaps {
         }
 
         SharedMaps {
-            cmd_pointers: command_pointers(),
+            client,
+            cmd_pointers: registry.profile.as_ref().map_or_else(
+                || {
+                    if client {
+                        clientscript::command_pointers(registry)
+                    } else {
+                        command_pointers()
+                    }
+                },
+                |profile| profile.command_pointers.clone(),
+            ),
             opcode_to_name,
             script_id_to_index,
             script_name_to_index,
@@ -278,6 +294,16 @@ impl<'a> PointerChecker<'a> {
         let shared = std::sync::Arc::new(SharedMaps::build(
             scripts.iter().map(|s| (s.id, s.name.as_str())),
             registry,
+            false,
+        ));
+        Self::with_shared(ScriptSource::Resident(scripts), registry, shared)
+    }
+
+    pub fn new_client(scripts: &'a [CompiledScript], registry: &'a SymbolRegistry) -> Self {
+        let shared = std::sync::Arc::new(SharedMaps::build(
+            scripts.iter().map(|s| (s.id, s.name.as_str())),
+            registry,
+            true,
         ));
         Self::with_shared(ScriptSource::Resident(scripts), registry, shared)
     }
@@ -292,6 +318,7 @@ impl<'a> PointerChecker<'a> {
         std::sync::Arc::new(SharedMaps::build(
             scripts.iter().map(|s| (s.id, s.name.as_str())),
             registry,
+            false,
         ))
     }
 
@@ -304,6 +331,7 @@ impl<'a> PointerChecker<'a> {
         std::sync::Arc::new(SharedMaps::build(
             idents.iter().map(|(id, name)| (*id, name.as_str())),
             registry,
+            false,
         ))
     }
 
@@ -336,7 +364,11 @@ impl<'a> PointerChecker<'a> {
     /// Check if an if_button/inv_button trigger on a non-overlay interface
     /// grants p_active_player. Matches ServerPointerChecker.setsPointerTrigger().
     fn interface_trigger_grants_protected(&self, trigger: &str, script_name: &str) -> bool {
-        if !crate::trigger_table::is_button(trigger) {
+        if !self
+            .registry
+            .trigger(trigger)
+            .is_some_and(|trigger| trigger.is_button)
+        {
             return false;
         }
         // Extract interface name from script name: "[trigger,interface_name:component]"
@@ -403,7 +435,22 @@ impl<'a> PointerChecker<'a> {
         };
         let trigger = self.scripts.get(script_idx).trigger.clone();
         let source_path = self.scripts.get(script_idx).source_path.clone();
-        let trigger_set = trigger_pointers(&trigger);
+        let trigger_set = if let Some(profile) = &self.registry.profile {
+            profile
+                .trigger_pointers
+                .get(&trigger)
+                .copied()
+                .unwrap_or_default()
+        } else if self.shared.client {
+            match trigger.as_str() {
+                "proc" => [PointerType::ActiveComponent, PointerType::ActiveComponent2]
+                    .into_iter()
+                    .collect(),
+                _ => PointerSet::new(),
+            }
+        } else {
+            trigger_pointers(&trigger)
+        };
 
         // Ensure analysis exists
         self.ensure_analysis(script_name);
@@ -833,7 +880,9 @@ impl<'a> PointerChecker<'a> {
                 | Opcode::LongBranchLessThanOrEquals
                 | Opcode::LongBranchGreaterThanOrEquals
                 | Opcode::ObjBranchEquals
-                | Opcode::ObjBranchNot => {
+                | Opcode::ObjBranchNot
+                | Opcode::BranchIfTrue
+                | Opcode::BranchIfFalse => {
                     if let Operand::JumpTarget(target_instr_idx) = &instr.operand
                         && let Some(target_node) =
                             resolve_target_node(*target_instr_idx, instructions, &instr_to_node)
@@ -898,28 +947,32 @@ impl<'a> PointerChecker<'a> {
         // The Command may not be immediately before PushConstantInt because argument
         // pushes sit between them. So we scan backwards from PushConstantInt+BranchEquals
         // to find the nearest Command.
-        for window_end in 2..node_order.len() {
-            let push_instr_idx = node_order[window_end - 1];
+        for window_end in 1..node_order.len() {
             let branch_instr_idx = node_order[window_end];
-
-            let push_instr = &instructions[push_instr_idx];
             let branch_instr = &instructions[branch_instr_idx];
-
-            // Check: PushConstantInt(0 or 1) followed by BranchEquals
-            let push_value = match &push_instr.operand {
-                Operand::Int(v) if *v == 0 || *v == 1 => *v,
+            let (push_value, scan_end) = match branch_instr.opcode {
+                Opcode::BranchIfTrue => (1, window_end),
+                Opcode::BranchIfFalse => (0, window_end),
+                Opcode::BranchEquals | Opcode::BranchNot => {
+                    let push_instr = &instructions[node_order[window_end - 1]];
+                    match (push_instr.opcode, &push_instr.operand) {
+                        (Opcode::PushConstantInt, Operand::Int(value @ (0 | 1))) => (
+                            if branch_instr.opcode == Opcode::BranchNot {
+                                1 - value
+                            } else {
+                                *value
+                            },
+                            window_end - 1,
+                        ),
+                        _ => continue,
+                    }
+                }
                 _ => continue,
             };
-            if push_instr.opcode != Opcode::PushConstantInt {
-                continue;
-            }
-            if branch_instr.opcode != Opcode::BranchEquals {
-                continue;
-            }
 
             // Scan backwards to find the nearest Command instruction
             let mut cmd_instr_idx = None;
-            for scan in (0..window_end - 1).rev() {
+            for scan in (0..scan_end).rev() {
                 let idx = node_order[scan];
                 if instructions[idx].opcode == Opcode::Command {
                     cmd_instr_idx = Some(idx);
@@ -937,6 +990,8 @@ impl<'a> PointerChecker<'a> {
                         | Opcode::BranchGreaterThan
                         | Opcode::BranchLessThanOrEquals
                         | Opcode::BranchGreaterThanOrEquals
+                        | Opcode::BranchIfTrue
+                        | Opcode::BranchIfFalse
                 ) {
                     break;
                 }
@@ -945,6 +1000,9 @@ impl<'a> PointerChecker<'a> {
                 Some(idx) => idx,
                 None => continue,
             };
+            if self.shared.client && (scan_end == 0 || node_order[scan_end - 1] != cmd_instr_idx) {
+                continue;
+            }
             let cmd_instr = &instructions[cmd_instr_idx];
 
             // Look up command pointer info
@@ -1078,7 +1136,7 @@ impl<'a> PointerChecker<'a> {
                 // secondary game vars emit `(1 << 16) | var_id`). TS emits
                 // distinct opcodes (PushVar/PushVar2); we flatten that into a
                 // single opcode + operand flag and recover it here.
-                Opcode::PushVarp | Opcode::PushVarbit => {
+                Opcode::PushVarp | Opcode::PushVarbit if !self.shared.client => {
                     let pi = if is_secondary_var_operand(&instr.operand) {
                         PointerType::ActivePlayer2.index()
                     } else {
@@ -1087,7 +1145,7 @@ impl<'a> PointerChecker<'a> {
                     analysis.required[pi].push(node_idx);
                 }
 
-                Opcode::PopVarp | Opcode::PopVarbit => {
+                Opcode::PopVarp | Opcode::PopVarbit if !self.shared.client => {
                     let pi = if is_secondary_var_operand(&instr.operand) {
                         PointerType::ActivePlayer2.index()
                     } else {
@@ -1096,7 +1154,7 @@ impl<'a> PointerChecker<'a> {
                     analysis.required[pi].push(node_idx);
                 }
 
-                Opcode::PushVarn | Opcode::PopVarn => {
+                Opcode::PushVarn | Opcode::PopVarn if !self.shared.client => {
                     let pi = if is_secondary_var_operand(&instr.operand) {
                         PointerType::ActiveNpc2.index()
                     } else {
@@ -1116,7 +1174,7 @@ impl<'a> PointerChecker<'a> {
             let pi = ptr.index();
             analysis.required[pi].push(node_idx);
         }
-        for ptr in holder.set.iter() {
+        for ptr in holder.set.iter().filter(|_| !holder.conditional_set) {
             let pi = ptr.index();
             analysis.set_list[pi].push(node_idx);
         }
@@ -1902,6 +1960,54 @@ mod tests {
             0,
             "conditional setter should provide p_active_player on true branch, got {} warnings",
             diags.warning_count()
+        );
+    }
+
+    #[test]
+    fn boolean_branches_preserve_conditional_pointer_analysis() {
+        let registry = registry_with_commands(&[("p_finduid", 4267), ("p_delay", 4268)]);
+        for (opcode, target, skip) in [(Opcode::BranchIfTrue, 5, 6), (Opcode::BranchIfFalse, 6, 5)]
+        {
+            let script = make_script(
+                "test",
+                "ai_timer",
+                0,
+                vec![
+                    line(1),
+                    push_int(0),
+                    cmd(4267),
+                    Instruction::new(opcode, Operand::JumpTarget(target)),
+                    branch(skip),
+                    cmd(4268),
+                    ret(),
+                ],
+            );
+            assert_eq!(
+                PointerChecker::new(&[script], &registry)
+                    .run()
+                    .warning_count(),
+                0
+            );
+        }
+        let script = make_script(
+            "test",
+            "ai_timer",
+            0,
+            vec![
+                line(1),
+                push_int(0),
+                cmd(4267),
+                Instruction::new(Opcode::BranchIfFalse, Operand::JumpTarget(5)),
+                branch(6),
+                cmd(4268),
+                ret(),
+            ],
+        );
+        assert!(
+            PointerChecker::new(&[script], &registry)
+                .run()
+                .warning_count()
+                > 0
         );
     }
 

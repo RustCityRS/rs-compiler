@@ -1,0 +1,839 @@
+use crate::bytecode::{CompiledScript, Opcode, Operand};
+use crate::lexer::Lexer;
+use crate::parser::{Expr, Parser, ScriptFile, Statement, StringPart};
+use crate::pointer::{PointerHolder, PointerType};
+use crate::pointer_checker::PointerChecker;
+use crate::symbol::{ReturnType, SymbolKind, SymbolRegistry};
+use crate::symloader::{load_constant_files, load_game_var_types, load_packs};
+use crate::typechecker::TypeChecker;
+use crate::types::BaseVarType;
+use crate::types::Type;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs;
+use std::io::{Error, ErrorKind, Result};
+use std::path::{Path, PathBuf};
+
+pub mod decode;
+pub mod decompile;
+pub mod format;
+pub(crate) mod hooks;
+use format::{Format, Width};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CommandKind {
+    Fixed,
+    Hook,
+    HookComponent,
+    Enum,
+    Param,
+}
+
+pub struct Command {
+    pub opcode: u16,
+    pub name: String,
+    pub params: Vec<Type>,
+    pub returns: Vec<Type>,
+    pub kind: CommandKind,
+}
+
+pub(crate) fn command_pointers(registry: &SymbolRegistry) -> HashMap<String, PointerHolder> {
+    let mut pointers = HashMap::new();
+    for name in registry.commands.keys() {
+        let name = name.to_lowercase();
+        if !(name.starts_with("cc_") || name == "if_find") || name == "cc_deleteall" {
+            continue;
+        }
+        for (prefix, pointer) in [
+            ("", PointerType::ActiveComponent),
+            (".", PointerType::ActiveComponent2),
+        ] {
+            let mut holder = PointerHolder::default();
+            match name.as_str() {
+                "cc_create" => holder.set.insert(pointer),
+                "cc_find" | "if_find" => {
+                    holder.set.insert(pointer);
+                    holder.conditional_set = true;
+                }
+                _ => holder.required.insert(pointer),
+            }
+            pointers.insert(format!("{prefix}{name}"), holder);
+        }
+    }
+    pointers
+}
+
+pub fn hook_types(signature: &str, triggers: usize, explicit: bool) -> Vec<Type> {
+    let mut types = vec![Type::ClientScript];
+    types.extend(
+        signature
+            .trim_end_matches('Y')
+            .chars()
+            .map(|ch| Type::from_char(ch).unwrap_or(Type::Int)),
+    );
+    if signature.ends_with('Y') {
+        types.extend(vec![Type::Int; triggers + 1]);
+    }
+    types.push(Type::String);
+    if explicit {
+        types.push(Type::Component);
+    }
+    types
+}
+
+#[derive(Clone, Debug)]
+pub struct Source {
+    pub path: PathBuf,
+    pub file: ScriptFile,
+}
+
+impl Source {
+    pub fn parse(text: &str, path: &Path) -> Result<Self> {
+        Ok(Self {
+            path: path.to_path_buf(),
+            file: parse(text, path)?,
+        })
+    }
+
+    pub fn compile(
+        &self,
+        registry: &SymbolRegistry,
+        format: &Format,
+    ) -> Result<Vec<(i32, Vec<u8>)>> {
+        compile(&self.file, &self.path, registry, format)
+    }
+}
+
+pub fn script_key(name: &str) -> String {
+    let (trigger, name) = name
+        .strip_prefix('[')
+        .and_then(|name| name.strip_suffix(']'))
+        .and_then(|name| name.split_once(','))
+        .unwrap_or(("proc", name));
+    let name: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("[{trigger},{name}]")
+}
+
+pub fn script_ids(pack: &Path) -> Result<HashMap<String, i32>> {
+    let mut ids = HashMap::new();
+    for line in fs::read_to_string(pack.join("clientscript.pack"))?.lines() {
+        if let Some((id, name)) = line.split_once('=') {
+            let key = script_key(name);
+            if ids
+                .insert(key.clone(), id.parse::<i32>().map_err(invalid)?)
+                .is_some()
+            {
+                return Err(invalid(format!("Duplicate clientscript name {key}")));
+            }
+        }
+    }
+    Ok(ids)
+}
+
+pub fn compile_sources(
+    sources: &[Source],
+    source_dir: &Path,
+    pack: &Path,
+) -> Result<BTreeMap<u32, Vec<u8>>> {
+    compile_registered_sources(sources, pack, registry(source_dir, pack)?)
+}
+
+pub fn compile_directory(source_dir: &Path, pack: &Path) -> Result<BTreeMap<u32, Vec<u8>>> {
+    let registry = registry(source_dir, pack)?;
+    let sources = load_sources(source_dir)?;
+    compile_registered_sources(&sources, pack, registry)
+}
+
+pub fn compile_registered_sources(
+    sources: &[Source],
+    pack: &Path,
+    mut registry: SymbolRegistry,
+) -> Result<BTreeMap<u32, Vec<u8>>> {
+    let mut ids = script_ids(pack)?;
+    let mut next = ids.values().copied().max().unwrap_or(-1) + 1;
+    for source in sources {
+        for script in &source.file.scripts {
+            if let Some(id) = script
+                .name
+                .strip_prefix("clientscript_")
+                .and_then(|id| id.parse::<i32>().ok())
+            {
+                next = next.max(
+                    id.checked_add(1)
+                        .ok_or_else(|| invalid("Clientscript ID overflow"))?,
+                );
+            }
+        }
+    }
+    let mut new_ids = Vec::new();
+    let format = Format::load(&pack.join("cs2_command.pack"))?;
+    let mut declared = HashSet::new();
+    for source in sources {
+        std::sync::Arc::make_mut(&mut registry.visibility)
+            .declare_source(&source.path, &source.file);
+        for script in &source.file.scripts {
+            let key = format!("[{},{}]", script.trigger, script.name);
+            if !declared.insert(key.clone()) {
+                return Err(invalid(format!("Duplicate script {key}")));
+            }
+            if !ids.contains_key(&key)
+                && !script
+                    .name
+                    .strip_prefix("clientscript_")
+                    .is_some_and(|id| id.parse::<u32>().is_ok())
+            {
+                ids.insert(key.clone(), next);
+                new_ids.push((next, key));
+                next = next
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("Clientscript ID overflow"))?;
+            }
+        }
+        register(&source.file, &ids, &mut registry)?;
+    }
+    let mut scripts = Vec::new();
+    for source in sources {
+        scripts.extend(checked_codegen(&source.file, &source.path, &registry)?);
+    }
+    PointerChecker::new_client(&scripts, &registry)
+        .run()
+        .print_all();
+    let mut compiled = BTreeMap::new();
+    for script in scripts {
+        if compiled
+            .insert(
+                u32::try_from(script.id).map_err(invalid)?,
+                encode(&script, &format)?,
+            )
+            .is_some()
+        {
+            return Err(invalid(format!("Duplicate clientscript ID {}", script.id)));
+        }
+    }
+    if !new_ids.is_empty() {
+        let path = pack.join("clientscript.pack");
+        let mut text = fs::read_to_string(&path)?;
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        for (id, key) in new_ids {
+            text.push_str(&format!("{id}={key}\n"));
+        }
+        fs::write(path, text)?;
+    }
+    Ok(compiled)
+}
+
+pub fn load_sources(dir: &Path) -> Result<Vec<Source>> {
+    let mut sources = Vec::new();
+    for path in crate::sources::script_files(dir, "cs2")? {
+        if path
+            .file_name()
+            .is_some_and(|name| name != "engine.cs2" && name != "engine.gs2")
+            && !path
+                .components()
+                .any(|part| part.as_os_str().to_string_lossy().starts_with('_'))
+        {
+            sources.push(Source::parse(&fs::read_to_string(&path)?, &path)?);
+        }
+    }
+    sources.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(sources)
+}
+
+pub fn load_commands(path: &Path, engine_path: &Path) -> Result<Vec<Command>> {
+    let format = Format::load(path)?;
+    let engine_text = fs::read_to_string(engine_path)?;
+    commands(&format, &engine_text, engine_path)
+}
+
+/// Parse host-supplied command signatures without reading files.
+pub fn commands(format: &Format, engine_text: &str, label: &Path) -> Result<Vec<Command>> {
+    let engine = parse(engine_text, label)?;
+    let engine_lines: Vec<_> = engine_text.lines().collect();
+    let mut signatures = HashMap::new();
+    for script in engine.scripts {
+        if script.trigger != "command" || !script.body.is_empty() {
+            return Err(invalid("engine.cs2 must contain command signatures"));
+        }
+        if signatures.insert(script.name.clone(), script).is_some() {
+            return Err(invalid("Duplicate engine.cs2 command"));
+        }
+    }
+    let mut commands = Vec::new();
+    for (&opcode, name) in &format.commands {
+        let signature = signatures
+            .remove(name)
+            .ok_or_else(|| invalid(format!("Missing engine.cs2 signature for {name}")))?;
+        let kind = engine_lines
+            .get(signature.line.saturating_sub(1))
+            .and_then(|line| line.split_once("// @signature="))
+            .map_or("", |(_, kind)| kind.trim());
+        let kind = match kind {
+            "" => CommandKind::Fixed,
+            "hook" => CommandKind::Hook,
+            "hook_component" => CommandKind::HookComponent,
+            "enum" => CommandKind::Enum,
+            "param" => CommandKind::Param,
+            kind => return Err(invalid(format!("Unknown command kind {kind}"))),
+        };
+        commands.push(Command {
+            opcode,
+            name: name.clone(),
+            params: signature
+                .params
+                .iter()
+                .map(|param| param.param_type)
+                .collect(),
+            returns: signature.return_types,
+            kind,
+        });
+    }
+    if !signatures.is_empty() {
+        return Err(invalid(
+            "engine.cs2 contains commands without opcode definitions",
+        ));
+    }
+    Ok(commands)
+}
+
+pub fn registry(source_dir: &Path, pack: &Path) -> Result<SymbolRegistry> {
+    let root = crate::sources::target_dir(source_dir, crate::sources::Scope::Client);
+    let source_dir = root.as_path();
+    let mut registry = SymbolRegistry::new();
+    load_packs(&mut registry, pack);
+    for (key, id) in script_ids(pack)? {
+        let (trigger, name) = key[1..key.len() - 1].split_once(',').unwrap();
+        registry
+            .trigger_script_ids
+            .insert(format!("{trigger}:{name}"), id);
+        registry.script_ids.insert(name.to_owned(), id);
+        if trigger == "proc" {
+            registry.proc_script_ids.insert(name.to_owned(), id);
+        }
+    }
+    registry.commands.clear();
+    registry.command_param_types.clear();
+    registry.game_vars.retain(|_, symbol| {
+        matches!(
+            &symbol.kind, SymbolKind::GameVar { category, .. }
+            if matches!(category.as_str(), "varp" | "varbit")
+        )
+    });
+    let engine_path = source_dir.join("engine.cs2");
+    for command in load_commands(&pack.join("cs2_command.pack"), &engine_path)? {
+        registry.register_command(
+            command.name.to_owned(),
+            command.opcode as i32,
+            command.params.clone(),
+            command.returns.clone(),
+        );
+        registry.stack_commands.insert(command.name.to_owned());
+        if matches!(command.kind, CommandKind::Hook | CommandKind::HookComponent) {
+            registry.hook_commands.insert(
+                command.name.to_owned(),
+                command.kind == CommandKind::HookComponent,
+            );
+        }
+        let dynamic = match command.kind {
+            CommandKind::Enum => Some(ReturnType::TypeArgument(1)),
+            CommandKind::Param => Some(ReturnType::ParamArgument(
+                command.params.len().saturating_sub(1),
+            )),
+            _ => None,
+        };
+        if let Some(dynamic) = dynamic {
+            registry
+                .dynamic_returns
+                .insert(command.name.clone(), dynamic);
+        }
+    }
+    for (name, ty) in [
+        ("__pop_int", Type::Int),
+        ("__pop_string", Type::String),
+        ("__pop_long", Type::Long),
+        ("__join", Type::String),
+        ("__get_array", Type::Int),
+    ] {
+        registry.register_command(name.to_owned(), 0, Vec::new(), vec![ty]);
+    }
+    for (kind, ty) in [("varc_int", Type::Int), ("varc_string", Type::String)] {
+        let path = pack.join(format!("{kind}.pack"));
+        if !path.exists() {
+            continue;
+        }
+        for line in fs::read_to_string(path)?.lines() {
+            if let Some((id, name)) = line.split_once('=') {
+                registry.register_game_var(
+                    name.to_owned(),
+                    ty,
+                    id.parse::<i32>().map_err(invalid)?,
+                    kind.to_owned(),
+                );
+            }
+        }
+    }
+    {
+        let mut files = crate::sources::config_files(source_dir);
+        files.retain(|path| path.extension().is_some_and(|ext| ext == "param"));
+        files.sort_by_key(|path| {
+            (
+                !path.components().any(|part| part.as_os_str() == "_unpack"),
+                path.clone(),
+            )
+        });
+        for file in files {
+            let text = fs::read_to_string(file)?;
+            let mut id = None;
+            for line in text.lines().map(str::trim) {
+                if let Some(name) = line
+                    .strip_prefix('[')
+                    .and_then(|line| line.strip_suffix(']'))
+                {
+                    id = registry.lookup_reference(name, Type::Param);
+                    if let Some(id) = id {
+                        registry.register_param_type(id, Type::Int);
+                    }
+                } else if let Some(ty) = line.strip_prefix("type=")
+                    && let Some(id) = id
+                {
+                    let ty = ty.trim();
+                    let ty = if let Some(byte) = ty.strip_prefix("byte:0x") {
+                        let byte = u8::from_str_radix(byte, 16).map_err(invalid)?;
+                        Type::from_char(byte as char).unwrap_or(Type::Int)
+                    } else {
+                        Type::from_name(ty)
+                            .ok_or_else(|| invalid(format!("Unknown parameter type {ty}")))?
+                    };
+                    registry.register_param_type(id, ty);
+                }
+            }
+        }
+    }
+    let configs = crate::sources::config_files(source_dir);
+    load_constant_files(&mut registry, &configs);
+    load_game_var_types(&mut registry, &configs);
+    registry.visibility =
+        std::sync::Arc::new(crate::sources::Visibility::load(source_dir, &registry));
+    Ok(registry)
+}
+
+pub fn parse(source: &str, path: &Path) -> Result<ScriptFile> {
+    let path = path.to_path_buf();
+    let tokens = Lexer::new(source, &path).tokenize().map_err(invalid)?;
+    Parser::new(tokens, &path).parse().map_err(invalid)
+}
+
+pub fn register(
+    file: &ScriptFile,
+    ids: &HashMap<String, i32>,
+    registry: &mut SymbolRegistry,
+) -> Result<()> {
+    for script in &file.scripts {
+        for statement in &script.body {
+            register_variables(statement, registry);
+        }
+        if !matches!(script.trigger.as_str(), "proc" | "clientscript") {
+            return Err(invalid(format!(
+                "Invalid client trigger {}",
+                script.trigger
+            )));
+        }
+        let id = ids
+            .get(&format!("[{},{}]", script.trigger, script.name))
+            .or_else(|| ids.get(&script.name))
+            .copied()
+            .or_else(|| {
+                script
+                    .name
+                    .strip_prefix("clientscript_")
+                    .and_then(|id| id.parse::<i32>().ok())
+                    .filter(|id| *id >= 0)
+            })
+            .ok_or_else(|| invalid(format!("Missing clientscript ID for {}", script.name)))?;
+        registry
+            .preloaded_script_ids
+            .insert(format!("{}:{}", script.trigger, script.name), id);
+        registry.register_script(
+            script.name.clone(),
+            script.trigger.clone(),
+            script.params.iter().map(|p| p.param_type).collect(),
+            script.return_types.clone(),
+        );
+        registry
+            .stack_scripts
+            .insert(format!("{}:{}", script.trigger, script.name));
+    }
+    Ok(())
+}
+
+pub(crate) fn register_variables(statement: &Statement, registry: &mut SymbolRegistry) {
+    match statement {
+        Statement::VarDeclaration {
+            value: Some(value), ..
+        }
+        | Statement::Expression { expr: value, .. }
+        | Statement::ArrayDeclaration { size: value, .. } => {
+            register_expr_variables(value, registry)
+        }
+        Statement::Assignment { target, value, .. } => {
+            register_expr_variables(target, registry);
+            register_expr_variables(value, registry);
+        }
+        Statement::Return { values, .. } => {
+            for value in values {
+                register_expr_variables(value, registry);
+            }
+        }
+        Statement::If {
+            condition,
+            body,
+            else_if,
+            else_body,
+            ..
+        } => {
+            register_expr_variables(condition, registry);
+            for statement in body {
+                register_variables(statement, registry);
+            }
+            for (condition, body, _) in else_if {
+                register_expr_variables(condition, registry);
+                for statement in body {
+                    register_variables(statement, registry);
+                }
+            }
+            if let Some(body) = else_body {
+                for statement in body {
+                    register_variables(statement, registry);
+                }
+            }
+        }
+        Statement::While {
+            condition, body, ..
+        } => {
+            register_expr_variables(condition, registry);
+            for statement in body {
+                register_variables(statement, registry);
+            }
+        }
+        Statement::Switch {
+            expr,
+            cases,
+            default,
+            ..
+        } => {
+            register_expr_variables(expr, registry);
+            for case in cases {
+                for statement in &case.body {
+                    register_variables(statement, registry);
+                }
+            }
+            if let Some(body) = default {
+                for statement in body {
+                    register_variables(statement, registry);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn register_expr_variables(expr: &Expr, registry: &mut SymbolRegistry) {
+    match expr {
+        Expr::GameVar(name, _) if registry.lookup_game_var(name).is_none() => {
+            for (kind, ty) in [
+                ("varp", Type::Int),
+                ("varbit", Type::Int),
+                ("varc_int", Type::Int),
+                ("varc_string", Type::String),
+                ("clansetting_int", Type::Int),
+                ("clansetting_varbit", Type::Int),
+                ("clansetting_long", Type::Long),
+                ("clansetting_string", Type::String),
+            ] {
+                if let Some(id) = name
+                    .strip_prefix(&format!("{kind}_"))
+                    .and_then(|s| s.parse::<u16>().ok())
+                {
+                    registry.register_game_var(name.clone(), ty, id as i32, kind.to_owned());
+                }
+            }
+        }
+        Expr::ArrayAccess { index, .. } | Expr::Calc(index) => {
+            register_expr_variables(index, registry)
+        }
+        Expr::BinaryOp { lhs, rhs, .. } | Expr::LogicalOp { lhs, rhs, .. } => {
+            register_expr_variables(lhs, registry);
+            register_expr_variables(rhs, registry);
+        }
+        Expr::CommandCall { name, args, .. } => {
+            if let Some(&explicit) = registry.hook_commands.get(name.trim_start_matches('.'))
+                && args.len() == 1 + usize::from(explicit)
+                && let Some(Expr::StringLiteral(text)) = args.first()
+                && let Ok(values) = hooks::parse(text)
+            {
+                if hooks::transmit_kind(name).is_some_and(|kind| kind.starts_with("var"))
+                    && let Some(Expr::Tuple(transmits)) = values.get(2)
+                {
+                    for value in transmits {
+                        if let Expr::Identifier(name) = value {
+                            register_expr_variables(&Expr::GameVar(name.clone(), 0), registry);
+                        }
+                    }
+                }
+                for value in &values {
+                    register_expr_variables(value, registry);
+                }
+            }
+            for arg in args {
+                register_expr_variables(arg, registry);
+            }
+        }
+        Expr::ProcCall { args, .. }
+        | Expr::JumpCall { args, .. }
+        | Expr::MultiAssign(args, _)
+        | Expr::Tuple(args) => {
+            for arg in args {
+                register_expr_variables(arg, registry);
+            }
+        }
+        Expr::JoinedString { parts } => {
+            for part in parts {
+                if let StringPart::Expr(expr) = part {
+                    register_expr_variables(expr, registry);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn compile(
+    file: &ScriptFile,
+    path: &Path,
+    registry: &SymbolRegistry,
+    format: &Format,
+) -> Result<Vec<(i32, Vec<u8>)>> {
+    let scripts = checked_codegen(file, path, registry)?;
+    PointerChecker::new_client(&scripts, registry)
+        .run()
+        .print_all();
+    scripts
+        .into_iter()
+        .map(|compiled| Ok((compiled.id, encode(&compiled, format)?)))
+        .collect()
+}
+
+fn checked_codegen(
+    file: &ScriptFile,
+    path: &Path,
+    registry: &SymbolRegistry,
+) -> Result<Vec<CompiledScript>> {
+    let mut checker = TypeChecker::new(registry);
+    checker.check_file(file, path);
+    if checker.diagnostics.has_errors() {
+        return Err(invalid(
+            checker
+                .diagnostics
+                .errors()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+    }
+    codegen(file, path, registry)
+}
+
+pub(crate) fn codegen(
+    file: &ScriptFile,
+    path: &Path,
+    registry: &SymbolRegistry,
+) -> Result<Vec<CompiledScript>> {
+    let mut diagnostics = crate::diagnostics::DiagnosticsCollector::new();
+    let compiled = crate::compiler::compile_file(file, path, registry, true, &mut diagnostics);
+    if diagnostics.has_errors() {
+        return Err(invalid(
+            diagnostics
+                .errors()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(
+                    "
+",
+                ),
+        ));
+    }
+    Ok(compiled)
+}
+
+pub fn encode(script: &CompiledScript, format: &Format) -> Result<Vec<u8>> {
+    encode_named(script, "", format)
+}
+
+pub fn encode_named(script: &CompiledScript, name: &str, format: &Format) -> Result<Vec<u8>> {
+    let mut positions = Vec::with_capacity(script.instructions.len() + 1);
+    let mut count = 0;
+    for instruction in &script.instructions {
+        positions.push(count);
+        if instruction.opcode != Opcode::LineNumber {
+            count += 1;
+        }
+    }
+    positions.push(count);
+    let mut out = Vec::new();
+    write_string(&mut out, name)?;
+    let mut switches = Vec::new();
+    for (i, instruction) in script.instructions.iter().enumerate() {
+        if instruction.opcode == Opcode::LineNumber {
+            continue;
+        }
+        if instruction.opcode == Opcode::Raw {
+            let Operand::Long(value) = instruction.operand else {
+                return Err(invalid("Invalid raw client instruction"));
+            };
+            let opcode = (value >> 32) as u16;
+            let operand = value as i32;
+            out.extend_from_slice(&opcode.to_be_bytes());
+            format.width(opcode).integer(&mut out, operand as i64)?;
+            continue;
+        }
+        let (opcode, width) = match instruction.opcode {
+            Opcode::Command => match instruction.operand {
+                Operand::Int(value) => (value as u16, format.width(value as u16)),
+                _ => return Err(invalid("Unresolved client command")),
+            },
+            value => format.instruction(value)?,
+        };
+        let value = match &instruction.operand {
+            Operand::None => 0,
+            Operand::Int(value) if instruction.opcode == Opcode::Command => (value >> 16) & 255,
+            Operand::Int(value) => *value,
+            Operand::JumpTarget(target) => {
+                *positions
+                    .get(*target)
+                    .ok_or_else(|| invalid("Invalid branch target"))?
+                    - positions[i]
+                    - 1
+            }
+            Operand::StringCount(value) => i32::try_from(*value).map_err(invalid)?,
+            Operand::ArrayDef(slot, kind) => (slot << 16) | *kind as i32,
+            Operand::SwitchTable(index) => {
+                let table = script
+                    .switch_tables
+                    .get(*index as usize)
+                    .ok_or_else(|| invalid("Invalid switch table"))?;
+                let mut cases = Vec::with_capacity(table.len());
+                for (key, target) in table {
+                    let position = positions
+                        .get(*target)
+                        .ok_or_else(|| invalid("Invalid switch target"))?;
+                    cases.push((*key, *position - positions[i] - 1));
+                }
+                switches.push(cases);
+                i32::try_from(switches.len() - 1).map_err(invalid)?
+            }
+            Operand::Str(index) => {
+                if width != Width::String {
+                    return Err(invalid(
+                        "String instruction requires a string operand definition",
+                    ));
+                }
+                out.extend_from_slice(&opcode.to_be_bytes());
+                write_string(&mut out, &script.strings[*index as usize])?;
+                continue;
+            }
+            Operand::Long(value) => {
+                out.extend_from_slice(&opcode.to_be_bytes());
+                width.integer(&mut out, *value)?;
+                continue;
+            }
+        };
+        out.extend_from_slice(&opcode.to_be_bytes());
+        width.integer(&mut out, value as i64)?;
+    }
+    out.extend_from_slice(&count.to_be_bytes());
+    for counts in [
+        [
+            script.int_local_count,
+            script.string_local_count,
+            script.long_local_count,
+        ],
+        [
+            script.int_arg_count,
+            script.string_arg_count,
+            script.long_arg_count,
+        ],
+    ] {
+        for (kind, value) in [BaseVarType::Integer, BaseVarType::String, BaseVarType::Long]
+            .into_iter()
+            .zip(counts)
+        {
+            if value != 0 && !format.local_types.contains(&kind) {
+                return Err(invalid(format!("Unsupported {kind:?} locals")));
+            }
+        }
+        for kind in &format.local_types {
+            let index = match kind {
+                BaseVarType::Integer => 0,
+                BaseVarType::String => 1,
+                BaseVarType::Long => 2,
+            };
+            out.extend_from_slice(&counts[index].to_be_bytes());
+        }
+    }
+    if !format.switches {
+        if !switches.is_empty() {
+            return Err(invalid(
+                "Switch tables are unsupported by input bytecode definitions",
+            ));
+        }
+        return Ok(out);
+    }
+    let start = out.len();
+    out.push(u8::try_from(switches.len()).map_err(invalid)?);
+    for table in switches {
+        out.extend_from_slice(&u16::try_from(table.len()).map_err(invalid)?.to_be_bytes());
+        for (key, offset) in table {
+            out.extend_from_slice(&key.to_be_bytes());
+            out.extend_from_slice(&offset.to_be_bytes());
+        }
+    }
+    let size = u16::try_from(out.len() - start).map_err(invalid)?;
+    out.extend_from_slice(&size.to_be_bytes());
+    Ok(out)
+}
+
+pub fn write_string(out: &mut Vec<u8>, text: &str) -> Result<()> {
+    const CP1252: &str = "€\u{81}‚ƒ„…†‡ˆ‰Š‹Œ\u{8d}Ž\u{8f}\u{90}‘’“”•–—˜™š›œ\u{9d}žŸ";
+    for ch in text.chars() {
+        let value = ch as u32;
+        if value == 0 {
+            return Err(invalid("NUL in clientscript string"));
+        }
+        if value < 128 || (160..=255).contains(&value) {
+            out.push(value as u8);
+        } else if let Some(index) = CP1252.chars().position(|c| c == ch) {
+            out.push(128 + index as u8);
+        } else {
+            return Err(invalid(format!(
+                "Character {ch:?} cannot be encoded in CP1252"
+            )));
+        }
+    }
+    out.push(0);
+    Ok(())
+}
+
+fn invalid(message: impl ToString) -> Error {
+    Error::new(ErrorKind::InvalidData, message.to_string())
+}

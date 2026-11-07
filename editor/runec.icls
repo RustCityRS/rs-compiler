@@ -1,0 +1,23 @@
+<scheme name="runec" version="142" parent_scheme="Darcula">
+  <attributes>
+    <option name="LSP_KEYWORD"><value><option name="FOREGROUND" value="cc7832" /></value></option>
+    <option name="LSP_TYPE"><value><option name="FOREGROUND" value="cc7832" /></value></option>
+    <option name="LSP_MACRO"><value><option name="FOREGROUND" value="cc7832" /></value></option>
+    <option name="LSP_DECORATOR"><value><option name="FOREGROUND" value="ffc66d" /></value></option>
+    <option name="LSP_DEFAULT_LIBRARY_FUNCTION"><value><option name="FOREGROUND" value="ffc66d" /></value></option>
+    <option name="LSP_FUNCTION"><value><option name="FOREGROUND" value="569cd6" /></value></option>
+    <option name="LSP_FUNCTION_DECLARATION"><value><option name="FOREGROUND" value="569cd6" /></value></option>
+    <option name="LSP_NAMESPACE"><value><option name="FOREGROUND" value="569cd6" /></value></option>
+    <option name="LSP_NAMESPACE_DECLARATION"><value><option name="FOREGROUND" value="569cd6" /></value></option>
+    <option name="LSP_STATIC_READONLY_VARIABLE"><value><option name="FOREGROUND" value="be84d1" /><option name="FONT_TYPE" value="2" /></value></option>
+    <option name="LSP_STATIC_VARIABLE"><value><option name="FOREGROUND" value="be84d1" /><option name="FONT_TYPE" value="2" /></value></option>
+    <option name="LSP_ENUM_MEMBER"><value><option name="FOREGROUND" value="be84d1" /></value></option>
+    <option name="LSP_PROPERTY"><value><option name="FOREGROUND" value="ff6b68" /></value></option>
+    <option name="LSP_STRING"><value><option name="FOREGROUND" value="6a8759" /></value></option>
+    <option name="LSP_NUMBER"><value><option name="FOREGROUND" value="6897bb" /></value></option>
+    <option name="LSP_COMMENT"><value><option name="FOREGROUND" value="808080" /></value></option>
+    <option name="LSP_VARIABLE"><value><option name="FOREGROUND" value="a9b7c6" /></value></option>
+    <option name="LSP_PARAMETER"><value><option name="FOREGROUND" value="a9b7c6" /></value></option>
+    <option name="LSP_OPERATOR"><value><option name="FOREGROUND" value="a9b7c6" /></value></option>
+  </attributes>
+</scheme>

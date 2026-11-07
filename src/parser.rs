@@ -1,7 +1,7 @@
 use crate::diagnostic_messages as msg;
 use crate::error::SyntaxError;
 use crate::lexer::Lexer;
-use crate::token::{Kind, Token};
+use crate::token::{ESCAPED_LT, Kind, Token};
 use crate::types::Type;
 use std::path::{Path, PathBuf};
 
@@ -155,6 +155,7 @@ pub enum Expr {
     /// Multiple assignment targets: $a, $b = multi_return_call(...)
     /// Contains (targets, target_lines) for per-expression LineNumber emission.
     MultiAssign(Vec<Expr>, Vec<usize>),
+    Tuple(Vec<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -193,15 +194,29 @@ pub struct Parser {
     pos: usize,
     file_path: PathBuf,
     is_sub_parser: bool,
+    nesting: usize,
+    pub max_nesting: usize,
+    recovering: bool,
+    recovered_errors: Vec<SyntaxError>,
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<Token>, file_name: &Path) -> Self {
+    pub fn new(mut tokens: Vec<Token>, file_name: &Path) -> Self {
+        if tokens
+            .last()
+            .is_none_or(|token| token.kind != Kind::EndOfFile)
+        {
+            tokens.push(Token::new(Kind::EndOfFile, String::new(), 1, 1));
+        }
         Self {
             tokens,
             pos: 0,
             file_path: file_name.to_path_buf(),
             is_sub_parser: false,
+            nesting: 0,
+            max_nesting: 256,
+            recovering: false,
+            recovered_errors: Vec::new(),
         }
     }
 
@@ -220,7 +235,7 @@ impl Parser {
     }
 
     fn peek_kind(&self) -> Kind {
-        self.at().kind.clone()
+        self.at().kind
     }
 
     fn next(&mut self) -> Token {
@@ -228,7 +243,13 @@ impl Parser {
             if self.pos >= self.tokens.len() {
                 return self.tokens.last().unwrap().clone();
             }
-            let tok = self.tokens[self.pos].clone();
+            let token = &mut self.tokens[self.pos];
+            let tok = Token::new(
+                token.kind,
+                std::mem::take(&mut token.value),
+                token.line,
+                token.column,
+            );
             self.pos += 1;
             match tok.kind {
                 Kind::SingleLineComment | Kind::MultiLineComment => continue,
@@ -238,11 +259,11 @@ impl Parser {
     }
 
     fn expect(&mut self, kind: Kind) -> Result<Token, SyntaxError> {
-        let tok = self.at().clone();
+        let tok = self.at();
         if tok.kind != kind {
             return Err(SyntaxError::from_token(
                 self.file_path.clone(),
-                &tok,
+                tok,
                 format!("Expected {:?}, got {:?} '{}'", kind, tok.kind, tok.value),
             ));
         }
@@ -272,7 +293,7 @@ impl Parser {
                 }
                 _ => {
                     if count == n {
-                        return self.tokens[idx].kind.clone();
+                        return self.tokens[idx].kind;
                     }
                     count += 1;
                     idx += 1;
@@ -291,6 +312,38 @@ impl Parser {
         Ok(ScriptFile { scripts })
     }
 
+    /// Keep valid declarations after an error, so one incomplete proc does not
+    /// hide diagnostics and symbols in the rest of an editor document.
+    pub fn parse_recovering(&mut self) -> (ScriptFile, Vec<SyntaxError>) {
+        self.recovering = true;
+        let mut scripts = Vec::new();
+        let mut errors = Vec::new();
+        while !self.is_eof() {
+            let start = self.pos;
+            match self.parse_script_declaration() {
+                Ok(script) => scripts.push(script),
+                Err(error) => {
+                    errors.push(error);
+                    if self.pos == start {
+                        self.next();
+                    }
+                    while !self.is_eof() {
+                        if self.peek_kind() == Kind::LBracket
+                            && self.peek_kind_ahead(2) == Kind::Comma
+                        {
+                            break;
+                        }
+                        self.next();
+                    }
+                }
+            }
+        }
+        errors.append(&mut self.recovered_errors);
+        errors.sort_by_key(|error| (error.line, error.position));
+        self.recovering = false;
+        (ScriptFile { scripts }, errors)
+    }
+
     fn parse_script_declaration(&mut self) -> Result<ScriptDeclaration, SyntaxError> {
         let line = self.line();
 
@@ -298,7 +351,7 @@ impl Parser {
 
         // Parse trigger type
         let trigger_tok = self.next();
-        let trigger = trigger_tok.value.clone();
+        let trigger = trigger_tok.value;
 
         self.expect(Kind::Comma)?;
 
@@ -330,13 +383,19 @@ impl Parser {
         let mut body = Vec::new();
         loop {
             if self.is_eof() {
+                if has_brace {
+                    self.closing_brace()?;
+                }
                 break;
             }
             if has_brace && self.peek_kind() == Kind::RBrace {
                 self.next(); // consume '}'
                 break;
             }
-            if !has_brace && self.peek_kind() == Kind::LBracket {
+            if (!has_brace || self.recovering) && self.peek_kind() == Kind::LBracket {
+                if has_brace {
+                    self.closing_brace()?;
+                }
                 break;
             }
             body.push(self.parse_statement()?);
@@ -520,6 +579,43 @@ impl Parser {
     // ── Statement parsing ──
 
     fn parse_statement(&mut self) -> Result<Statement, SyntaxError> {
+        let start = self.pos;
+        self.enter_nesting()?;
+        let result = self.parse_statement_inner();
+        self.nesting -= 1;
+        if self.recovering
+            && let Err(error) = result
+        {
+            // A new header belongs to the enclosing declaration parser.
+            if self.pos == start && self.peek_kind() == Kind::LBracket {
+                return Err(error);
+            }
+            let line = error.line;
+            self.recovered_errors.push(error);
+            if self.pos == start && self.peek_kind() == Kind::RBrace {
+                self.next();
+            }
+            while !self.is_eof() {
+                match self.peek_kind() {
+                    Kind::Semicolon => {
+                        self.next();
+                        break;
+                    }
+                    Kind::RBrace | Kind::LBracket => break,
+                    Kind::Def | Kind::If | Kind::While | Kind::Return if self.line() > line => {
+                        break;
+                    }
+                    _ => {
+                        self.next();
+                    }
+                }
+            }
+            return Ok(Statement::Empty);
+        }
+        result
+    }
+
+    fn parse_statement_inner(&mut self) -> Result<Statement, SyntaxError> {
         match self.peek_kind() {
             // Empty statement (trailing semicolon after switch/if block, etc.)
             Kind::Semicolon => {
@@ -570,7 +666,11 @@ impl Parser {
         // Check for array declaration: def_int $arr(size)
         if self.peek_kind() == Kind::LParen {
             self.expect(Kind::LParen)?;
-            let size = self.parse_expression()?;
+            let size = if self.peek_kind() == Kind::RParen {
+                Expr::NullLiteral
+            } else {
+                self.parse_expression()?
+            };
             self.expect(Kind::RParen)?;
             if self.peek_kind() == Kind::Semicolon {
                 self.next();
@@ -829,6 +929,19 @@ impl Parser {
         Ok(Statement::Return { values, line })
     }
 
+    fn parse_assignment_value(&mut self) -> Result<Expr, SyntaxError> {
+        let mut values = vec![self.parse_expression()?];
+        while self.peek_kind() == Kind::Comma {
+            self.next();
+            values.push(self.parse_expression()?);
+        }
+        Ok(if values.len() == 1 {
+            values.pop().unwrap()
+        } else {
+            Expr::Tuple(values)
+        })
+    }
+
     fn parse_assignment_or_expression(&mut self) -> Result<Statement, SyntaxError> {
         let line = self.line();
         let expr = self.parse_primary()?;
@@ -846,7 +959,7 @@ impl Parser {
             }
             if self.peek_kind() == Kind::Equals {
                 self.next(); // consume '='
-                let value = self.parse_expression()?;
+                let value = self.parse_assignment_value()?;
                 if self.peek_kind() == Kind::Semicolon {
                     self.next();
                 }
@@ -868,7 +981,7 @@ impl Parser {
 
         if self.peek_kind() == Kind::Equals {
             self.next(); // consume =
-            let value = self.parse_expression()?;
+            let value = self.parse_assignment_value()?;
             if self.peek_kind() == Kind::Semicolon {
                 self.next();
             }
@@ -903,7 +1016,7 @@ impl Parser {
             }
             if self.peek_kind() == Kind::Equals {
                 self.next();
-                let value = self.parse_expression()?;
+                let value = self.parse_assignment_value()?;
                 if self.peek_kind() == Kind::Semicolon {
                     self.next();
                 }
@@ -923,7 +1036,7 @@ impl Parser {
 
         if self.peek_kind() == Kind::Equals {
             self.next(); // consume =
-            let value = self.parse_expression()?;
+            let value = self.parse_assignment_value()?;
             if self.peek_kind() == Kind::Semicolon {
                 self.next();
             }
@@ -957,7 +1070,7 @@ impl Parser {
             }
             if self.peek_kind() == Kind::Equals {
                 self.next();
-                let value = self.parse_expression()?;
+                let value = self.parse_assignment_value()?;
                 if self.peek_kind() == Kind::Semicolon {
                     self.next();
                 }
@@ -986,11 +1099,25 @@ impl Parser {
     fn parse_block(&mut self) -> Result<Vec<Statement>, SyntaxError> {
         self.expect(Kind::LBrace)?;
         let mut stmts = Vec::new();
-        while self.peek_kind() != Kind::RBrace && !self.is_eof() {
+        while self.peek_kind() != Kind::RBrace
+            && !self.is_eof()
+            && !(self.recovering && self.peek_kind() == Kind::LBracket)
+        {
             stmts.push(self.parse_statement()?);
         }
-        self.expect(Kind::RBrace)?;
+        self.closing_brace()?;
         Ok(stmts)
+    }
+
+    fn closing_brace(&mut self) -> Result<(), SyntaxError> {
+        match self.expect(Kind::RBrace) {
+            Ok(_) => Ok(()),
+            Err(error) if self.recovering => {
+                self.recovered_errors.push(error);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Parse either a braced block `{ ... }` or a single statement (braceless body).
@@ -1005,8 +1132,64 @@ impl Parser {
 
     // ── Expression parsing (precedence climbing) ──
 
+    pub(crate) fn parse_hook(&mut self) -> Result<Vec<Expr>, SyntaxError> {
+        let target = self.next();
+        let name = match target.kind {
+            Kind::Identifier | Kind::Command | Kind::Trigger => Expr::Identifier(target.value),
+            Kind::Number => Expr::IntLiteral(target.value.parse().map_err(|_| {
+                SyntaxError::from_token(self.file_path.clone(), &target, "Invalid hook ID".into())
+            })?),
+            _ => {
+                return Err(SyntaxError::from_token(
+                    self.file_path.clone(),
+                    &target,
+                    "Expected hook script name".into(),
+                ));
+            }
+        };
+        let args = if self.peek_kind() == Kind::LParen {
+            self.parse_call_args()?.0
+        } else {
+            Vec::new()
+        };
+        let mut values = vec![name, Expr::Tuple(args)];
+        if self.peek_kind() == Kind::LBrace {
+            self.next();
+            let mut transmits = Vec::new();
+            while self.peek_kind() != Kind::RBrace {
+                transmits.push(self.parse_expression()?);
+                if self.peek_kind() != Kind::Comma {
+                    break;
+                }
+                self.next();
+            }
+            self.expect(Kind::RBrace)?;
+            values.push(Expr::Tuple(transmits));
+        }
+        self.expect(Kind::EndOfFile)?;
+        Ok(values)
+    }
+
     fn parse_expression(&mut self) -> Result<Expr, SyntaxError> {
-        self.parse_logical_or()
+        self.enter_nesting()?;
+        let result = self.parse_logical_or();
+        self.nesting -= 1;
+        result
+    }
+
+    fn enter_nesting(&mut self) -> Result<(), SyntaxError> {
+        if self.nesting >= self.max_nesting {
+            return Err(SyntaxError::from_token(
+                self.file_path.clone(),
+                self.at(),
+                format!(
+                    "Source nesting exceeds the configured limit of {}",
+                    self.max_nesting
+                ),
+            ));
+        }
+        self.nesting += 1;
+        Ok(())
     }
 
     fn parse_logical_or(&mut self) -> Result<Expr, SyntaxError> {
@@ -1122,7 +1305,7 @@ impl Parser {
 
         loop {
             let tok = self.at().clone();
-            match (tok.kind.clone(), tok.value.as_str()) {
+            match (tok.kind, tok.value.as_str()) {
                 (Kind::BinaryOperator, "*") => {
                     self.next();
                     let right = self.parse_primary()?;
@@ -1169,6 +1352,33 @@ impl Parser {
                         format!("Invalid integer literal: {}", tok.value),
                     )
                 })?;
+                if self.peek_kind() == Kind::Colon
+                    && self.peek_kind_ahead(1) == Kind::Number
+                    && matches!(
+                        self.peek_kind_ahead(2),
+                        Kind::Comma | Kind::RParen | Kind::Semicolon | Kind::RBrace
+                    )
+                {
+                    self.next();
+                    let component = self.expect(Kind::Number)?;
+                    let component: u16 = component.value.parse().map_err(|_| {
+                        SyntaxError::from_token(
+                            self.file_path.clone(),
+                            &component,
+                            "Invalid component ID".into(),
+                        )
+                    })?;
+                    let interface = u16::try_from(value).map_err(|_| {
+                        SyntaxError::from_token(
+                            self.file_path.clone(),
+                            &tok,
+                            "Invalid interface ID".into(),
+                        )
+                    })?;
+                    return Ok(Expr::IntLiteral(
+                        ((interface as i32) << 16) | component as i32,
+                    ));
+                }
                 Ok(Expr::IntLiteral(value))
             }
 
@@ -1184,13 +1394,14 @@ impl Parser {
                 Ok(Expr::LongLiteral(value))
             }
 
+            Kind::RawStringLiteral => Ok(Expr::StringLiteral(self.next().value)),
             Kind::StringLiteral => {
                 let tok = self.next();
                 // Check if string contains interpolation markers (<expr>)
                 if tok.value.contains('<') && tok.value.contains('>') {
                     Ok(self.parse_interpolated_string(&tok.value))
                 } else {
-                    Ok(Expr::StringLiteral(tok.value))
+                    Ok(Expr::StringLiteral(tok.value.replace(ESCAPED_LT, "<")))
                 }
             }
 
@@ -1433,7 +1644,15 @@ impl Parser {
                         Kind::Identifier | Kind::Number | Kind::Trigger | Kind::Command
                     ) && matches!(
                         after_compound,
-                        Kind::RParen | Kind::Comma | Kind::Semicolon | Kind::RBrace | Kind::Colon
+                        Kind::RParen
+                            | Kind::Comma
+                            | Kind::Semicolon
+                            | Kind::RBrace
+                            | Kind::Colon
+                            | Kind::ComparisonOperator
+                            | Kind::LogicalAnd
+                            | Kind::LogicalOr
+                            | Kind::BinaryOperator
                     ) {
                         self.next(); // consume ':'
                         let part = self.next();
@@ -1531,6 +1750,8 @@ impl Parser {
     /// Parse a single expression from a string slice, returning an Expr.
     /// Used for embedded expressions in string templates like `<tostring($var)>`.
     fn parse_string_embedded_expr(&self, expr_str: &str) -> Expr {
+        let escaped = expr_str.replace(ESCAPED_LT, "\\<");
+        let expr_str = escaped.as_str();
         if let Some(stripped) = expr_str.strip_prefix('$') {
             return Expr::LocalVar(stripped.to_string(), 0);
         }
@@ -1563,10 +1784,27 @@ impl Parser {
         let mut depth = 0;
         let mut in_expr = false;
         let mut expr_str = String::new();
+        let mut quote = None;
+        let mut escaped = false;
 
         for ch in chars {
             if in_expr {
-                if ch == '>' && depth == 0 {
+                if escaped {
+                    escaped = false;
+                    expr_str.push(ch);
+                    continue;
+                }
+                if quote.is_some() && ch == '\\' {
+                    escaped = true;
+                    expr_str.push(ch);
+                    continue;
+                }
+                if Some(ch) == quote {
+                    quote = None;
+                } else if quote.is_none() && matches!(ch, '"' | '\'') {
+                    quote = Some(ch);
+                }
+                if ch == '>' && depth == 0 && quote.is_none() {
                     in_expr = false;
                     // Treat as a code expression if it looks like RS2 code:
                     // starts with $/%/^/~ OR contains ( (function call).
@@ -1581,11 +1819,28 @@ impl Parser {
                     // like <displayname> or <.displayname> is a command call.
                     let stripped = expr_str.strip_prefix('.').unwrap_or(expr_str.as_str());
                     let is_plain_identifier = !stripped.is_empty()
+                        && !matches!(
+                            stripped,
+                            "br" | "lt"
+                                | "gt"
+                                | "nbsp"
+                                | "shy"
+                                | "times"
+                                | "euro"
+                                | "copy"
+                                | "reg"
+                                | "u"
+                                | "str"
+                                | "shad"
+                                | "trans"
+                                | "col"
+                        )
                         && stripped
                             .chars()
                             .all(|c| c.is_ascii_alphanumeric() || c == '_');
                     let is_code = !is_string_tag(&expr_str)
                         && (expr_str.starts_with('$')
+                            || expr_str.starts_with('"')
                             || expr_str.starts_with('%')
                             || expr_str.starts_with('^')
                             || expr_str.starts_with('~')
@@ -1601,14 +1856,16 @@ impl Parser {
                     }
                     expr_str.clear();
                 } else {
-                    if ch == '(' {
+                    if ch == '(' && quote.is_none() {
                         depth += 1;
                     }
-                    if ch == ')' {
+                    if ch == ')' && quote.is_none() {
                         depth -= 1;
                     }
                     expr_str.push(ch);
                 }
+            } else if ch == ESCAPED_LT {
+                current.push('<');
             } else if ch == '<' {
                 if !current.is_empty() {
                     parts.push(StringPart::Literal(current.clone()));
@@ -1616,6 +1873,7 @@ impl Parser {
                 }
                 in_expr = true;
                 depth = 0;
+                quote = None;
             } else {
                 current.push(ch);
             }

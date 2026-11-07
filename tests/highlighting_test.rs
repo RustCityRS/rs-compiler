@@ -1,0 +1,206 @@
+use runec::ide::{SemanticToken, TokenKind};
+use runec::lsp::project_from_json;
+use runec::project::Project;
+use runec::sources::Scope;
+use serde_json::json;
+
+fn project() -> Project {
+    project_from_json(&json!({
+        "commands":[
+            {"name":"mes","opcode":1,"params":["string"]},
+            {"name":"queue","opcode":2,"params":["queue","int"]},
+            {"name":"npc_uid","opcode":3,"returns":["npc_uid"]},
+            {"name":"touch","opcode":4,"params":["component"]},
+            {"name":"item","opcode":5,"params":["obj"]},
+            {"name":"displayname","opcode":6,"returns":["string"]}
+        ],
+        "entities":[
+            {"name":"bank:com1","type":"component","id":1,"scope":"global"},
+            {"name":"cheese+tom_batta","type":"obj","id":2,"scope":"global"}
+        ]
+    }))
+    .unwrap()
+}
+
+fn at<'a>(text: &str, tokens: &'a [SemanticToken], needle: &str) -> &'a SemanticToken {
+    let start = text.find(needle).unwrap();
+    tokens
+        .iter()
+        .find(|token| token.range == (start..start + needle.len()))
+        .unwrap_or_else(|| panic!("No complete token for {needle:?}: {tokens:?}"))
+}
+
+fn ordered(text: &str, tokens: &[SemanticToken]) {
+    let mut end = 0;
+    for token in tokens {
+        assert!(token.range.start >= end, "overlapping token: {token:?}");
+        assert!(!token.range.is_empty());
+        assert!(text.get(token.range.clone()).is_some());
+        end = token.range.end;
+    }
+}
+
+#[test]
+fn scripts_keep_reference_categories_and_complete_sigils() {
+    let mut project = project();
+    let text = "[proc,test](int $arg)(int)\ndef_int $local = ^missing;\n%bank_tab = $arg;\nmes(\"hi\");\n~unknown;\n@destination;\ntouch(bank:com1);\nitem(cheese+tom_batta);\nreturn($local);\n";
+    let doc = project.open("mem:test", Scope::Global, 1, text);
+    let tokens = project.semantic_tokens(doc);
+    ordered(text, &tokens);
+    assert_eq!(at(text, &tokens, "[").kind, TokenKind::Decorator);
+    assert_eq!(at(text, &tokens, "proc").kind, TokenKind::Type);
+    assert!(at(text, &tokens, "test").declaration);
+    assert_eq!(at(text, &tokens, "$arg").kind, TokenKind::Parameter);
+    assert_eq!(at(text, &tokens, "$local").kind, TokenKind::Variable);
+    assert!(at(text, &tokens, "^missing").static_);
+    assert!(at(text, &tokens, "^missing").readonly);
+    assert!(at(text, &tokens, "%bank_tab").static_);
+    assert!(!at(text, &tokens, "%bank_tab").readonly);
+    assert!(at(text, &tokens, "mes").default_library);
+    for name in ["~unknown", "@destination"] {
+        assert_eq!(at(text, &tokens, name).kind, TokenKind::Function);
+        assert!(!at(text, &tokens, name).default_library);
+    }
+    for name in ["bank:com1", "cheese+tom_batta"] {
+        assert_eq!(at(text, &tokens, name).kind, TokenKind::EnumMember);
+    }
+}
+
+#[test]
+fn overloaded_types_and_trigger_subjects_are_contextual() {
+    let mut project = project();
+    let text = "[proc,test](queue $q)(npc_uid)\nqueue(missing_queue, 1);\nreturn(npc_uid);\n[opnpc1,goblin]\nreturn;\n";
+    let doc = project.open("mem:test", Scope::Global, 1, text);
+    let tokens = project.semantic_tokens(doc);
+    ordered(text, &tokens);
+    assert_eq!(at(text, &tokens, "queue").kind, TokenKind::Type);
+    assert_eq!(at(text, &tokens, "npc_uid").kind, TokenKind::Type);
+    for name in ["queue", "npc_uid"] {
+        let start = if name == "queue" {
+            text.find("\nqueue").unwrap() + 1
+        } else {
+            text.rfind(name).unwrap()
+        };
+        let token = tokens
+            .iter()
+            .find(|token| token.range.start == start)
+            .unwrap();
+        assert_eq!(token.kind, TokenKind::Function);
+        assert!(token.default_library);
+    }
+    assert_eq!(at(text, &tokens, "missing_queue").kind, TokenKind::Function);
+    assert!(!at(text, &tokens, "missing_queue").default_library);
+    assert_eq!(at(text, &tokens, "goblin").kind, TokenKind::EnumMember);
+}
+
+#[test]
+fn interpolated_strings_have_tags_nested_code_and_no_overlaps() {
+    let mut project = project();
+    let text = r#"[proc,test](int $value)
+mes("😀 <col=ff0000>Hi</col><br><p,neutral> <$value> <displayname> <calc(2 > 1)> <mes("inner <displayname>")> \<literal>");
+mes(r"<displayname>");
+"#;
+    let doc = project.open("mem:test", Scope::Global, 1, text);
+    let tokens = project.semantic_tokens(doc);
+    ordered(text, &tokens);
+    for tag in ["<col=ff0000>", "</col>", "<br>", "<p,neutral>"] {
+        assert_eq!(at(text, &tokens, tag).kind, TokenKind::Keyword);
+    }
+    assert!(at(text, &tokens, "displayname").default_library);
+    assert_eq!(at(text, &tokens, "calc").kind, TokenKind::Keyword);
+    assert_eq!(
+        at(text, &tokens, "r\"<displayname>\"").kind,
+        TokenKind::String
+    );
+    let escaped = text.find("\\<literal>").unwrap();
+    assert!(
+        tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::String && token.range.contains(&escaped))
+    );
+    let nested = text.find("inner <displayname>").unwrap() + "inner <".len();
+    let token = tokens
+        .iter()
+        .find(|token| token.range.start == nested)
+        .unwrap();
+    assert!(token.default_library);
+    assert!(project.hover(doc, nested).is_some());
+}
+
+#[test]
+fn incomplete_literals_comments_and_directives_remain_highlighted() {
+    let mut project = project();
+    for (suffix, kind) in [
+        ("/* unfinished\n comment 😀", TokenKind::Comment),
+        ("\"unfinished 😀", TokenKind::String),
+        ("r\"unfinished <mes>", TokenKind::String),
+        ("'a", TokenKind::String),
+        ("#testscript", TokenKind::Macro),
+    ] {
+        let text = format!("[proc,test]\n{suffix}");
+        let doc = project.open("mem:test", Scope::Global, 1, text.clone());
+        let tokens = project.semantic_tokens(doc);
+        ordered(&text, &tokens);
+        assert_eq!(at(&text, &tokens, suffix).kind, kind);
+        project.close(doc);
+    }
+}
+
+#[test]
+fn configs_and_packs_preserve_sections_keys_constants_and_comments() {
+    let mut project = project();
+    let text = "/* hidden\n[not_a_definition]\n*/\n[cheese+tom_batta]\nname=\"Food 😀\"\ncost=-10\ncoord=0_50_50_10_10\nactive=yes\nparam=^unknown,%var\nmodel=food_model // comment\n";
+    let doc = project.open_config("mem:items.obj", Scope::Global, 1, text, "obj");
+    let tokens = project.semantic_tokens(doc);
+    ordered(text, &tokens);
+    assert_eq!(
+        at(text, &tokens, "/* hidden\n[not_a_definition]\n*/").kind,
+        TokenKind::Comment
+    );
+    assert_eq!(
+        at(text, &tokens, "cheese+tom_batta").kind,
+        TokenKind::Namespace
+    );
+    assert!(at(text, &tokens, "cheese+tom_batta").declaration);
+    assert_eq!(at(text, &tokens, "cost").kind, TokenKind::Property);
+    assert_eq!(at(text, &tokens, "-10").kind, TokenKind::Number);
+    assert_eq!(at(text, &tokens, "0_50_50_10_10").kind, TokenKind::Number);
+    assert_eq!(at(text, &tokens, "yes").kind, TokenKind::Keyword);
+    assert!(at(text, &tokens, "^unknown").readonly);
+    assert!(at(text, &tokens, "%var").static_);
+    assert_eq!(at(text, &tokens, "food_model").kind, TokenKind::EnumMember);
+    assert!(project.workspace_symbols("not_a_definition", 10).is_empty());
+    let pack = "123:4=bank:com4\n";
+    let doc = project.open_config(
+        "mem:interface.pack",
+        Scope::Global,
+        1,
+        pack,
+        "pack:interface",
+    );
+    let tokens = project.semantic_tokens(doc);
+    ordered(pack, &tokens);
+    assert_eq!(at(pack, &tokens, "123:4").kind, TokenKind::Property);
+    assert_eq!(at(pack, &tokens, "bank:com4").kind, TokenKind::EnumMember);
+}
+
+#[test]
+fn partial_edits_keep_tokens_ordered_on_utf8_boundaries() {
+    let mut project = project();
+    for config in [false, true] {
+        let text = if config {
+            "[entry]\nname=\"escaped \\😀\"\n/* multi\nline */\nparam=^value,%other\n"
+        } else {
+            "[proc,entry](int $n)\nmes(\"😀 <mes(\"nested <$n>\")>\");\n/* multi\nline */\n#testscript\n"
+        };
+        let doc = if config {
+            project.open_config("mem:editing.obj", Scope::Global, 1, "", "obj")
+        } else {
+            project.open("mem:editing", Scope::Global, 1, "")
+        };
+        for end in text.char_indices().map(|(i, _)| i).chain([text.len()]) {
+            project.update(doc, end as i64 + 2, &text[..end]).unwrap();
+            ordered(&text[..end], &project.semantic_tokens(doc));
+        }
+    }
+}

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-/// The 22 pointer types tracked by the RuneScript pointer checker.
+/// The pointer types tracked by the script pointer checker.
 ///
 /// Each variant maps to a bit position in [`PointerSet`] and has a display
 /// name matching the reference TypeScript implementation.
@@ -30,12 +30,14 @@ pub enum PointerType {
     LastTargetslot = 19,
     LastUseitem = 20,
     LastUseslot = 21,
+    ActiveComponent = 22,
+    ActiveComponent2 = 23,
 }
 
 impl PointerType {
-    pub const COUNT: usize = 22;
+    pub const COUNT: usize = 24;
 
-    pub const ALL: [PointerType; 22] = [
+    pub const ALL: [PointerType; Self::COUNT] = [
         PointerType::ActivePlayer,
         PointerType::ActivePlayer2,
         PointerType::PActivePlayer,
@@ -58,6 +60,8 @@ impl PointerType {
         PointerType::LastTargetslot,
         PointerType::LastUseitem,
         PointerType::LastUseslot,
+        PointerType::ActiveComponent,
+        PointerType::ActiveComponent2,
     ];
 
     /// The representation string used in diagnostics, matching the TS reference.
@@ -85,6 +89,8 @@ impl PointerType {
             PointerType::LastTargetslot => "last_targetslot",
             PointerType::LastUseitem => "last_useitem",
             PointerType::LastUseslot => "last_useslot",
+            PointerType::ActiveComponent => "active_component",
+            PointerType::ActiveComponent2 => ".active_component",
         }
     }
 
@@ -110,7 +116,7 @@ impl fmt::Display for PointerType {
 }
 
 // ---------------------------------------------------------------------------
-// PointerSet — 22-bit bitmask for efficient pointer set operations
+// PointerSet: bitmask for efficient pointer set operations
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -121,7 +127,7 @@ impl PointerSet {
         PointerSet(0)
     }
 
-    /// A set containing all 22 pointer types.
+    /// A set containing every pointer type.
     pub fn all() -> Self {
         PointerSet((1u32 << PointerType::COUNT) - 1)
     }

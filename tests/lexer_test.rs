@@ -40,7 +40,7 @@ fn lex_err(src: &str) -> String {
 
 /// Token kinds only — convenience for sequence assertions.
 fn kinds(tokens: &[Token]) -> Vec<Kind> {
-    tokens.iter().map(|t| t.kind.clone()).collect()
+    tokens.iter().map(|t| t.kind).collect()
 }
 
 // ── Smoke / EOF ─────────────────────────────────────────────────────

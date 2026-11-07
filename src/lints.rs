@@ -368,7 +368,9 @@ fn check_unreachable_code(
             | Opcode::LongBranchLessThanOrEquals
             | Opcode::LongBranchGreaterThanOrEquals
             | Opcode::ObjBranchEquals
-            | Opcode::ObjBranchNot => {
+            | Opcode::ObjBranchNot
+            | Opcode::BranchIfTrue
+            | Opcode::BranchIfFalse => {
                 if let Operand::JumpTarget(target) = &instr.operand
                     && let Some(tnode) = resolve_target(*target, instrs, &instr_to_node)
                     && !reachable[tnode]

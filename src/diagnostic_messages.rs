@@ -76,6 +76,7 @@ pub const PROC_REFERENCE_UNRESOLVED: &str = "'~%s' cannot be resolved to a proc.
 pub const PROC_NOARGS_EXPECTED: &str = "'~%s' is expected to have no arguments but has '%s'.";
 pub const JUMP_REFERENCE_UNRESOLVED: &str = "'@%s' cannot be resolved to a label.";
 pub const JUMP_NOARGS_EXPECTED: &str = "'@%s' is expected to have no arguments but has '%s'.";
+pub const JUMP_IN_PROC: &str = "Cannot jump to label '@%s' from a proc.";
 pub const CLIENTSCRIPT_REFERENCE_UNRESOLVED: &str = "'%s' cannot be resolved to a clientscript.";
 pub const CLIENTSCRIPT_NOARGS_EXPECTED: &str =
     "'%s' is expected to have no arguments but has '%s'.";

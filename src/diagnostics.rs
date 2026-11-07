@@ -2,27 +2,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use tracing::{error, info, warn};
 
-/// Single source of truth for how paths render in compiler diagnostics.
-///
-/// - Strips the current working directory prefix when present, so a script
-///   path stored as `C:\…\runescape\content\scripts\foo.rs2` (canonicalized
-///   by the pointer checker) and one stored as `content/scripts/foo.rs2`
-///   (the raw walker output) both render as `content/scripts/foo.rs2`.
-/// - Normalizes separators to `/` so output is identical across platforms
-///   and stable in test fixtures and CI logs.
-///
-/// All phases must format paths through this helper.
+/// Render an opaque source label without consulting process state.
 pub fn format_path(path: &Path) -> String {
-    let mut s = path.to_string_lossy().replace('\\', "/");
-    if let Ok(cwd) = std::env::current_dir() {
-        let cwd_norm = cwd.to_string_lossy().replace('\\', "/");
-        if let Some(rest) = s.strip_prefix(&format!("{}/", cwd_norm)) {
-            s = rest.to_string();
-        } else if s == cwd_norm {
-            s = ".".to_string();
-        }
-    }
-    s
+    path.to_string_lossy().replace('\\', "/")
 }
 
 /// Severity level for diagnostics.

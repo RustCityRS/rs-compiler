@@ -13,173 +13,218 @@
 
 # RuneScript Compiler (runec)
 
-A compiler for RuneScript (`.rs2`), the scripting language used by RuneScape's game engine. Compiles source scripts into binary `script.dat`/`script.idx` output consumed by the game server.
+`runec` compiles RuneScript (`.rs2`) for the server and ClientScript (`.cs2`)
+for the client. GlobalScript (`.gs2`) holds code shared by both. It also provides
+an editor language server and a Rust library with ClientScript decompilation.
 
-## Prerequisites
+The examples assume `runec` is installed and on your `PATH`. Run commands from
+your project's root directory and adjust the source, pack and output paths to
+match your project.
 
-- [Rust 1.95+](https://www.rust-lang.org/tools/install)
+## Project layout
 
-## Installation
+A project with server, client and shared code can use this layout:
 
-### Windows (PowerShell)
-
-```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
+```text
+content/
+├── scripts/
+│   ├── runescript/       # .rs2 files and engine.rs2
+│   ├── clientscript/     # .cs2 files and engine.cs2
+│   └── globalscript/     # shared .gs2 files
+└── pack/                 # script IDs, command opcodes and named assets
 ```
 
-### Linux / macOS / Git Bash
+Both compilers automatically include the sibling `globalscript` directory.
+Put configs and constants alongside the scripts that own them. Server and client
+code can use their own definitions and shared definitions; shared code can only
+use shared definitions. Flat source directories are also supported.
+
+Your project supplies the engine commands, asset names and script IDs.
+`engine.rs2` and `engine.cs2` declare command parameters and return types.
+The pack directory maps names to IDs:
+
+| Files | Purpose |
+|---|---|
+| `command.pack` and `script.pack` | Server command opcodes and script IDs |
+| `cs2_command.pack` and `clientscript.pack` | Client opcodes and script IDs |
+| Other packs, such as `obj.pack` and `inv.pack` | Named assets and game data |
+
+Client opcode mappings come from the project, so there is no client revision
+flag to set.
+
+## Compile server scripts
 
 ```bash
-chmod +x install.sh
-./install.sh
+runec compile --source content/scripts/runescript --pack content/pack --output data/server
 ```
 
-This builds the compiler in release mode and installs it to `~/.runec/bin` as `runec`. The install script adds the directory to your `PATH` and creates a shell alias. Restart your terminal after installation.
+This reads the server and shared scripts, checks them, and writes `script.dat`
+and `script.idx`. Batch compilation updates the script ID registry.
 
-## Usage
+Optional flags:
 
-### Compiling Scripts
+| Flag | Effect |
+|---|---|
+| `--lint` | Also report unused locals and unreachable code |
+| `--low-mem` | Use less memory at the cost of more compilation work |
+
+If you omit `--output`, server output goes to `./data/pack/server`.
+`--source` and `--output` can also be written as `-s` and `-o`.
+
+## Compile client scripts
 
 ```bash
-runec compile -s <source-dir> -o <output-dir>
+runec compile-client --source content/scripts/clientscript --pack content/pack --output data/clientscript
 ```
 
-Compiles all `.rs2` files in the source directory and writes `script.dat` and `script.idx` to the output directory.
+This reads the client and shared scripts and writes one `<id>.dat` file per
+script. Existing IDs are preserved; successful compilation adds new scripts to
+`clientscript.pack`.
+
+Keep explicit ID entries when renaming scripts. For example, renaming
+`clientscript_1465` to `bank_refresh` requires `1465=[proc,bank_refresh]` in
+`clientscript.pack` to preserve that client's script ID.
+
+## Check server scripts
 
 ```bash
-# Compile with default output (./data/pack/server)
-runec compile -s data/src/scripts
-
-# Specify both source and output
-runec compile -s data/src/scripts -o data/pack/server
-
-# Provide an explicit pack directory for symbol resolution
-runec compile -s data/src/scripts -o data/pack/server --pack data/pack
-
-# Compile and run lint passes
-runec compile -s data/src/scripts -o data/pack/server --lint
-
-# Low-memory mode: recompiles scripts on demand so all bytecode is never
-# resident at once (~16 MB heap vs ~93), at roughly 6x the compile time.
-# Output is byte-identical. (`--recompile` is an accepted alias.)
-runec compile -s data/src/scripts -o data/pack/server --low-mem
+runec lint --source content/scripts/runescript --pack content/pack
 ```
 
-The compiler runs the following phases in order:
+This reports compiler errors, pointer warnings, unused locals and unreachable
+code without writing bytecode output. Client diagnostics are available during
+`compile-client` and through the ClientScript language server.
 
-1. **Parse** -- Lexes and parses all `.rs2` files into an AST
-2. **Symbol registration** -- Registers script names, loads entity pack files (items, NPCs, interfaces, etc.), engine commands, and constants
-3. **Type check** -- Validates types, resolves references, and checks trigger signatures across all scripts
-4. **Code generation** -- Emits bytecode from the AST
-5. **Pointer check** -- Static analysis for active-entity pointer hazards (warnings)
-6. **Lint** *(optional)* -- Detects unused locals and unreachable code (warnings)
-7. **Write output** -- Writes compiled `script.dat` and `script.idx`
-
-### Linting Scripts
-
-Run all analysis passes without writing any output:
+Use `--help` for all available options:
 
 ```bash
-runec lint -s <source-dir>
-
-# With explicit pack directory
-runec lint -s data/src/scripts --pack data/pack
+runec --help
+runec compile --help
+runec compile-client --help
+runec lsp --help
 ```
 
-This runs the full pipeline (parse, type-check, codegen, pointer-check, lints) and reports diagnostics. Useful for editor tooling and CI lint gates.
+## Hooks and client callbacks
 
-## Performance
+Hooks take a quoted callback expression. Arguments inside it are code, so
+variables, constants and nested calls work normally:
 
-`runec` runs its heavy phases — parsing, type-checking, code generation,
-pointer analysis, lint passes, and output encoding — in parallel across all
-available cores, while producing **byte-for-byte identical** output to a
-single-threaded run (verified against the reference compiler on full 225 and
-647 script sets). On a 1,100+ file script set it compiles in roughly half a
-second — about **6× faster** than 0.2.x on a multi-core machine. Release builds
-use fat LTO for additional throughput.
+```rs2
+if_setontimer("bank_v2_rebuild_delayed(%varc_int_193)", bank_v2_main:com93);
+if_setontimer(null, bank_v2_main:com93);
+```
 
-The unused-locals and unreachable-code lint passes are likewise parallel and
-allocation-light, running in a few milliseconds even on the full set, with
-diagnostics identical to the serial implementation.
+The first call sets the hook; `null` clears it. Empty callback parentheses are
+optional: `"callback"` and `"callback()"` both mean no arguments.
 
-Memory footprint is roughly **half** that of earlier releases — a full compile
-of the 1,100+ file set peaks near 110 MB of working set — through tighter
-bytecode and registry layout and by releasing each phase's scratch as soon as
-it is no longer needed, again with byte-identical output.
+Transmit hooks add a list of triggers inside the quotes:
 
-For memory-constrained environments, `runec compile --low-mem` lowers the peak
-much further — to about **16 MB heap / 32 MB working set** — by re-compiling
-scripts on demand for the pointer check and writing output file-by-file, so the
-full set of compiled bytecode is never resident at once. The tradeoff is roughly
-**6× the compile time**; the output is identical.
+```rs2
+if_setonvarctransmit("clientscript_1465(){varc_int_192, varc_int_1038, varc_int_1324}", bank_v2_main:com21);
+```
 
-## Development
+Use bare names in `{...}`. These refer to trigger IDs, not the current values of
+the variables. Depending on the hook, the names identify varps, integer or string
+varcs, inventories, or stats.
 
-### Building from Source
+Server scripts use the same callback syntax with `runclientscript`:
+
+```rs2
+runclientscript("playerdesign4_submit_name(0, 1, 1)");
+```
+
+The compiler reads the sibling ClientScript sources to resolve callbacks and
+check their arguments. `runclientscript` takes one quoted callback; the old
+`runclientscript*` and unquoted forms are errors.
+
+String literals inside a callback need escaped quotes:
+
+```rs2
+runclientscript("show_message(\"Hello\")");
+```
+
+This example assumes a client callback named `show_message` that takes a string.
+The editor understands callback names, arguments and named transmit triggers
+for navigation, completion, highlighting and inlay hints.
+
+## Editor setup
+
+Use your editor's LSP client to launch `runec` over stdio. Configure separate
+servers for RuneScript and ClientScript, with your project root as the working
+directory.
+
+RuneScript server:
 
 ```bash
-cargo build
+runec lsp --source content/scripts/runescript --pack content/pack
 ```
 
-### Running Tests
+ClientScript server:
 
 ```bash
-cargo test
+runec lsp --client --source content/scripts/clientscript --pack content/pack
 ```
 
-### Running without Installing
+If the editor has separate fields for the executable and arguments, use `runec`
+as the executable and everything after it as the arguments. Leave initialization
+options blank for this directory-based setup. If the editor cannot find `runec`,
+use the full path to the installed executable.
 
-```bash
-cargo run -- compile -s data/src/scripts -o data/pack/server
-cargo run -- lint -s data/src/scripts
-```
+Map files to the servers as follows:
 
-## Library Usage
+| Server | File pattern | Language ID |
+|---|---|---|
+| RuneScript | `*.rs2` | `rs2` |
+| RuneScript | `*.gs2` | `gs2` |
+| ClientScript | `*.cs2` | `cs2` |
+| ClientScript | `*.gs2` | `gs2` |
 
-The compiler is also available as a library crate on [crates.io](https://crates.io/crates/rs-runec).
+The language server provides diagnostics, completion, hover, definitions,
+references, rename, syntax highlighting, signature help, inlay hints, formatting,
+quick fixes and Extract Proc. Changes refresh diagnostics in affected open files.
+Config and pack files can also be mapped to the server for navigation and editing.
 
-### Installation
+Optional color settings:
 
-```bash
-cargo add rs-runec
-```
+- **JetBrains with LSP4IJ:** import [editor/runec.icls](editor/runec.icls)
+  under **Editor > Color Scheme**, then select `runec`.
+- **VS Code:** merge [editor/semantic-colors.json](editor/semantic-colors.json)
+  into your settings.
 
-Or add it to your `Cargo.toml` manually:
+The language server does not write source files or ID packs. Restart the
+configured servers after updating `runec` so they load the new executable.
+
+## Rust integrations
+
+The package is `rs-runec`; Rust imports use `runec`.
 
 ```toml
 [dependencies]
-rs-runec = "0.4.0"
+rs-runec = "0.5.0"
 ```
 
-### Example
+Use [Project](src/project.rs) to manage source documents in memory:
 
-```rust
-use std::path::Path;
+| Method | Purpose |
+|---|---|
+| `open` / `update` / `close` | Manage source documents |
+| `analyze` | Parse, register symbols and check types |
+| `check` | Also check code generation, pointers and lints |
+| `compile` | Return compiled artifacts and diagnostics |
 
-// Compile scripts and write output
-runec::compile(
-    Path::new("data/src/scripts"),
-    Some(Path::new("data/pack")),
-    Path::new("data/pack/server"),
-    true, // run lint passes
-).unwrap();
+The host supplies a [SymbolRegistry](src/symbol.rs) and owns storage and script
+ID persistence. [EngineProfile](src/environment.rs) describes engine-specific
+triggers and pointer rules.
 
-// Same, but in low-memory mode (recompiles on demand; ~16 MB heap, ~6x slower)
-runec::compile_with_options(
-    Path::new("data/src/scripts"),
-    Some(Path::new("data/pack")),
-    Path::new("data/pack/server"),
-    true, // run lint passes
-    true, // low_mem
-).unwrap();
+For ClientScript tools, use [Format](src/clientscript/format.rs) for opcode
+mappings, [Script::decode](src/clientscript/decode.rs) for binary decoding, and
+the [decompiler](src/clientscript/decompile.rs) for source generation.
+Decompilation is a library API, not a CLI command.
 
-// Lint only (no output written)
-runec::lint(
-    Path::new("data/src/scripts"),
-    Some(Path::new("data/pack")),
-).unwrap();
-```
+Custom LSP hosts can run `runec lsp` without `--source` and supply their
+environment through `initializationOptions`. See
+[project_from_json](src/lsp.rs) for the supported fields.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE).

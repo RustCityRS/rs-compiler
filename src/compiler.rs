@@ -1,30 +1,101 @@
+use crate::arguments::{command_hints, command_returns, proc_hints, stack_hints};
 use crate::bytecode::*;
+use crate::clientscript::hooks;
 use crate::parser::*;
 use crate::symbol::{SymbolKind, SymbolRegistry, SymbolTable};
 use crate::types::{BaseVarType, Type};
+use std::collections::HashMap;
+use std::slice::from_ref;
+
+/// Shared lowering for RS2, CS2 and target-selected global sources. Binary
+/// encoding and storage are separate from this phase.
+pub fn compile_file(
+    file: &ScriptFile,
+    label: &std::path::Path,
+    registry: &SymbolRegistry,
+    client: bool,
+    diagnostics: &mut crate::diagnostics::DiagnosticsCollector,
+) -> Vec<CompiledScript> {
+    let mut compiler = Compiler::new(registry);
+    compiler.client = client;
+    let mut compiled = Vec::with_capacity(file.scripts.len());
+    for script in file
+        .scripts
+        .iter()
+        .filter(|script| script.trigger != "command")
+    {
+        if let Some(mut script) = compiler.compile_checked(script, label, diagnostics) {
+            script.source_path = label.to_string_lossy().into_owned();
+            compiled.push(script);
+        }
+    }
+    compiled
+}
 
 /// Code generator that transforms parsed AST into bytecode instructions.
 pub struct Compiler<'a> {
+    pub implicit_return: bool,
+    client: bool,
+    loop_depth: usize,
+    pub errors: Vec<String>,
+    labels: HashMap<String, usize>,
+    label_jumps: Vec<(usize, String)>,
+    label_switches: Vec<(usize, usize, String)>,
     /// Borrowed read-only during code generation, so many `Compiler`s can share
     /// one registry across threads (each thread builds its own scratch state).
     pub registry: &'a SymbolRegistry,
     /// Return types of the currently-compiling script (used for type hints in return statements).
     current_return_types: Vec<Type>,
+    stack_returns: bool,
     /// The line number of the currently-compiling statement.
     current_stmt_line: usize,
 }
 
 impl<'a> Compiler<'a> {
+    /// Checked emission for hosts that need structured errors rather than a
+    /// partially generated script. The source label is never opened.
+    pub fn compile_checked(
+        &mut self,
+        script: &ScriptDeclaration,
+        label: &std::path::Path,
+        diagnostics: &mut crate::diagnostics::DiagnosticsCollector,
+    ) -> Option<CompiledScript> {
+        let compiled = self.compile_script(script);
+        for error in &self.errors {
+            diagnostics.error(
+                label.to_path_buf(),
+                script.line,
+                0,
+                error.clone(),
+                crate::diagnostics::Phase::CodeGeneration,
+            );
+        }
+        self.errors.is_empty().then_some(compiled)
+    }
+
     pub fn new(registry: &'a SymbolRegistry) -> Self {
         Compiler {
+            implicit_return: true,
+            client: false,
+            loop_depth: 0,
+            errors: Vec::new(),
+            labels: HashMap::new(),
+            label_jumps: Vec::new(),
+            label_switches: Vec::new(),
             registry,
             current_return_types: Vec::new(),
+            stack_returns: false,
             current_stmt_line: 0,
         }
     }
 
     /// Compile a single script declaration into bytecode.
     pub fn compile_script(&mut self, script: &ScriptDeclaration) -> CompiledScript {
+        self.labels.clear();
+        self.label_jumps.clear();
+        self.label_switches.clear();
+        self.errors.clear();
+        self.loop_depth = 0;
         let id = self
             .registry
             .script_id_for_trigger(&script.trigger, &script.name)
@@ -54,12 +125,19 @@ impl<'a> Compiler<'a> {
 
         // Compile body statements
         self.current_return_types = script.return_types.clone();
+        self.stack_returns = self
+            .registry
+            .stack_scripts
+            .contains(&format!("{}:{}", script.trigger, script.name));
         for stmt in &script.body {
             self.compile_statement(stmt, &mut compiled, &mut locals);
         }
 
-        // Always emit a fallthrough return at the end
-        for ret_type in &script.return_types {
+        let implicit_return = self.implicit_return
+            && !(self.client
+                && !script.return_types.is_empty()
+                && matches!(script.body.last(), Some(Statement::Return { .. })));
+        for ret_type in script.return_types.iter().filter(|_| implicit_return) {
             match ret_type.base_type() {
                 BaseVarType::Integer => {
                     compiled.push(Instruction::push_int(ret_type.default_return_value()))
@@ -68,7 +146,23 @@ impl<'a> Compiler<'a> {
                 BaseVarType::Long => compiled.push(Instruction::push_long(0)),
             }
         }
-        compiled.push(Instruction::simple(Opcode::Return));
+        if implicit_return {
+            compiled.push(Instruction::simple(Opcode::Return));
+        }
+        for (pc, label) in &self.label_jumps {
+            if let Some(&target) = self.labels.get(label) {
+                compiled.patch_jump(*pc, target);
+            } else {
+                self.errors.push(format!("Unknown label {label}"));
+            }
+        }
+        for (table, case, label) in &self.label_switches {
+            if let Some(&target) = self.labels.get(label) {
+                compiled.switch_tables[*table][*case].1 = target;
+            } else {
+                self.errors.push(format!("Unknown switch label {label}"));
+            }
+        }
 
         // Set local variable counts from LocalTable (matching TS getLocalCount/getParameterCount)
         compiled.int_local_count = compiled.local_table.get_local_count(BaseVarType::Integer);
@@ -86,6 +180,28 @@ impl<'a> Compiler<'a> {
             Opcode::LineNumber,
             Operand::Int(line as i32),
         ));
+    }
+
+    fn emit_arithmetic(&mut self, opcode: Opcode, out: &mut CompiledScript) {
+        let name = match opcode {
+            Opcode::Add => "add",
+            Opcode::Sub => "sub",
+            Opcode::Multiply => "multiply",
+            Opcode::Divide => "divide",
+            Opcode::Modulo => "modulo",
+            Opcode::And => "and",
+            Opcode::Or => "or",
+            _ => unreachable!(),
+        };
+        if let Some(code) = self.registry.command_opcode(name) {
+            out.push(Instruction::new(Opcode::Command, Operand::Int(code)));
+        } else if self.registry.profile.is_some() {
+            self.errors.push(format!(
+                "Arithmetic requires the '{name}' command in the supplied engine profile"
+            ));
+        } else {
+            out.push(Instruction::simple(opcode));
+        }
     }
 
     fn emit_comparison_value(
@@ -146,6 +262,16 @@ impl<'a> Compiler<'a> {
                     },
                 );
 
+                if self.client
+                    && self.loop_depth == 0
+                    && value.is_none()
+                    && (var_type.base_type() == BaseVarType::Long
+                        || (var_type.base_type() == BaseVarType::Integer
+                            && var_type.default_int_value() == 0))
+                {
+                    return;
+                }
+
                 if let Some(init) = value {
                     // With initial value: LineNumber BEFORE the expression.
                     // The arg-based LineNumber emission in calls may override this via writer
@@ -186,9 +312,24 @@ impl<'a> Compiler<'a> {
                 line,
             } => {
                 Self::emit_line(*line, out);
-                let slot = out
-                    .local_table
-                    .push_local(name.clone(), *element_type, true);
+                let slot = locals
+                    .lookup(name)
+                    .and_then(|symbol| {
+                        if let SymbolKind::LocalVar {
+                            slot,
+                            is_array: true,
+                            ..
+                        } = symbol.kind
+                        {
+                            Some(slot)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| {
+                        out.local_table
+                            .push_local(name.clone(), *element_type, true)
+                    });
                 locals.define(
                     name.clone(),
                     SymbolKind::LocalVar {
@@ -198,16 +339,14 @@ impl<'a> Compiler<'a> {
                     },
                 );
 
+                if matches!(size, Expr::NullLiteral) {
+                    return;
+                }
                 // Push array size
                 self.compile_expr(size, out, locals);
-                out.push(Instruction::pop_int_local(slot));
 
                 // Emit define array
-                let type_char = match element_type.base_type() {
-                    BaseVarType::Integer => b'i',
-                    BaseVarType::String => b's',
-                    BaseVarType::Long => b'l',
-                };
+                let type_char = element_type.to_char() as u8;
                 out.push(Instruction::new(
                     Opcode::DefineArray,
                     Operand::ArrayDef(slot, type_char),
@@ -224,7 +363,32 @@ impl<'a> Compiler<'a> {
                 Self::emit_line(*line, out);
                 // Infer the target type to use as a hint when compiling the value.
                 let target_type_hint = self.infer_target_type(target, locals);
-                self.compile_expr_hinted(value, out, locals, target_type_hint);
+                if let Expr::ArrayAccess { name, index } = target {
+                    self.compile_expr(index, out, locals);
+                    self.compile_expr_hinted(value, out, locals, target_type_hint);
+                    if let Some(symbol) = locals.lookup(name)
+                        && let SymbolKind::LocalVar { slot, .. } = symbol.kind
+                    {
+                        out.push(Instruction::new(Opcode::PopArrayInt, Operand::Int(slot)));
+                    }
+                    return;
+                }
+                if let Expr::Tuple(values) = value {
+                    let targets = match target {
+                        Expr::MultiAssign(targets, _) => targets.as_slice(),
+                        _ => from_ref(target),
+                    };
+                    let types: Vec<_> = targets
+                        .iter()
+                        .filter_map(|target| self.infer_target_type(target, locals))
+                        .collect();
+                    let hints = stack_hints(self.registry, &types, values, locals);
+                    for (value, hint) in values.iter().zip(hints) {
+                        self.compile_expr_hinted(value, out, locals, hint);
+                    }
+                } else {
+                    self.compile_expr_hinted(value, out, locals, target_type_hint);
+                }
                 self.compile_store(target, out, locals);
             }
 
@@ -259,9 +423,11 @@ impl<'a> Compiler<'a> {
                 }
 
                 // Compile body
+                self.loop_depth += 1;
                 for s in body {
                     self.compile_statement(s, out, locals);
                 }
+                self.loop_depth -= 1;
 
                 // Jump back to loop start
                 out.push(Instruction::new(
@@ -299,8 +465,14 @@ impl<'a> Compiler<'a> {
             Statement::Return { values, line } => {
                 Self::emit_line(*line, out);
                 let return_types = self.current_return_types.clone();
-                for (i, val) in values.iter().enumerate() {
-                    let hint = return_types.get(i).copied();
+                let hints = if self.stack_returns {
+                    stack_hints(self.registry, &return_types, values, locals)
+                } else {
+                    (0..values.len())
+                        .map(|i| return_types.get(i).copied())
+                        .collect()
+                };
+                for (val, hint) in values.iter().zip(hints) {
                     self.compile_expr_hinted(val, out, locals, hint);
                 }
                 out.push(Instruction::simple(Opcode::Return));
@@ -359,44 +531,36 @@ impl<'a> Compiler<'a> {
                 }
                 // If the expression is a proc/label call that returns values in statement
                 // context (unused), Java emits POP_INT/STRING_DISCARD for each return value.
-                let return_types: Option<Vec<crate::types::Type>> = match expr {
-                    Expr::ProcCall { name, .. } => {
-                        self.registry.scripts.get(name.as_str()).and_then(|sym| {
+                let return_types: Option<Vec<Type>> = match expr {
+                    Expr::ProcCall { name, .. } => self
+                        .registry
+                        .lookup_script_by_trigger("proc", name)
+                        .or_else(|| self.registry.lookup_script_by_trigger("clientscript", name))
+                        .and_then(|sym| {
                             if let SymbolKind::Script { return_types, .. } = &sym.kind {
                                 Some(return_types.clone())
                             } else {
                                 None
                             }
-                        })
-                    }
-                    Expr::JumpCall { name, .. } => {
-                        self.registry.scripts.get(name.as_str()).and_then(|sym| {
+                        }),
+                    Expr::JumpCall { name, .. } => self
+                        .registry
+                        .lookup_script_by_trigger("label", name)
+                        .and_then(|sym| {
                             if let SymbolKind::Script { return_types, .. } = &sym.kind {
                                 Some(return_types.clone())
                             } else {
                                 None
                             }
-                        })
+                        }),
+                    Expr::CommandCall { name, args, .. } => {
+                        Some(command_returns(self.registry, name, args))
                     }
-                    Expr::CommandCall { name, .. } => {
-                        // Strip leading dot for secondary entity commands
-                        let lookup_name = name.strip_prefix('.').unwrap_or(name);
-                        self.registry.commands.get(lookup_name).and_then(|sym| {
-                            if let SymbolKind::Command { return_types, .. } = &sym.kind {
-                                if return_types.is_empty() {
-                                    None
-                                } else {
-                                    Some(return_types.clone())
-                                }
-                            } else {
-                                None
-                            }
-                        })
-                    }
+                    Expr::Identifier(name) => Some(command_returns(self.registry, name, &[])),
                     _ => None,
                 };
                 if let Some(ret_types) = return_types {
-                    for ret_type in &ret_types {
+                    for ret_type in ret_types.iter().rev() {
                         match ret_type.base_type() {
                             BaseVarType::Integer => {
                                 out.push(Instruction::simple(Opcode::PopIntDiscard))
@@ -443,10 +607,11 @@ impl<'a> Compiler<'a> {
             self.compile_statement(s, out, locals);
         }
 
-        // Always emit Branch(end) after body (Java always does this)
-        let end_jump_pos = out.len();
-        out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
-        end_jumps.push(end_jump_pos);
+        if !else_if.is_empty() || else_body.is_some() {
+            let end_jump_pos = out.len();
+            out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
+            end_jumps.push(end_jump_pos);
+        }
 
         // Patch false branches to else_start (right after body's Branch)
         let else_start = out.len();
@@ -464,20 +629,11 @@ impl<'a> Compiler<'a> {
             self.compile_if(
                 first_cond, first_body, remaining, else_body, else_line, out, locals,
             );
-
-            // Wrapper end-jump for this "else { ... }" level
-            let wrapper_jump = out.len();
-            out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
-            end_jumps.push(wrapper_jump);
         } else if let Some(else_stmts) = else_body {
             // Plain else body
             for s in else_stmts {
                 self.compile_statement(s, out, locals);
             }
-            // Always emit Branch(end) after else body
-            let end_jump_pos = out.len();
-            out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
-            end_jumps.push(end_jump_pos);
         }
 
         // Patch all end-jumps to here
@@ -555,7 +711,11 @@ impl<'a> Compiler<'a> {
         if ident.contains(':') {
             return false;
         }
-        if let Some(trigger_byte) = crate::trigger_table::byte(ident) {
+        if let Some(trigger_byte) = self
+            .registry
+            .trigger(ident)
+            .and_then(|trigger| trigger.byte)
+        {
             out.push(Instruction::push_int(trigger_byte as i32));
             return true;
         }
@@ -676,18 +836,37 @@ impl<'a> Compiler<'a> {
                 // Infer lhs type to use as hint for rhs (type-aware entity ID resolution).
                 let lhs_type_hint = self.infer_type(lhs, locals);
                 self.compile_expr(lhs, out, locals);
+                let rhs_start = out.len();
                 self.compile_expr_hinted(rhs, out, locals, lhs_type_hint);
 
+                if matches!(rhs.as_ref(), Expr::BoolLiteral(_))
+                    && matches!(op, BinOp::Eq | BinOp::NotEq)
+                    && let [
+                        Instruction {
+                            opcode: Opcode::PushConstantInt,
+                            operand: Operand::Int(value @ (0 | 1)),
+                        },
+                    ] = &out.instructions[rhs_start..]
+                {
+                    let opcode = if *value == 1 {
+                        Opcode::BranchIfTrue
+                    } else {
+                        Opcode::BranchIfFalse
+                    };
+                    out.instructions.pop();
+                    let equal = out.len();
+                    out.push(Instruction::new(opcode, Operand::JumpTarget(0)));
+                    let unequal = out.len();
+                    out.push(Instruction::jump(0));
+                    return if *op == BinOp::Eq {
+                        (vec![equal], vec![unequal])
+                    } else {
+                        (vec![unequal], vec![equal])
+                    };
+                }
+
                 // Emit positive branch (branch-if-true to body)
-                let opcode = match op {
-                    BinOp::Eq => Opcode::BranchEquals,
-                    BinOp::NotEq => Opcode::BranchNot,
-                    BinOp::Lt => Opcode::BranchLessThan,
-                    BinOp::Gt => Opcode::BranchGreaterThan,
-                    BinOp::LtEq => Opcode::BranchLessThanOrEquals,
-                    BinOp::GtEq => Opcode::BranchGreaterThanOrEquals,
-                    _ => Opcode::BranchNot,
-                };
+                let opcode = Self::comparison_opcode(*op, lhs_type_hint);
                 let true_pos = out.len();
                 out.push(Instruction::new(opcode, Operand::JumpTarget(0)));
 
@@ -728,7 +907,11 @@ impl<'a> Compiler<'a> {
                     }
                     LogicOp::Or => {
                         // Short-circuit OR: if lhs is true → body, else check rhs
-                        let (lhs_true, lhs_false) = self.compile_condition(lhs, out, locals);
+                        let (lhs_true, mut lhs_false) = self.compile_condition(lhs, out, locals);
+                        if lhs_false.last().copied() == Some(out.len() - 1) {
+                            out.instructions.pop();
+                            lhs_false.pop();
+                        }
 
                         // Patch lhs_false branches to rhs_start
                         let rhs_start = out.len();
@@ -751,10 +934,12 @@ impl<'a> Compiler<'a> {
             // For any other expression, push value and 0, branch if value != 0 (true)
             _ => {
                 self.compile_expr(condition, out, locals);
-                out.push(Instruction::push_int(0));
 
                 let true_pos = out.len();
-                out.push(Instruction::new(Opcode::BranchNot, Operand::JumpTarget(0)));
+                out.push(Instruction::new(
+                    Opcode::BranchIfTrue,
+                    Operand::JumpTarget(0),
+                ));
 
                 let false_pos = out.len();
                 out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
@@ -856,6 +1041,16 @@ impl<'a> Compiler<'a> {
             for val in &case.values {
                 if let Expr::IntLiteral(n) = val {
                     values.push(*n);
+                } else if let Expr::BoolLiteral(value) = val {
+                    values.push(i32::from(*value));
+                } else if let Expr::NullLiteral = val {
+                    values.push(-1);
+                } else if let Expr::StringLiteral(name) = val {
+                    if let Some(id) =
+                        case_type_hint.and_then(|ty| self.registry.lookup_reference(name, ty))
+                    {
+                        values.push(id);
+                    }
                 } else if let Expr::ConstantVar(cname, _) = val {
                     // Resolve constant to integer for switch case value
                     if let Some(sym) = self.registry.constants.get(cname)
@@ -878,7 +1073,7 @@ impl<'a> Compiler<'a> {
                     // Use switch type hint for type-aware resolution
                     if !resolved
                         && let Some(hint) = case_type_hint
-                        && let Some(id) = self.registry.lookup_entity_id_typed(ident, hint)
+                        && let Some(id) = self.registry.lookup_reference(ident, hint)
                     {
                         values.push(id);
                         resolved = true;
@@ -930,10 +1125,11 @@ impl<'a> Compiler<'a> {
                 self.compile_statement(s, out, locals);
             }
 
-            // Jump to end of switch (after all cases)
-            let jump_pos = out.len();
-            out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
-            end_jumps.push(jump_pos);
+            if i + 1 < cases.len() || (default.is_some() && default_index == cases.len()) {
+                let jump_pos = out.len();
+                out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
+                end_jumps.push(jump_pos);
+            }
         }
 
         // If default appeared after ALL explicit cases (default_index == cases.len()), emit it now
@@ -943,9 +1139,6 @@ impl<'a> Compiler<'a> {
                 for s in default_stmts {
                     self.compile_statement(s, out, locals);
                 }
-                let jump_pos = out.len();
-                out.push(Instruction::new(Opcode::Branch, Operand::JumpTarget(0)));
-                end_jumps.push(jump_pos);
             }
         }
 
@@ -1006,7 +1199,7 @@ impl<'a> Compiler<'a> {
                     && h != Type::Int
                     && h != Type::Boolean
                 {
-                    if let Some(id) = self.registry.lookup_entity_id_typed(s, h) {
+                    if let Some(id) = self.registry.lookup_reference(s, h) {
                         out.push(Instruction::push_int(id));
                         return;
                     }
@@ -1081,6 +1274,12 @@ impl<'a> Compiler<'a> {
                         "varn" => Opcode::PushVarn,
                         "vars" => Opcode::PushVars,
                         "varbit" => Opcode::PushVarbit,
+                        "varc_int" => Opcode::PushVarcInt,
+                        "varc_string" => Opcode::PushVarcString,
+                        "clansetting_int" => Opcode::PushClanSettingInt,
+                        "clansetting_varbit" => Opcode::PushClanSettingVarbit,
+                        "clansetting_long" => Opcode::PushClanSettingLong,
+                        "clansetting_string" => Opcode::PushClanSettingString,
                         _ => Opcode::PushVarp,
                     };
                     let encoded_id = if secondary {
@@ -1140,6 +1339,7 @@ impl<'a> Compiler<'a> {
                 if let Some(hint) = type_hint {
                     let trigger_opt: Option<&'static str> = match hint {
                         Type::Proc => Some("proc"),
+                        Type::ClientScript => Some("clientscript"),
                         Type::Label => Some("label"),
                         Type::Queue => Some("queue"),
                         Type::SoftTimer => Some("softtimer"),
@@ -1157,7 +1357,7 @@ impl<'a> Compiler<'a> {
                         out.push(Instruction::push_int(script_id));
                         return;
                     }
-                    if let Some(id) = self.registry.lookup_entity_id_typed(name, hint) {
+                    if let Some(id) = self.registry.lookup_reference(name, hint) {
                         out.push(Instruction::push_int(id));
                         return;
                     }
@@ -1227,6 +1427,12 @@ impl<'a> Compiler<'a> {
                                 "varn" => Opcode::PushVarn,
                                 "vars" => Opcode::PushVars,
                                 "varbit" => Opcode::PushVarbit,
+                                "varc_int" => Opcode::PushVarcInt,
+                                "varc_string" => Opcode::PushVarcString,
+                                "clansetting_int" => Opcode::PushClanSettingInt,
+                                "clansetting_varbit" => Opcode::PushClanSettingVarbit,
+                                "clansetting_long" => Opcode::PushClanSettingLong,
+                                "clansetting_string" => Opcode::PushClanSettingString,
                                 _ => Opcode::PushVarp,
                             };
                             out.push(Instruction::new(push_op, Operand::Int(*var_id)));
@@ -1289,8 +1495,6 @@ impl<'a> Compiler<'a> {
                 self.compile_expr(lhs, out, locals);
                 self.compile_expr_hinted(rhs, out, locals, lhs_type_hint);
 
-                // Determine if this is a long operation based on operand types
-                // For now, use int operations; type checker can refine
                 let opcode = match op {
                     BinOp::Add => Opcode::Add,
                     BinOp::Sub => Opcode::Sub,
@@ -1300,39 +1504,69 @@ impl<'a> Compiler<'a> {
                     BinOp::BitAnd => Opcode::And,
                     BinOp::BitOr => Opcode::Or,
                     BinOp::Eq => {
-                        Self::emit_comparison_value(Opcode::BranchEquals, 0, 1, out);
+                        Self::emit_comparison_value(
+                            Self::comparison_opcode(*op, lhs_type_hint),
+                            0,
+                            1,
+                            out,
+                        );
                         return;
                     }
                     BinOp::NotEq => {
-                        Self::emit_comparison_value(Opcode::BranchEquals, 1, 0, out);
+                        Self::emit_comparison_value(
+                            Self::comparison_opcode(BinOp::Eq, lhs_type_hint),
+                            1,
+                            0,
+                            out,
+                        );
                         return;
                     }
                     BinOp::Lt => {
-                        Self::emit_comparison_value(Opcode::BranchLessThan, 0, 1, out);
+                        Self::emit_comparison_value(
+                            Self::comparison_opcode(*op, lhs_type_hint),
+                            0,
+                            1,
+                            out,
+                        );
                         return;
                     }
                     BinOp::Gt => {
-                        Self::emit_comparison_value(Opcode::BranchGreaterThan, 0, 1, out);
+                        Self::emit_comparison_value(
+                            Self::comparison_opcode(*op, lhs_type_hint),
+                            0,
+                            1,
+                            out,
+                        );
                         return;
                     }
                     BinOp::LtEq => {
-                        Self::emit_comparison_value(Opcode::BranchLessThanOrEquals, 0, 1, out);
+                        Self::emit_comparison_value(
+                            Self::comparison_opcode(*op, lhs_type_hint),
+                            0,
+                            1,
+                            out,
+                        );
                         return;
                     }
                     BinOp::GtEq => {
-                        Self::emit_comparison_value(Opcode::BranchGreaterThanOrEquals, 0, 1, out);
+                        Self::emit_comparison_value(
+                            Self::comparison_opcode(*op, lhs_type_hint),
+                            0,
+                            1,
+                            out,
+                        );
                         return;
                     }
                 };
-                out.push(Instruction::simple(opcode));
+                self.emit_arithmetic(opcode, out);
             }
 
             Expr::LogicalOp { op, lhs, rhs, .. } => {
                 self.compile_expr(lhs, out, locals);
                 self.compile_expr(rhs, out, locals);
                 match op {
-                    LogicOp::And => out.push(Instruction::simple(Opcode::And)),
-                    LogicOp::Or => out.push(Instruction::simple(Opcode::Or)),
+                    LogicOp::And => self.emit_arithmetic(Opcode::And, out),
+                    LogicOp::Or => self.emit_arithmetic(Opcode::Or, out),
                 }
             }
 
@@ -1346,6 +1580,25 @@ impl<'a> Compiler<'a> {
                 arg_lines,
                 call_line,
             } => {
+                let call = match hooks::server_call(self.registry, name, args, locals, *call_line) {
+                    Ok(call) => call,
+                    Err(error) => {
+                        self.errors.push(error);
+                        return;
+                    }
+                };
+                let (name, args, arg_lines, call_line) = match &call {
+                    Some(Expr::CommandCall {
+                        name,
+                        args,
+                        arg_lines,
+                        call_line,
+                    }) => (name, args, arg_lines, call_line),
+                    _ => (name, args, arg_lines, call_line),
+                };
+                if self.compile_intrinsic(name, args, out, locals) {
+                    return;
+                }
                 // Dot-prefixed commands address the secondary active entity (operand = 1).
                 let (lookup_name, cmd_index) = if let Some(stripped) = name.strip_prefix('.') {
                     (stripped, 1u8)
@@ -1353,13 +1606,16 @@ impl<'a> Compiler<'a> {
                     (name.as_str(), 0u8)
                 };
 
-                // Fetch per-position type hints from the engine command signature.
-                let param_types: Vec<Type> = self
-                    .registry
-                    .command_param_types
-                    .get(lookup_name)
-                    .cloned()
-                    .unwrap_or_default();
+                let lowered =
+                    match hooks::lower(self.registry, lookup_name, args, locals, *call_line) {
+                        Ok(args) => args,
+                        Err(error) => {
+                            self.errors.push(error);
+                            return;
+                        }
+                    };
+                let args = lowered.as_deref().unwrap_or(args);
+                let hints = command_hints(self.registry, lookup_name, args, locals);
 
                 // Commands that take a script reference as their first argument and
                 // variadic extra arguments (described by a type-string pushed after them).
@@ -1406,7 +1662,7 @@ impl<'a> Compiler<'a> {
                         out.push(Instruction::push_int(tc));
                         continue;
                     }
-                    let hint = param_types.get(i).copied();
+                    let hint = hints.get(i).copied().flatten();
                     if self.try_emit_test_command_id_arg(lookup_name, arg, hint, out) {
                         continue;
                     }
@@ -1488,25 +1744,14 @@ impl<'a> Compiler<'a> {
                 arg_lines,
                 call_line,
             } => {
-                // Get parameter types from target proc for type-aware arg compilation
-                let param_types: Vec<Type> = self
-                    .registry
-                    .lookup_script(name)
-                    .and_then(|sym| {
-                        if let SymbolKind::Script { param_types, .. } = &sym.kind {
-                            Some(param_types.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default();
+                let hints = proc_hints(self.registry, name, args, locals);
                 for (i, arg) in args.iter().enumerate() {
                     if let Some(&al) = arg_lines.get(i)
                         && al > 0
                     {
                         Self::emit_line(al, out);
                     }
-                    let hint = param_types.get(i).copied();
+                    let hint = hints.get(i).copied().flatten();
                     self.compile_expr_hinted(arg, out, locals, hint);
                 }
 
@@ -1522,7 +1767,11 @@ impl<'a> Compiler<'a> {
                 // infinite recursion at runtime. The type checker emits an
                 // error diagnostic for unresolved procs, so `-1` here only
                 // fires in paths that already produced an error.
-                let script_id = self.registry.proc_script_id(name).unwrap_or(-1);
+                let script_id = self
+                    .registry
+                    .proc_script_id(name)
+                    .or_else(|| self.registry.script_id_for_trigger("clientscript", name))
+                    .unwrap_or(-1);
                 out.push(Instruction::gosub_with_params(script_id));
             }
 
@@ -1586,10 +1835,155 @@ impl<'a> Compiler<'a> {
                 out.push(Instruction::join_string(count));
             }
 
+            Expr::Tuple(values) => {
+                for value in values {
+                    self.compile_expr(value, out, locals);
+                }
+            }
             Expr::MultiAssign(..) => {
                 // Multi-assign targets handled at statement level; no-op as expression
             }
         }
+    }
+
+    fn comparison_opcode(op: BinOp, ty: Option<Type>) -> Opcode {
+        match (op, ty == Some(Type::Long)) {
+            (BinOp::Eq, false) => Opcode::BranchEquals,
+            (BinOp::Eq, true) => Opcode::LongBranchEquals,
+            (BinOp::NotEq, false) => Opcode::BranchNot,
+            (BinOp::NotEq, true) => Opcode::LongBranchNot,
+            (BinOp::Lt, false) => Opcode::BranchLessThan,
+            (BinOp::Lt, true) => Opcode::LongBranchLessThan,
+            (BinOp::Gt, false) => Opcode::BranchGreaterThan,
+            (BinOp::Gt, true) => Opcode::LongBranchGreaterThan,
+            (BinOp::LtEq, false) => Opcode::BranchLessThanOrEquals,
+            (BinOp::LtEq, true) => Opcode::LongBranchLessThanOrEquals,
+            (BinOp::GtEq, false) => Opcode::BranchGreaterThanOrEquals,
+            (BinOp::GtEq, true) => Opcode::LongBranchGreaterThanOrEquals,
+            _ => Opcode::BranchNot,
+        }
+    }
+
+    fn compile_intrinsic(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        out: &mut CompiledScript,
+        locals: &mut SymbolTable,
+    ) -> bool {
+        match (name, args) {
+            ("__label", [Expr::Identifier(label)]) => {
+                if self.labels.insert(label.clone(), out.len()).is_some() {
+                    self.errors.push(format!("Duplicate label {label}"));
+                }
+            }
+            ("__jump", [Expr::Identifier(label)]) => {
+                self.label_jumps.push((out.len(), label.clone()));
+                out.push(Instruction::jump(0));
+            }
+            ("__branch", [Expr::Identifier(code), Expr::Identifier(label), values @ ..]) => {
+                let Some(opcode) = Opcode::core(code).filter(|opcode| {
+                    matches!(
+                        opcode,
+                        Opcode::BranchNot
+                            | Opcode::BranchEquals
+                            | Opcode::BranchLessThan
+                            | Opcode::BranchGreaterThan
+                            | Opcode::BranchLessThanOrEquals
+                            | Opcode::BranchGreaterThanOrEquals
+                            | Opcode::LongBranchNot
+                            | Opcode::LongBranchEquals
+                            | Opcode::LongBranchLessThan
+                            | Opcode::LongBranchGreaterThan
+                            | Opcode::LongBranchLessThanOrEquals
+                            | Opcode::LongBranchGreaterThanOrEquals
+                            | Opcode::BranchIfTrue
+                            | Opcode::BranchIfFalse
+                    )
+                }) else {
+                    self.errors.push(format!("Invalid branch {code}"));
+                    return true;
+                };
+                for value in values {
+                    self.compile_expr(value, out, locals);
+                }
+                self.label_jumps.push((out.len(), label.clone()));
+                out.push(Instruction::new(opcode, Operand::JumpTarget(0)));
+            }
+            ("__switch", [value, cases @ ..]) => {
+                self.compile_expr(value, out, locals);
+                let index = out.switch_tables.len();
+                let mut table = Vec::new();
+                if cases.len() % 2 != 0 {
+                    self.errors.push("Expected switch key/label pairs".into());
+                }
+                for pair in cases.as_chunks::<2>().0 {
+                    if let [Expr::IntLiteral(key), Expr::Identifier(label)] = pair {
+                        self.label_switches
+                            .push((index, table.len(), label.clone()));
+                        table.push((*key, 0));
+                    } else {
+                        self.errors.push("Invalid switch key/label".into());
+                    }
+                }
+                out.switch_tables.push(table.into_boxed_slice());
+                out.push(Instruction::new(
+                    Opcode::Switch,
+                    Operand::SwitchTable(index as u32),
+                ));
+            }
+            ("__opcode", [Expr::Identifier(name), Expr::IntLiteral(value)]) => {
+                if let Some(opcode) = Opcode::core(name) {
+                    out.push(Instruction::new(opcode, Operand::Int(*value)));
+                } else {
+                    self.errors.push(format!("Unknown instruction {name}"));
+                }
+            }
+            ("__opcode", [Expr::IntLiteral(code), Expr::IntLiteral(value)]) => {
+                if !(0..=65535).contains(code) {
+                    self.errors
+                        .push(format!("Invalid integer instruction {code}"));
+                } else {
+                    out.push(Instruction::new(
+                        Opcode::Raw,
+                        Operand::Long(((*code as i64) << 32) | *value as u32 as i64),
+                    ));
+                }
+            }
+            ("__push", values) => {
+                for value in values {
+                    self.compile_expr(value, out, locals);
+                }
+            }
+            ("__pop_int" | "__pop_string" | "__pop_long", []) => {}
+            ("__join", values) => {
+                for value in values {
+                    self.compile_expr(value, out, locals);
+                }
+                out.push(Instruction::join_string(values.len() as u32));
+            }
+            ("__get_array", [Expr::IntLiteral(id), index]) => {
+                self.compile_expr(index, out, locals);
+                out.push(Instruction::new(Opcode::PushArrayInt, Operand::Int(*id)));
+            }
+            ("__set_array", [Expr::IntLiteral(id), index, value]) => {
+                self.compile_expr(index, out, locals);
+                self.compile_expr(value, out, locals);
+                out.push(Instruction::new(Opcode::PopArrayInt, Operand::Int(*id)));
+            }
+            ("__define_array", [Expr::IntLiteral(id), Expr::IntLiteral(kind), size]) => {
+                self.compile_expr(size, out, locals);
+                out.push(Instruction::new(
+                    Opcode::DefineArray,
+                    Operand::ArrayDef(*id, *kind as u8),
+                ));
+            }
+            _ if name.starts_with("__") => {
+                self.errors.push(format!("Invalid intrinsic {name}"));
+            }
+            _ => return false,
+        }
+        true
     }
 
     fn compile_store(&mut self, target: &Expr, out: &mut CompiledScript, locals: &mut SymbolTable) {
@@ -1632,6 +2026,8 @@ impl<'a> Compiler<'a> {
                         "varn" => Opcode::PopVarn,
                         "vars" => Opcode::PopVars,
                         "varbit" => Opcode::PopVarbit,
+                        "varc_int" => Opcode::PopVarcInt,
+                        "varc_string" => Opcode::PopVarcString,
                         _ => Opcode::PopVarp,
                     };
                     let encoded_id = if secondary {
@@ -1731,17 +2127,12 @@ impl<'a> Compiler<'a> {
                 }
                 'i'
             }
-            Expr::CommandCall { name, .. } => {
-                let lookup = name.trim_start_matches('.');
-                if let Some(sym) = self.registry.lookup_command(lookup)
-                    && let SymbolKind::Command { return_types, .. } = &sym.kind
-                    && let Some(rt) = return_types.first()
-                {
-                    return self.type_to_type_char(*rt);
-                }
-                // Unknown or void command - check known command types
-                Self::known_command_type_char(lookup)
-            }
+            Expr::CommandCall { name, args, .. } => command_returns(self.registry, name, args)
+                .first()
+                .map_or_else(
+                    || Self::known_command_type_char(name.trim_start_matches('.')),
+                    |ty| self.type_to_type_char(*ty),
+                ),
             Expr::ProcCall { name, .. } => {
                 if let Some(sym) = self.registry.lookup_script(name)
                     && let SymbolKind::Script { return_types, .. } = &sym.kind
@@ -1834,14 +2225,8 @@ impl<'a> Compiler<'a> {
                 }
                 None
             }
-            Expr::CommandCall { name, .. } => {
-                let lookup = name.trim_start_matches('.');
-                if let Some(sym) = self.registry.lookup_command(lookup)
-                    && let SymbolKind::Command { return_types, .. } = &sym.kind
-                {
-                    return return_types.first().copied();
-                }
-                None
+            Expr::CommandCall { name, args, .. } => {
+                command_returns(self.registry, name, args).first().copied()
             }
             Expr::Identifier(name) => {
                 // Zero-arg commands used without parens (e.g. `loc_category`)
@@ -1908,7 +2293,10 @@ impl<'a> Compiler<'a> {
         }
         // Triggers whose subject is a coord, has no subject at all, or is
         // historically not validated (ai_queue/ai_timer) — see trigger_table.
-        if !crate::trigger_table::validates_subject(trigger) {
+        if !registry
+            .trigger(trigger)
+            .is_some_and(|trigger| trigger.validates_subject)
+        {
             return None;
         }
         let key = Self::compute_lookup_key(trigger, entity_name, registry);
@@ -1935,10 +2323,17 @@ impl<'a> Compiler<'a> {
     /// Formula: `entity_id * 1024 + 512 + trigger_byte`, or -1 if not applicable.
     /// For global scripts (entity="_"), returns just `trigger_byte`.
     pub fn compute_lookup_key(trigger: &str, entity_name: &str, registry: &SymbolRegistry) -> i32 {
+        if let Some(resolver) = registry
+            .profile
+            .as_ref()
+            .and_then(|profile| profile.lookup_key)
+        {
+            return resolver(trigger, entity_name, registry);
+        }
         // Trigger byte from the central trigger_table. Unknown triggers
         // (queue, softtimer, timer, walktrigger, proc, label, command,
         // clientscript, debugproc) are name-keyed and have no byte.
-        let trigger_byte = match crate::trigger_table::byte(trigger) {
+        let trigger_byte = match registry.trigger(trigger).and_then(|trigger| trigger.byte) {
             Some(b) => b as i64,
             None => return -1,
         };
@@ -2004,7 +2399,9 @@ impl<'a> Compiler<'a> {
         // Type-aware entity lookup so that e.g. "potato" resolves to loc_id
         // for [oploc2,potato] rather than the obj_id that has higher flat
         // priority. Trigger → entity-type routing lives in trigger_table.
-        if let Some(entity_type) = crate::trigger_table::subject_type(trigger)
+        if let Some(entity_type) = registry
+            .trigger(trigger)
+            .and_then(|trigger| trigger.subject_type)
             && let Some(entity_id) = registry.lookup_entity_id_typed(entity_name, entity_type)
         {
             return (entity_id as i64 * 1024 + 512 + trigger_byte) as i32;

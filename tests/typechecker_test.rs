@@ -18,7 +18,7 @@
 //!   - condition / switch validation
 //!   - `*` suffix gated to command trigger
 
-use runec::diagnostics::{Diagnostic, Severity};
+use runec::diagnostics::{Diagnostic, Phase, Severity};
 use runec::lexer::Lexer;
 use runec::parser::Parser;
 use runec::symbol::SymbolRegistry;
@@ -219,7 +219,7 @@ fn unresolved_proc_call_errors() {
 #[test]
 fn unresolved_jump_call_errors() {
     let res = check(
-        "[proc,caller]\n\
+        "[label,caller]\n\
          @not_a_real_label;\n",
     );
     assert!(
@@ -272,17 +272,41 @@ fn proc_call_resolves_when_target_exists() {
 
 #[test]
 fn jump_call_resolves_when_label_exists() {
-    let res = check(
-        "[label,trampoline]\n\
-         [proc,caller]\n\
-         @trampoline;\n",
-    );
-    assert_eq!(
-        res.error_count(),
-        0,
-        "expected no errors when label target exists, got:\n{}",
-        res.dump()
-    );
+    for trigger in ["label", "debugproc", "queue", "timer"] {
+        let res = check(&format!(
+            "[label,trampoline]\n[{trigger},caller]\n@trampoline;\n"
+        ));
+        assert_eq!(res.error_count(), 0, "{trigger}: {}", res.dump());
+    }
+}
+
+#[test]
+fn jumps_in_procs_are_errors_including_nested_and_test_code() {
+    for body in [
+        "@target;",
+        "if ($flag = 1) {\n@target;\n}",
+        "while ($flag = 1) {\n@target;\n}",
+        "switch_int($flag) {\ncase 1 :\n@target;\n}",
+        "return;\n@target;",
+    ] {
+        let source = format!(
+            "[proc,caller](int $flag)\n{body}\n[label,entry]\n@target;\n[label,target]\nreturn;\n"
+        );
+        for boundary in [None, Some(1)] {
+            let res = run_check(&source, empty_registry(), boundary);
+            let errors = res.errors();
+            assert_eq!(errors.len(), 1, "{source}: {}", res.dump());
+            assert_eq!(errors[0].phase, Phase::TypeChecking);
+            assert_eq!(
+                errors[0].message,
+                "Cannot jump to label '@target' from a proc."
+            );
+            assert_eq!(
+                errors[0].line,
+                source.lines().position(|line| line == "@target;").unwrap() + 1
+            );
+        }
+    }
 }
 
 #[test]
@@ -293,7 +317,7 @@ fn jump_to_test_label_from_production_errors() {
     reg.register_script("test_foo".into(), "label".into(), vec![], vec![]);
     reg.mark_test_script("label", "test_foo");
     let res = check_with_registry(
-        "[proc,prod]\n\
+        "[label,prod]\n\
          @test_foo;\n",
         reg,
     );
@@ -306,21 +330,16 @@ fn jump_to_test_label_from_production_errors() {
 
 #[test]
 fn jump_to_test_label_from_test_is_ok() {
-    // Calling a test label from another test label is fine — but the harness
-    // treats everything as production (no boundary), so we assert the inverse:
-    // an *unmarked* label jumped to from production does NOT error.
     let mut reg = empty_registry();
     reg.register_script("helper".into(), "label".into(), vec![], vec![]);
-    let res = check_with_registry(
-        "[proc,prod]\n\
+    reg.mark_test_script("label", "helper");
+    let res = run_check(
+        "[label,caller]\n\
          @helper;\n",
         reg,
+        Some(1),
     );
-    assert!(
-        !res.has_error_containing("production"),
-        "non-test label should be callable from production, got:\n{}",
-        res.dump()
-    );
+    assert_eq!(res.error_count(), 0, "{}", res.dump());
 }
 
 #[test]
