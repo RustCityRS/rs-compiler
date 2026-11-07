@@ -11,7 +11,7 @@
 
 ----
 
-# RuneScript Compiler (runec)
+# RuneScape Compiler (runec)
 
 `runec` compiles RuneScript (`.rs2`) for the server and ClientScript (`.cs2`)
 for the client. GlobalScript (`.gs2`) holds code shared by both. It also provides
