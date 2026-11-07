@@ -376,7 +376,7 @@ pub fn load_script_ids(registry: &mut SymbolRegistry, pack_dir: &Path) {
 /// Load clientscript.pack: `id=[clientscript,name]` — registers CS2 script IDs
 /// directly so server-side RS2 can reference them by name
 /// (e.g. `runclientscript("playerdesign4_open_name_entry()")` resolves to 3943).
-fn load_clientscript_pack(registry: &mut SymbolRegistry, path: &Path) {
+pub(crate) fn load_clientscript_pack(registry: &mut SymbolRegistry, path: &Path) {
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(_) => return,

@@ -200,7 +200,7 @@ The package is `rs-runec`; Rust imports use `runec`.
 
 ```toml
 [dependencies]
-rs-runec = "0.5.0"
+rs-runec = "0.5"
 ```
 
 Use [Project](src/project.rs) to manage source documents in memory:

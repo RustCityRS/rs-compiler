@@ -1383,6 +1383,9 @@ fn build_symbol_registry(scripts_dir: &Path, resolved_pack_dir: Option<&Path>) -
         scripts_dir.join("clientscript")
     };
     if client_dir.is_dir() {
+        if let Some(pack) = resolved_pack_dir {
+            symloader::load_clientscript_pack(&mut registry, &pack.join("clientscript.pack"));
+        }
         symloader::load_clientscript_signatures(&mut registry, &client_dir);
     }
 

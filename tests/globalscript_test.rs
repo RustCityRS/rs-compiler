@@ -133,6 +133,44 @@ fn shared_sources_compile_in_both_targets_and_low_memory_mode() {
 }
 
 #[test]
+fn server_callbacks_load_named_clientscript_signatures() {
+    let project = Project::new();
+    project.write(
+        "pack/command.pack",
+        "5000=runclientscript\n5013=runclientscriptvararg\n",
+    );
+    project.write(
+        "pack/clientscript.pack",
+        "7=[clientscript,refresh]\n8=[clientscript,inventory]\n9=[proc,inventory]\n10=[proc,named_proc]\n",
+    );
+    project.write(
+        "scripts/clientscript/main.cs2",
+        "[clientscript,refresh]\n[clientscript,inventory](int $slot, string $op)\n[proc,inventory](int $slot)\n[proc,named_proc](string $name)\n",
+    );
+    project.write(
+        "scripts/runescript/main.rs2",
+        r#"[proc,rune_entry]
+runclientscript("refresh()");
+runclientscript("inventory(1, \"Remove\")");
+.runclientscript("named_proc(\"name\")");
+"#,
+    );
+    let dir = project.0.join("scripts/runescript");
+    let pack = project.0.join("pack");
+    let normal = runec::compile_memory(&dir, Some(&pack), false).unwrap();
+    let low_memory =
+        runec::compile_memory_with_options(&dir, Some(&pack), false, false, true).unwrap();
+    assert_eq!(normal, low_memory);
+
+    project.write(
+        "scripts/runescript/main.rs2",
+        "[proc,rune_entry]\nrunclientscript(\"inventory(1)\");\n",
+    );
+    assert!(!project.rune(false));
+    assert!(!project.rune(true));
+}
+
+#[test]
 fn config_constants_vars_and_procs_cannot_cross_private_namespaces() {
     let project = Project::new();
     for (folder, ext, entry, forbidden) in [
