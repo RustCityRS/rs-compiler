@@ -1173,6 +1173,19 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         false,
     );
+    for name in [
+        "p_namedialog",
+        "p_stringdialog",
+        "p_setdisplayname",
+        "p_get_suggestion",
+        "p_next_suggestions",
+        "p_prev_suggestions",
+        "p_request_more_suggestions",
+        "p_rest",
+        "p_temprun",
+    ] {
+        add(name, &[PActivePlayer], &[], &[], &[], &[], &[], false);
+    }
     add(
         "p_finduid",
         &[],
@@ -2374,6 +2387,26 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         false,
     );
     add(
+        "obj_getvar",
+        &[ActiveObj],
+        &[],
+        &[],
+        &[ActiveObj2],
+        &[],
+        &[],
+        false,
+    );
+    add(
+        "obj_setvar",
+        &[ActiveObj],
+        &[],
+        &[],
+        &[ActiveObj2],
+        &[],
+        &[],
+        false,
+    );
+    add(
         "obj_takeitem",
         &[ActiveObj, ActivePlayer],
         &[],
@@ -2538,6 +2571,16 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         false,
     );
     add(
+        "inv_getvar",
+        &[ActivePlayer],
+        &[],
+        &[],
+        &[ActivePlayer2],
+        &[],
+        &[],
+        false,
+    );
+    add(
         "inv_itemspace",
         &[ActivePlayer],
         &[],
@@ -2619,6 +2662,16 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
     );
     add(
         "inv_setslot",
+        &[ActivePlayer],
+        &[],
+        &[],
+        &[ActivePlayer2],
+        &[],
+        &[],
+        false,
+    );
+    add(
+        "inv_setvar",
         &[ActivePlayer],
         &[],
         &[],

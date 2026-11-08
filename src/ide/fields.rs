@@ -544,6 +544,7 @@ const OBJ_FIELDS: &[Field] = &[
     ("quest", QUEST),
     ("members", FLAG),
     ("stackable", FLAG),
+    ("objvar", &[Config(Type::VarObj)]),
     ("tradeable", FLAG),
     ("stockmarket", FLAG),
     ("2dzoom", NUMBER),
@@ -784,6 +785,8 @@ const IF3: &[Field] = &[
 
 const VARBIT_FIELDS: &[Field] = &[("basevar", VARP), ("startbit", NUMBER), ("endbit", NUMBER)];
 
+const VAROBJ_FIELDS: &[Field] = &[("startbit", NUMBER), ("endbit", NUMBER)];
+
 const VARC: &[Field] = &[("type", TYPE), ("scope", WORD)];
 
 const VARCLANSETTING: &[Field] = &[
@@ -839,6 +842,7 @@ pub(super) fn keys(kind: &str) -> &'static [Field] {
         "varbit" => VARBIT_FIELDS,
         "varc" => VARC,
         "varclansetting" => VARCLANSETTING,
+        "varobj" => VAROBJ_FIELDS,
         "varn" | "varp" | "vars" => VAR_FIELDS,
         _ => &[],
     }
