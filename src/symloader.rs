@@ -9,7 +9,7 @@ use std::path::Path;
 use tracing::{info, warn};
 
 use crate::clientscript::{self, hooks};
-use crate::symbol::{SymbolKind, SymbolRegistry};
+use crate::symbol::{SymbolKind, SymbolRegistry, identifier_form, normalize_comp_name};
 use crate::types::Type;
 
 /// Parse the parameter types declared in an `engine.rs2` file and populate
@@ -1001,8 +1001,8 @@ fn load_entity_ids(registry: &mut SymbolRegistry, path: &Path, entity_type: Type
             && !name.contains(':')
             && let Ok(id) = id_str.parse::<i32>()
         {
-            registry.interface_ids.insert(name.to_string(), id);
-            iface_id_to_name.insert(id, name.to_string());
+            registry.interface_ids.insert(identifier_form(name), id);
+            iface_id_to_name.insert(id, identifier_form(name));
         }
     }
 
@@ -1070,15 +1070,19 @@ fn load_entity_ids(registry: &mut SymbolRegistry, path: &Path, entity_type: Type
 
         // Normalize name matching TS SymbolTable.normalizeName for Basic symbols:
         // name.toLowerCase().replace(/\s+/g, '_')
-        let normalized = register_name.to_lowercase().replace(' ', "_");
+        let normalized = if is_interface_pack {
+            identifier_form(&register_name).to_lowercase()
+        } else {
+            register_name.to_lowercase().replace(' ', "_")
+        };
         registry.register_entity_id(normalized, actual_type, idx);
 
         if is_interface_pack && let Some(key) = component_key {
             let normalized_key = if let Some((iface_part, comp_part)) = key.split_once(':') {
                 format!(
                     "{}:{}",
-                    iface_part,
-                    crate::symbol::normalize_comp_name(comp_part)
+                    identifier_form(iface_part),
+                    normalize_comp_name(&identifier_form(comp_part))
                 )
             } else {
                 key

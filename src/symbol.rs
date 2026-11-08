@@ -981,6 +981,22 @@ impl SymbolRegistry {
     }
 }
 
+/// A pack name as scripts write it: trimmed, with each character an
+/// identifier can't hold (a space, a hyphen) as `_`. Packs keep Jagex's real
+/// names, so `cove lid` is `cove_lid` in source.
+pub fn identifier_form(name: &str) -> String {
+    name.trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Strip underscores at alpha→digit boundaries to unify 647-style `com2`
 /// with 225-style `com_2`. Both normalize to `com2`.
 pub(crate) fn normalize_comp_name(name: &str) -> String {

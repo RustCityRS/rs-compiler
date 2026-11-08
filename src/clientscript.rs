@@ -3,7 +3,7 @@ use crate::lexer::Lexer;
 use crate::parser::{Expr, Parser, ScriptFile, Statement, StringPart};
 use crate::pointer::{PointerHolder, PointerType};
 use crate::pointer_checker::PointerChecker;
-use crate::symbol::{ReturnType, SymbolKind, SymbolRegistry};
+use crate::symbol::{ReturnType, SymbolKind, SymbolRegistry, identifier_form};
 use crate::symloader::{load_constant_files, load_game_var_types, load_packs};
 use crate::typechecker::TypeChecker;
 use crate::types::BaseVarType;
@@ -111,17 +111,7 @@ pub fn script_key(name: &str) -> String {
         .and_then(|name| name.strip_suffix(']'))
         .and_then(|name| name.split_once(','))
         .unwrap_or(("proc", name));
-    let name: String = name
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("[{trigger},{name}]")
+    format!("[{trigger},{}]", identifier_form(name))
 }
 
 pub fn script_ids(pack: &Path) -> Result<HashMap<String, i32>> {
