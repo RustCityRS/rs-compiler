@@ -346,7 +346,7 @@ impl<'a> TypeChecker<'a> {
                     {
                         self.emit_type_mismatch(*line, et, *var_type);
                     }
-                    self.warn_if_boolean_constant(init_expr, *var_type, *line);
+                    self.warn_if_int_for_boolean(init_expr, *var_type, *line);
                 }
                 locals.define_local(name.clone(), *var_type, false);
             }
@@ -451,7 +451,7 @@ impl<'a> TypeChecker<'a> {
                     self.emit_type_mismatch(*line, vt, tt);
                 }
                 if let Some(tt) = target_type {
-                    self.warn_if_boolean_constant(value, tt, *line);
+                    self.warn_if_int_for_boolean(value, tt, *line);
                 }
             }
 
@@ -574,7 +574,7 @@ impl<'a> TypeChecker<'a> {
                         self.emit_type_mismatch(*line, vt, expected);
                     }
                     if let Some(expected) = hint {
-                        self.warn_if_boolean_constant(val, expected, *line);
+                        self.warn_if_int_for_boolean(val, expected, *line);
                     }
                 }
             }
@@ -652,10 +652,10 @@ impl<'a> TypeChecker<'a> {
                             );
                         }
                         if let Some(lt) = lt {
-                            self.warn_if_boolean_constant(rhs, lt, line);
+                            self.warn_if_int_for_boolean(rhs, lt, line);
                         }
                         if let Some(rt) = rt {
-                            self.warn_if_boolean_constant(lhs, rt, line);
+                            self.warn_if_int_for_boolean(lhs, rt, line);
                         }
                     }
                     _ => {}
@@ -1499,7 +1499,7 @@ impl<'a> TypeChecker<'a> {
     ) {
         if args.len() == expected_types.len() {
             for (arg, expected) in args.iter().zip(expected_types) {
-                self.warn_if_boolean_constant(arg, *expected, line);
+                self.warn_if_int_for_boolean(arg, *expected, line);
             }
         }
         if self.stack_arguments(name, kind) {
@@ -1726,37 +1726,36 @@ impl<'a> TypeChecker<'a> {
         false
     }
 
-    /// A boolean given an int constant that holds 0 or 1, such as `^false`:
-    /// it works, but the literal `false` is the boolean's own value.
-    fn warn_if_boolean_constant(&mut self, expr: &Expr, expected: Type, line: usize) {
+    /// A boolean given an int, written out (`1`) or as a constant (`^true`):
+    /// it works, but `true` and `false` are the boolean's own values.
+    fn warn_if_int_for_boolean(&mut self, expr: &Expr, expected: Type, line: usize) {
         if expected != Type::Boolean {
             return;
         }
-        let Expr::ConstantVar(name, _) = expr else {
-            return;
-        };
-        let literal = match self
-            .registry
-            .lookup_constant(name)
-            .map(|symbol| &symbol.kind)
-        {
-            Some(SymbolKind::Constant {
-                const_type,
-                int_value: Some(value @ (0 | 1)),
-                ..
-            }) if *const_type != Type::Boolean => {
-                if *value == 1 {
-                    "true"
-                } else {
-                    "false"
+        let (shown, value) = match expr {
+            Expr::IntLiteral(value) => (format!("`{value}` is an int"), *value),
+            Expr::ConstantVar(name, _) => match self
+                .registry
+                .lookup_constant(name)
+                .map(|symbol| &symbol.kind)
+            {
+                Some(SymbolKind::Constant {
+                    const_type,
+                    int_value: Some(value),
+                    ..
+                }) if *const_type != Type::Boolean => {
+                    (format!("`^{name}` is an int constant"), *value)
                 }
-            }
+                _ => return,
+            },
             _ => return,
         };
-        self.warning(
-            line,
-            format!("`^{name}` is an int constant; a boolean takes `{literal}`"),
-        );
+        let takes = match value {
+            0 => "`false`",
+            1 => "`true`",
+            _ => "`true` or `false`",
+        };
+        self.warning(line, format!("{shown}; a boolean takes {takes}"));
     }
 
     /// Lint a value-context expression (declaration initializer / assignment

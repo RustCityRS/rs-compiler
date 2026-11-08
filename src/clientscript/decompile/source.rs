@@ -48,14 +48,6 @@ pub fn infer_signatures(
     registry: &mut SymbolRegistry,
 ) -> Result<HashMap<u32, Signature>> {
     let mut signatures = signatures(scripts);
-    // A variable is a boolean by being used as one, whatever it declares.
-    for symbol in registry.game_vars.values_mut() {
-        if let SymbolKind::GameVar { var_type, .. } = &mut symbol.kind
-            && *var_type == Type::Boolean
-        {
-            *var_type = Type::Int;
-        }
-    }
     let ids = scripts
         .keys()
         .map(|&id| (script_key(names, id), id as i32))

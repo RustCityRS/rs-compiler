@@ -938,7 +938,7 @@ fn noarg_command_statement_does_not_warn() {
 }
 
 #[test]
-fn int_constant_for_a_boolean_warns_with_the_literal() {
+fn ints_for_a_boolean_warn_with_the_literal() {
     let mut reg = empty_registry();
     reg.register_constant("false".into(), Type::Int, Some(0), None);
     reg.register_constant("true".into(), Type::Int, Some(1), None);
@@ -949,9 +949,10 @@ fn int_constant_for_a_boolean_warns_with_the_literal() {
          def_boolean $set = ^false;\n\
          $set = ^true;\n\
          flag(^true, ^false);\n\
-         def_int $count = ^false;\n\
+         def_int $count = 1;\n\
          def_boolean $odd = ^two;\n\
-         if ($arg = ^false) {\n\
+         if ($arg = 1) {\n\
+         $set = 0;\n\
          return(^true);\n\
          }\n\
          return(false);\n",
@@ -960,15 +961,20 @@ fn int_constant_for_a_boolean_warns_with_the_literal() {
     let warnings: Vec<_> = res
         .diagnostics
         .iter()
-        .filter(|d| d.message.contains("is an int constant"))
+        .filter(|d| d.message.contains("a boolean takes"))
         .map(|d| (d.line, d.message.clone()))
         .collect();
     let expected = [
         (2, "`^false` is an int constant; a boolean takes `false`"),
         (3, "`^true` is an int constant; a boolean takes `true`"),
         (4, "`^true` is an int constant; a boolean takes `true`"),
-        (7, "`^false` is an int constant; a boolean takes `false`"),
-        (8, "`^true` is an int constant; a boolean takes `true`"),
+        (
+            6,
+            "`^two` is an int constant; a boolean takes `true` or `false`",
+        ),
+        (7, "`1` is an int; a boolean takes `true`"),
+        (8, "`0` is an int; a boolean takes `false`"),
+        (9, "`^true` is an int constant; a boolean takes `true`"),
     ];
     assert_eq!(
         warnings,

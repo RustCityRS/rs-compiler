@@ -246,7 +246,7 @@ impl Inference<'_> {
                 if let Some(&id) = self.vars.get(name) {
                     vec![id]
                 } else {
-                    // A variable is a boolean by being used as one, whatever it declares.
+                    // A variable reads as the type it declares.
                     let ty = self
                         .registry
                         .lookup_game_var(name)
@@ -257,7 +257,6 @@ impl Inference<'_> {
                                 None
                             }
                         })
-                        .filter(|ty| *ty != Type::Boolean)
                         .unwrap_or(Type::Int);
                     let id = self.node(ty);
                     self.vars.insert(name.clone(), id);
