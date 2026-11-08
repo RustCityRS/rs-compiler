@@ -1136,7 +1136,17 @@ impl<'a> PointerChecker<'a> {
                 // secondary game vars emit `(1 << 16) | var_id`). TS emits
                 // distinct opcodes (PushVar/PushVar2); we flatten that into a
                 // single opcode + operand flag and recover it here.
-                Opcode::PushVarp | Opcode::PushVarbit if !self.shared.client => {
+                Opcode::PushVarp
+                | Opcode::PushVarbit
+                | Opcode::PushVarcInt
+                | Opcode::PushVarcString
+                | Opcode::PushVarClan
+                | Opcode::PushClanSettingInt
+                | Opcode::PushClanSettingVarbit
+                | Opcode::PushClanSettingLong
+                | Opcode::PushClanSettingString
+                    if !self.shared.client =>
+                {
                     let pi = if is_secondary_var_operand(&instr.operand) {
                         PointerType::ActivePlayer2.index()
                     } else {
@@ -1145,7 +1155,17 @@ impl<'a> PointerChecker<'a> {
                     analysis.required[pi].push(node_idx);
                 }
 
-                Opcode::PopVarp | Opcode::PopVarbit if !self.shared.client => {
+                Opcode::PopVarp
+                | Opcode::PopVarbit
+                | Opcode::PopVarcInt
+                | Opcode::PopVarcString
+                | Opcode::PopVarClan
+                | Opcode::PopClanSettingInt
+                | Opcode::PopClanSettingVarbit
+                | Opcode::PopClanSettingLong
+                | Opcode::PopClanSettingString
+                    if !self.shared.client =>
+                {
                     let pi = if is_secondary_var_operand(&instr.operand) {
                         PointerType::ActivePlayer2.index()
                     } else {
@@ -1154,7 +1174,9 @@ impl<'a> PointerChecker<'a> {
                     analysis.required[pi].push(node_idx);
                 }
 
-                Opcode::PushVarn | Opcode::PopVarn if !self.shared.client => {
+                Opcode::PushVarn | Opcode::PopVarn | Opcode::PushVarnBit | Opcode::PopVarnBit
+                    if !self.shared.client =>
+                {
                     let pi = if is_secondary_var_operand(&instr.operand) {
                         PointerType::ActiveNpc2.index()
                     } else {

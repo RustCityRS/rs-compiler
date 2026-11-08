@@ -95,6 +95,8 @@ const VARP_RANGE: &[Value] = &[Config(Type::Varp), Number, Number];
 const VARBIT_RANGE: &[Value] = &[Config(Type::Varbit), Number, Number];
 const TILE: &[Value] = &[Tile];
 
+const AREA: &[Field] = &[("colour", NUMBER), ("trigger", FLAG)];
+
 const BAS: &[Field] = &[
     ("readyanim", SEQ),
     ("readyanim_l", SEQ),
@@ -801,6 +803,7 @@ const VAR_FIELDS: &[Field] = &[
 
 pub(super) fn keys(kind: &str) -> &'static [Field] {
     match kind {
+        "area" => AREA,
         "bas" => BAS,
         "billboard" => BILLBOARD,
         "defaults" => DEFAULTS,

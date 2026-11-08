@@ -346,6 +346,7 @@ impl<'a> TypeChecker<'a> {
                     {
                         self.emit_type_mismatch(*line, et, *var_type);
                     }
+                    self.warn_if_boolean_constant(init_expr, *var_type, *line);
                 }
                 locals.define_local(name.clone(), *var_type, false);
             }
@@ -448,6 +449,9 @@ impl<'a> TypeChecker<'a> {
                     && !self.types_compatible(vt, tt)
                 {
                     self.emit_type_mismatch(*line, vt, tt);
+                }
+                if let Some(tt) = target_type {
+                    self.warn_if_boolean_constant(value, tt, *line);
                 }
             }
 
@@ -569,6 +573,9 @@ impl<'a> TypeChecker<'a> {
                     {
                         self.emit_type_mismatch(*line, vt, expected);
                     }
+                    if let Some(expected) = hint {
+                        self.warn_if_boolean_constant(val, expected, *line);
+                    }
                 }
             }
 
@@ -643,6 +650,12 @@ impl<'a> TypeChecker<'a> {
                                 line,
                                 msg::fmt(msg::BINOP_INVALID_TYPES, &[op_str, lt.name(), rt.name()]),
                             );
+                        }
+                        if let Some(lt) = lt {
+                            self.warn_if_boolean_constant(rhs, lt, line);
+                        }
+                        if let Some(rt) = rt {
+                            self.warn_if_boolean_constant(lhs, rt, line);
                         }
                     }
                     _ => {}
@@ -1484,6 +1497,11 @@ impl<'a> TypeChecker<'a> {
         line: usize,
         kind: CallKind,
     ) {
+        if args.len() == expected_types.len() {
+            for (arg, expected) in args.iter().zip(expected_types) {
+                self.warn_if_boolean_constant(arg, *expected, line);
+            }
+        }
         if self.stack_arguments(name, kind) {
             let actual_types = self.expand_call_types(args, actual_types);
             for base in [BaseVarType::Integer, BaseVarType::String, BaseVarType::Long] {
@@ -1706,6 +1724,39 @@ impl<'a> TypeChecker<'a> {
             return true;
         }
         false
+    }
+
+    /// A boolean given an int constant that holds 0 or 1, such as `^false`:
+    /// it works, but the literal `false` is the boolean's own value.
+    fn warn_if_boolean_constant(&mut self, expr: &Expr, expected: Type, line: usize) {
+        if expected != Type::Boolean {
+            return;
+        }
+        let Expr::ConstantVar(name, _) = expr else {
+            return;
+        };
+        let literal = match self
+            .registry
+            .lookup_constant(name)
+            .map(|symbol| &symbol.kind)
+        {
+            Some(SymbolKind::Constant {
+                const_type,
+                int_value: Some(value @ (0 | 1)),
+                ..
+            }) if *const_type != Type::Boolean => {
+                if *value == 1 {
+                    "true"
+                } else {
+                    "false"
+                }
+            }
+            _ => return,
+        };
+        self.warning(
+            line,
+            format!("`^{name}` is an int constant; a boolean takes `{literal}`"),
+        );
     }
 
     /// Lint a value-context expression (declaration initializer / assignment

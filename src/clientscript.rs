@@ -476,7 +476,11 @@ fn load_varc_types(registry: &mut SymbolRegistry, files: &[PathBuf]) -> Result<(
 
 /// A clan setting's opcodes follow its type, which only its config declares:
 /// `basevar` for a bit range, otherwise `type`.
-fn load_clan_settings(registry: &mut SymbolRegistry, files: &[PathBuf], pack: &Path) -> Result<()> {
+pub(crate) fn load_clan_settings(
+    registry: &mut SymbolRegistry,
+    files: &[PathBuf],
+    pack: &Path,
+) -> Result<()> {
     let ids: HashMap<String, i32> = fs::read_to_string(pack.join("varclansetting.pack"))
         .unwrap_or_default()
         .lines()

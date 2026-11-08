@@ -67,6 +67,19 @@ fn scripts_keep_reference_categories_and_complete_sigils() {
 }
 
 #[test]
+fn constants_named_like_keywords_are_one_constant() {
+    let mut project = project();
+    let text = "[proc,test]\ndef_boolean $real = false;\ndef_boolean $flag = ^false;\n";
+    let doc = project.open("mem:test", Scope::Global, 1, text);
+    let tokens = project.semantic_tokens(doc);
+    ordered(text, &tokens);
+    assert_eq!(at(text, &tokens, "false").kind, TokenKind::Keyword);
+    let constant = at(text, &tokens, "^false");
+    assert_eq!(constant.kind, TokenKind::Variable);
+    assert!(constant.static_ && constant.readonly);
+}
+
+#[test]
 fn overloaded_types_and_trigger_subjects_are_contextual() {
     let mut project = project();
     let text = "[proc,test](queue $q)(npc_uid)\nqueue(missing_queue, 1);\nreturn(npc_uid);\n[opnpc1,goblin]\nreturn;\n";

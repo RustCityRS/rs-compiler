@@ -936,3 +936,44 @@ fn noarg_command_statement_does_not_warn() {
         res.dump()
     );
 }
+
+#[test]
+fn int_constant_for_a_boolean_warns_with_the_literal() {
+    let mut reg = empty_registry();
+    reg.register_constant("false".into(), Type::Int, Some(0), None);
+    reg.register_constant("true".into(), Type::Int, Some(1), None);
+    reg.register_constant("two".into(), Type::Int, Some(2), None);
+    reg.register_command("flag".into(), 1001, vec![Type::Boolean, Type::Int], vec![]);
+    let res = check_with_registry(
+        "[proc,flags](boolean $arg)(boolean)\n\
+         def_boolean $set = ^false;\n\
+         $set = ^true;\n\
+         flag(^true, ^false);\n\
+         def_int $count = ^false;\n\
+         def_boolean $odd = ^two;\n\
+         if ($arg = ^false) {\n\
+         return(^true);\n\
+         }\n\
+         return(false);\n",
+        reg,
+    );
+    let warnings: Vec<_> = res
+        .diagnostics
+        .iter()
+        .filter(|d| d.message.contains("is an int constant"))
+        .map(|d| (d.line, d.message.clone()))
+        .collect();
+    let expected = [
+        (2, "`^false` is an int constant; a boolean takes `false`"),
+        (3, "`^true` is an int constant; a boolean takes `true`"),
+        (4, "`^true` is an int constant; a boolean takes `true`"),
+        (7, "`^false` is an int constant; a boolean takes `false`"),
+        (8, "`^true` is an int constant; a boolean takes `true`"),
+    ];
+    assert_eq!(
+        warnings,
+        expected.map(|(line, message)| (line, message.to_owned())),
+        "got:\n{}",
+        res.dump()
+    );
+}

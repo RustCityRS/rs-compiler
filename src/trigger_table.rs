@@ -216,6 +216,10 @@ const TRIGGERS: &[TriggerInfo] = &[
     // An npc's spawn and despawn name the npc, as its other AI triggers do.
     npc("ai_spawn", 166),
     npc("ai_despawn", 167),
+    // A player entering or leaving an area painted on the map. 168-172 stay
+    // unused: they were opheld6-10.
+    area("area", 178),
+    area("areaexit", 179),
 ];
 
 // ── Constructor helpers ──────────────────────────────────────────────
@@ -279,6 +283,16 @@ const fn component(name: &'static str, byte: u8) -> TriggerInfo {
         subject_type: Some(Type::Component),
         validates_subject: true,
         is_button: true,
+    }
+}
+
+const fn area(name: &'static str, byte: u8) -> TriggerInfo {
+    TriggerInfo {
+        name,
+        byte,
+        subject_type: Some(Type::Area),
+        validates_subject: true,
+        is_button: false,
     }
 }
 

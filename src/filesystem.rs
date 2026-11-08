@@ -19,7 +19,7 @@ use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Build an editor project using the legacy directory conventions. No ID file
 /// is generated or modified; all further editing happens in memory.
@@ -1345,6 +1345,12 @@ fn build_symbol_registry(scripts_dir: &Path, resolved_pack_dir: Option<&Path>) -
     );
 
     symloader::load_game_var_types(&mut registry, &config_files);
+
+    if let Some(pd) = resolved_pack_dir
+        && let Err(error) = clientscript::load_clan_settings(&mut registry, &config_files, pd)
+    {
+        warn!("  Clan settings not loaded: {error}");
+    }
 
     if let Some(pd) = resolved_pack_dir {
         let dbtable_ids = symloader::load_dbtable_pack(&pd.join("dbtable.pack"));

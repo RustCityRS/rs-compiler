@@ -384,7 +384,19 @@ impl Visibility {
             return None;
         }
         let scope = self.scope(path)?;
-        let name = if matches!(kind, "varp" | "varbit" | "varn" | "vars") {
+        let name = if matches!(
+            kind,
+            "varp"
+                | "varbit"
+                | "varn"
+                | "vars"
+                | "varc"
+                | "varcs"
+                | "varclan"
+                | "varobj"
+                | "varnbit"
+                | "varcon"
+        ) {
             name.trim_start_matches('.')
         } else {
             name

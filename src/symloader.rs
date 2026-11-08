@@ -289,6 +289,12 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) {
     load_game_vars(registry, &pack_dir.join("varn.pack"), "varn");
     load_game_vars(registry, &pack_dir.join("vars.pack"), "vars");
     load_game_vars(registry, &pack_dir.join("varbit.pack"), "varbit");
+    load_game_vars(registry, &pack_dir.join("varc.pack"), "varc");
+    load_game_vars(registry, &pack_dir.join("varcs.pack"), "varcs");
+    load_game_vars(registry, &pack_dir.join("varclan.pack"), "varclan");
+    load_game_vars(registry, &pack_dir.join("varobj.pack"), "varobj");
+    load_game_vars(registry, &pack_dir.join("varnbit.pack"), "varnbit");
+    load_game_vars(registry, &pack_dir.join("varcon.pack"), "varcon");
 
     // Load entity IDs.
     // Load in ascending priority order: later entries overwrite earlier ones
@@ -791,10 +797,11 @@ impl Comments {
     }
 }
 
-/// Scan `.varp`/`.varn`/`.vars`/`.varbit` configs and refine the type
-/// of each matching game-var. `load_game_vars` defaults everything to
-/// `Type::Int`; the real type comes from the `type=<typename>` line
-/// in the config block.
+/// Scan the game-var configs and refine the type of each matching game-var.
+/// `load_game_vars` defaults everything to `Type::Int`; the real type comes
+/// from the `type=<typename>` line in the config block. Only varp, varn, vars
+/// and varbit are registered from their file alone; the cache's tables number
+/// the others, through their `.pack`.
 pub fn load_game_var_types(registry: &mut SymbolRegistry, files: &[std::path::PathBuf]) {
     // Track the next auto-assigned ID per category for vars only found in config files.
     let mut next_auto_id: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
@@ -822,7 +829,9 @@ pub fn load_game_var_types(registry: &mut SymbolRegistry, files: &[std::path::Pa
         next_auto_id.insert(ext.to_string(), max_id + 1);
     }
 
-    for ext in &["varp", "varn", "vars", "varbit"] {
+    for ext in &[
+        "varp", "varn", "vars", "varbit", "varc", "varclan", "varobj", "varnbit", "varcon",
+    ] {
         let ext_files = files
             .iter()
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some(*ext));
@@ -839,7 +848,9 @@ pub fn load_game_var_types(registry: &mut SymbolRegistry, files: &[std::path::Pa
                 if let Some(inner) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
                     let name = inner.trim().to_string();
                     // Register the var if it doesn't exist yet (config-only var)
-                    if !registry.game_vars.contains_key(&name) {
+                    if matches!(*ext, "varp" | "varn" | "vars" | "varbit")
+                        && !registry.game_vars.contains_key(&name)
+                    {
                         let id = next_auto_id.get_mut(*ext).unwrap();
                         let auto_id = *id;
                         *id += 1;

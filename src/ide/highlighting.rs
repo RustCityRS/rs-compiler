@@ -84,6 +84,24 @@ fn identifier(kind: Kind) -> bool {
     )
 }
 
+/// A word the lexer reads as a keyword, which after a sigil is still a name:
+/// `^false` is a constant, not the boolean.
+fn keyword(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::If
+            | Kind::Else
+            | Kind::While
+            | Kind::Switch
+            | Kind::Case
+            | Kind::Default
+            | Kind::Calc
+            | Kind::Null
+            | Kind::BooleanTrue
+            | Kind::BooleanFalse
+    )
+}
+
 fn code(
     document: &Document,
     index: &Index,
@@ -214,7 +232,7 @@ fn code(
         );
         if prefix
             && let Some((next_kind, name)) = next
-            && identifier(*next_kind)
+            && (identifier(*next_kind) || keyword(*next_kind))
             && span.end == name.start
         {
             symbol_offset = name.start;

@@ -1324,19 +1324,7 @@ impl<'a> Compiler<'a> {
                         var_id, category, ..
                     } = &sym.kind
                 {
-                    let opcode = match category.as_str() {
-                        "varp" => Opcode::PushVarp,
-                        "varn" => Opcode::PushVarn,
-                        "vars" => Opcode::PushVars,
-                        "varbit" => Opcode::PushVarbit,
-                        "varc" => Opcode::PushVarcInt,
-                        "varcs" => Opcode::PushVarcString,
-                        "clansetting_int" => Opcode::PushClanSettingInt,
-                        "clansetting_varbit" => Opcode::PushClanSettingVarbit,
-                        "clansetting_long" => Opcode::PushClanSettingLong,
-                        "clansetting_string" => Opcode::PushClanSettingString,
-                        _ => Opcode::PushVarp,
-                    };
+                    let opcode = Opcode::push_var(category);
                     let encoded_id = if secondary {
                         (1 << 16) | *var_id
                     } else {
@@ -1477,19 +1465,7 @@ impl<'a> Compiler<'a> {
                                 var_id, category, ..
                             } = &sym.kind
                         {
-                            let push_op = match category.as_str() {
-                                "varp" => Opcode::PushVarp,
-                                "varn" => Opcode::PushVarn,
-                                "vars" => Opcode::PushVars,
-                                "varbit" => Opcode::PushVarbit,
-                                "varc" => Opcode::PushVarcInt,
-                                "varcs" => Opcode::PushVarcString,
-                                "clansetting_int" => Opcode::PushClanSettingInt,
-                                "clansetting_varbit" => Opcode::PushClanSettingVarbit,
-                                "clansetting_long" => Opcode::PushClanSettingLong,
-                                "clansetting_string" => Opcode::PushClanSettingString,
-                                _ => Opcode::PushVarp,
-                            };
+                            let push_op = Opcode::push_var(category);
                             out.push(Instruction::new(push_op, Operand::Int(*var_id)));
                         } else if let Some(&type_char) = self.registry.type_chars.get(name) {
                             out.push(Instruction::push_int(type_char));
@@ -2076,15 +2052,7 @@ impl<'a> Compiler<'a> {
                         var_id, category, ..
                     } = &sym.kind
                 {
-                    let opcode = match category.as_str() {
-                        "varp" => Opcode::PopVarp,
-                        "varn" => Opcode::PopVarn,
-                        "vars" => Opcode::PopVars,
-                        "varbit" => Opcode::PopVarbit,
-                        "varc" => Opcode::PopVarcInt,
-                        "varcs" => Opcode::PopVarcString,
-                        _ => Opcode::PopVarp,
-                    };
+                    let opcode = Opcode::pop_var(category);
                     let encoded_id = if secondary {
                         (1 << 16) | *var_id
                     } else {

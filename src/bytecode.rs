@@ -50,6 +50,19 @@ pub enum Opcode {
     LongBranchGreaterThan = 71,
     LongBranchLessThanOrEquals = 72,
     LongBranchGreaterThanOrEquals = 73,
+    // Server-only vars, in a range the client leaves unused
+    PushVarClan = 74,
+    PopVarClan = 75,
+    PushVarObj = 76,
+    PopVarObj = 77,
+    PushVarnBit = 78,
+    PopVarnBit = 79,
+    PushVarCon = 80,
+    PopVarCon = 81,
+    PopClanSettingInt = 82,
+    PopClanSettingVarbit = 83,
+    PopClanSettingLong = 84,
+    PopClanSettingString = 85,
     // Object/string branch operations
     ObjBranchEquals = 86,
     ObjBranchNot = 87,
@@ -98,6 +111,46 @@ pub enum Opcode {
 }
 
 impl Opcode {
+    /// The opcode that reads a game var of `category`.
+    pub fn push_var(category: &str) -> Self {
+        match category {
+            "varn" => Self::PushVarn,
+            "vars" => Self::PushVars,
+            "varbit" => Self::PushVarbit,
+            "varc" => Self::PushVarcInt,
+            "varcs" => Self::PushVarcString,
+            "varclan" => Self::PushVarClan,
+            "varobj" => Self::PushVarObj,
+            "varnbit" => Self::PushVarnBit,
+            "varcon" => Self::PushVarCon,
+            "clansetting_int" => Self::PushClanSettingInt,
+            "clansetting_varbit" => Self::PushClanSettingVarbit,
+            "clansetting_long" => Self::PushClanSettingLong,
+            "clansetting_string" => Self::PushClanSettingString,
+            _ => Self::PushVarp,
+        }
+    }
+
+    /// The opcode that writes a game var of `category`.
+    pub fn pop_var(category: &str) -> Self {
+        match category {
+            "varn" => Self::PopVarn,
+            "vars" => Self::PopVars,
+            "varbit" => Self::PopVarbit,
+            "varc" => Self::PopVarcInt,
+            "varcs" => Self::PopVarcString,
+            "varclan" => Self::PopVarClan,
+            "varobj" => Self::PopVarObj,
+            "varnbit" => Self::PopVarnBit,
+            "varcon" => Self::PopVarCon,
+            "clansetting_int" => Self::PopClanSettingInt,
+            "clansetting_varbit" => Self::PopClanSettingVarbit,
+            "clansetting_long" => Self::PopClanSettingLong,
+            "clansetting_string" => Self::PopClanSettingString,
+            _ => Self::PopVarp,
+        }
+    }
+
     pub fn core(name: &str) -> Option<Self> {
         match name {
             "PushConstantInt" => Some(Self::PushConstantInt),

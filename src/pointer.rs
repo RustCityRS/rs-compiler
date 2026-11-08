@@ -405,6 +405,7 @@ pub fn trigger_pointers(trigger: &str) -> PointerSet {
         "login" | "logout" | "tutorial" | "switch_window_mode" => &[ActivePlayer, PActivePlayer],
         "advancestat" | "changestat" => &[ActivePlayer, PActivePlayer],
         "mapzone" | "mapzoneexit" | "zone" | "zoneexit" => &[ActivePlayer, PActivePlayer],
+        "area" | "areaexit" => &[ActivePlayer, PActivePlayer],
 
         // AI lifecycle triggers
         "ai_spawn" | "ai_despawn" => &[ActiveNpc],
