@@ -9,6 +9,7 @@ use crate::diagnostics::{
 };
 use crate::pointer::{PointerHolder, PointerSet, PointerType, command_pointers, trigger_pointers};
 use crate::symbol::{SymbolKind, SymbolRegistry};
+use crate::types::Type;
 
 // ---------------------------------------------------------------------------
 // CFG re-compile access trace (profiling only). Records the file whose CFG is
@@ -262,8 +263,10 @@ impl SharedMaps {
         // gets p_active_player granted, matching ServerPointerChecker.
         let mut overlay_interfaces = HashSet::new();
         for (name, entry) in &registry.entity_ids {
-            if let Some(e) = entry.primary
-                && e.const_type == crate::types::Type::OverlayInterface
+            if entry
+                .variants
+                .iter()
+                .any(|(t, _)| *t == Type::OverlayInterface)
             {
                 overlay_interfaces.insert(name.to_lowercase().replace(' ', "_"));
             }
@@ -314,11 +317,12 @@ impl<'a> PointerChecker<'a> {
     pub(crate) fn build_shared(
         scripts: &[CompiledScript],
         registry: &SymbolRegistry,
+        client: bool,
     ) -> std::sync::Arc<SharedMaps> {
         std::sync::Arc::new(SharedMaps::build(
             scripts.iter().map(|s| (s.id, s.name.as_str())),
             registry,
-            false,
+            client,
         ))
     }
 
@@ -412,8 +416,20 @@ impl<'a> PointerChecker<'a> {
     /// `PointerChecker` produces byte-identical diagnostics to validating
     /// everything in a single checker — which lets the pass run across threads.
     pub fn validate_names(&mut self, names: &[String]) -> DiagnosticsCollector {
+        self.validate_names_until(names, &|| false)
+    }
+
+    /// `validate_names`, giving up between scripts once `stop` returns true.
+    pub(crate) fn validate_names_until(
+        &mut self,
+        names: &[String],
+        stop: &dyn Fn() -> bool,
+    ) -> DiagnosticsCollector {
         let mut diagnostics = DiagnosticsCollector::new();
         for script_name in names {
+            if stop() {
+                break;
+            }
             self.validate_script(script_name, &mut diagnostics);
             // A script's CFG (and any callee CFGs built to derive summaries) is
             // only needed during its own validation; the cross-script pointer

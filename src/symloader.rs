@@ -9,6 +9,7 @@ use std::path::Path;
 use tracing::{info, warn};
 
 use crate::clientscript::{self, hooks};
+use crate::parallel::parallel_map;
 use crate::symbol::{SymbolKind, SymbolRegistry, identifier_form, normalize_comp_name};
 use crate::types::Type;
 
@@ -159,13 +160,14 @@ fn load_script_pack(registry: &mut SymbolRegistry, path: &Path) {
             Some(i) => i,
             None => continue,
         };
-        let trigger = &inner[..comma];
-        let name = &inner[comma + 1..];
+        let trigger = inner[..comma].trim();
+        let name = inner[comma + 1..].trim();
         if trigger.is_empty() || name.is_empty() {
             continue;
         }
         let key = format!("{}:{}", trigger, name);
         registry.preloaded_script_ids.insert(key, id);
+        registry.next_script_id = registry.next_script_id.max(id + 1);
     }
 }
 
@@ -451,18 +453,17 @@ pub(crate) fn load_clientscript_signatures(registry: &mut SymbolRegistry, dir: &
     let Ok(files) = crate::sources::script_files(dir, "cs2") else {
         return;
     };
-    let mut sources = Vec::new();
-    for path in files
+    let files: Vec<_> = files
         .into_iter()
         .filter(|path| path.extension().is_some_and(|ext| ext == "cs2"))
-    {
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        if let Ok(file) = clientscript::parse(&text, &path) {
-            sources.push(file);
-        }
-    }
+        .collect();
+    let sources: Vec<_> = parallel_map(&files, |path| {
+        let text = fs::read_to_string(path).ok()?;
+        clientscript::parse(&text, path).ok()
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     hooks::register_callbacks(registry, sources.iter().flat_map(|file| &file.scripts));
 }
 
@@ -609,9 +610,8 @@ pub fn load_dbtable_configs(
                 }
             }
 
-            // First-field type drives db_find's BaseVarType ordinal.
-            if let Some(first_type) = types.first().copied() {
-                registry.dbcolumn_types.insert(compound, first_type);
+            if !types.is_empty() {
+                registry.dbcolumn_types.insert(compound, types);
             }
 
             col_idx += 1;
@@ -1443,6 +1443,21 @@ mod tests {
         let mut f = fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path
+    }
+
+    #[test]
+    fn script_pack_spaced_header_keeps_its_id() {
+        let pack = write_temp_pack(
+            "script_spaced.pack",
+            "0=[label,make_ogre_shafts]\n754=[label, please_finish]\n",
+        );
+        let mut r = SymbolRegistry::new();
+        load_script_pack(&mut r, &pack);
+
+        let id = r.register_script("please_finish".into(), "label".into(), vec![], vec![]);
+        assert_eq!(id, 754);
+        let id = r.register_script("unpinned".into(), "label".into(), vec![], vec![]);
+        assert_eq!(id, 755);
     }
 
     // ── 647-style pack ─────────────────────────────────────────────────

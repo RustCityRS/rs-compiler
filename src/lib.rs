@@ -35,4 +35,4 @@ pub use filesystem::{
 };
 
 mod parallel;
-pub(crate) use parallel::{parallel_chunks, parallel_map};
+pub(crate) use parallel::{parallel_chunks, parallel_map, parallel_map_balanced};

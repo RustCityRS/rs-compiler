@@ -13,12 +13,11 @@ impl Project {
         }
         let index = self.symbol_index();
         let hooks = index.hooks.get(&source).map_or(&[][..], Vec::as_slice);
-        let tokens = index::tokens(document, &index.compounds, hooks);
+        let tokens = index::tokens(document, &|name| index.is_compound(name), hooks);
         let mut hints = Vec::new();
         for reference in index
-            .references
-            .iter()
-            .filter(|reference| reference.location.source == source && !reference.declaration)
+            .references_in(source)
+            .filter(|reference| !reference.declaration)
         {
             let span = &reference.location.range;
             if !range.contains(&span.start)
@@ -34,7 +33,7 @@ impl Project {
             {
                 continue;
             }
-            let symbol = &index.symbols[reference.symbol];
+            let symbol = index.symbol(reference.symbol);
             if symbol.kind == SymbolKind::Constant {
                 if let Some(ty) = symbol.value_type {
                     hints.push(InlayHint {

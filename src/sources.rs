@@ -1,4 +1,5 @@
 //! Source discovery and visibility for the three script namespaces.
+use crate::parallel::parallel_map;
 use crate::parser::Expr;
 use crate::symbol::{SymbolKind, SymbolRegistry};
 use crate::symloader::{Comments, collect_all_files};
@@ -145,6 +146,70 @@ pub struct Visibility {
     ids: HashMap<(Type, i32), String>,
 }
 
+/// The `(kind, name)` pairs a source or config file declares.
+fn declarations(file: &Path) -> Vec<(String, String)> {
+    let mut declared = Vec::new();
+    let Some(ext) = file.extension().and_then(|ext| ext.to_str()) else {
+        return declared;
+    };
+    let is_script = matches!(ext, "rs2" | "cs2" | "gs2");
+    if !is_script
+        && ext != "constant"
+        && !Type::from_name(ext).is_some_and(|ty| config_kind(ty).is_some())
+    {
+        return declared;
+    }
+    let Ok(input) = fs::File::open(file) else {
+        return declared;
+    };
+    let mut declare = |kind: &str, name: &str| declared.push((kind.to_owned(), name.to_owned()));
+    let mut input = io::BufReader::new(input);
+    let mut buffer = String::new();
+    let mut comments = Comments::default();
+    loop {
+        buffer.clear();
+        if !input.read_line(&mut buffer).is_ok_and(|count| count > 0) {
+            break;
+        }
+        let Some(line) = comments.line(&buffer) else {
+            continue;
+        };
+        if is_script {
+            if let Some(header) = line.strip_prefix('[').and_then(|line| line.split_once(']'))
+                && let Some((trigger, name)) = header.0.split_once(',')
+                && trigger.trim() != "command"
+            {
+                declare(trigger.trim(), name.trim());
+            }
+        } else if ext == "constant" {
+            if let Some((name, _)) = line.split_once('=') {
+                declare("constant", name.trim().trim_start_matches('^'));
+            }
+        } else if let Some(name) = line
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
+            if ext == "varc" {
+                declare("varc", name);
+                declare("varcs", name);
+            } else if ext == "varclansetting" {
+                for kind in [
+                    "varclansetting",
+                    "clansetting_int",
+                    "clansetting_varbit",
+                    "clansetting_long",
+                    "clansetting_string",
+                ] {
+                    declare(kind, name);
+                }
+            } else {
+                declare(ext, name);
+            }
+        }
+    }
+    declared
+}
+
 fn config_kind(ty: Type) -> Option<&'static str> {
     match ty {
         Type::NamedObj | Type::Obj => Some("obj"),
@@ -230,81 +295,37 @@ impl Visibility {
     }
 
     pub(crate) fn load(dir: &Path, registry: &SymbolRegistry) -> Self {
+        let mut result = Self::scan(dir);
+        result.index_registry(registry);
+        result
+    }
+
+    /// What the sources and configs around `dir` declare, before
+    /// [`index_registry`](Self::index_registry). The files are read in
+    /// parallel and declared in their order.
+    pub(crate) fn scan(dir: &Path) -> Self {
         let Some((root, _)) = namespace(dir) else {
             return Self::default();
         };
         let Some(parent) = root.parent() else {
             return Self::default();
         };
+        let mut files = Vec::new();
+        for scope in [Scope::Global, Scope::Rune, Scope::Client] {
+            let mut found = Vec::new();
+            collect_all_files(&parent.join(scope.folder()), &mut found);
+            files.extend(found.into_iter().map(|file| (file, scope)));
+        }
         let mut result = Self {
             active: true,
             ..Self::default()
         };
-        for scope in [Scope::Global, Scope::Rune, Scope::Client] {
-            let mut files = Vec::new();
-            collect_all_files(&parent.join(scope.folder()), &mut files);
-            for file in files {
-                let Some(ext) = file.extension().and_then(|ext| ext.to_str()) else {
-                    continue;
-                };
-                let is_script = matches!(ext, "rs2" | "cs2" | "gs2");
-                if !is_script
-                    && ext != "constant"
-                    && !Type::from_name(ext).is_some_and(|ty| config_kind(ty).is_some())
-                {
-                    continue;
-                }
-                let Ok(input) = fs::File::open(&file) else {
-                    continue;
-                };
-                let mut input = io::BufReader::new(input);
-                let mut buffer = String::new();
-                let mut comments = Comments::default();
-                loop {
-                    buffer.clear();
-                    if !input.read_line(&mut buffer).is_ok_and(|count| count > 0) {
-                        break;
-                    }
-                    let Some(line) = comments.line(&buffer) else {
-                        continue;
-                    };
-                    if is_script {
-                        if let Some(header) =
-                            line.strip_prefix('[').and_then(|line| line.split_once(']'))
-                            && let Some((trigger, name)) = header.0.split_once(',')
-                            && trigger.trim() != "command"
-                        {
-                            result.declare(trigger.trim(), name.trim(), scope);
-                        }
-                    } else if ext == "constant" {
-                        if let Some((name, _)) = line.split_once('=') {
-                            result.declare("constant", name.trim().trim_start_matches('^'), scope);
-                        }
-                    } else if let Some(name) = line
-                        .strip_prefix('[')
-                        .and_then(|line| line.strip_suffix(']'))
-                    {
-                        if ext == "varc" {
-                            result.declare("varc", name, scope);
-                            result.declare("varcs", name, scope);
-                        } else if ext == "varclansetting" {
-                            for kind in [
-                                "varclansetting",
-                                "clansetting_int",
-                                "clansetting_varbit",
-                                "clansetting_long",
-                                "clansetting_string",
-                            ] {
-                                result.declare(kind, name, scope);
-                            }
-                        } else {
-                            result.declare(ext, name, scope);
-                        }
-                    }
-                }
+        for (scope, declared) in parallel_map(&files, |(file, scope)| (*scope, declarations(file)))
+        {
+            for (kind, name) in declared {
+                result.declare(&kind, &name, scope);
             }
         }
-        result.index_registry(registry);
         result
     }
 

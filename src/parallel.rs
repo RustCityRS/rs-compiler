@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 /// Map `f` over `items` across worker threads, returning results in the SAME
 /// order as the input. Dependency-free (uses `std::thread::scope`); each item
 /// is processed independently, so callers must keep the work pure (no shared
@@ -32,6 +34,49 @@ where
         }
     });
     out
+}
+
+/// Like `parallel_map`, but workers take one item at a time, so a run of large
+/// items does not leave the other workers idle. Results keep the input order.
+pub(crate) fn parallel_map_balanced<T, R, F>(items: &[T], f: F) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(&T) -> R + Sync,
+{
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(items.len());
+    if threads <= 1 {
+        return items.iter().map(&f).collect();
+    }
+    let next = AtomicUsize::new(0);
+    let parts = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut out = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = items.get(i) else {
+                            break out;
+                        };
+                        out.push((i, f(item)));
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("worker thread panicked"))
+            .collect::<Vec<_>>()
+    });
+    let mut slots = (0..items.len()).map(|_| None).collect::<Vec<_>>();
+    for (i, value) in parts.into_iter().flatten() {
+        slots[i] = Some(value);
+    }
+    slots.into_iter().map(Option::unwrap).collect()
 }
 
 /// Like `parallel_map`, but hands each worker a whole contiguous CHUNK of items

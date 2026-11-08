@@ -2,30 +2,33 @@
 use crate::bytecode::CompiledScript;
 use crate::clientscript::{self, Source, format::Format};
 use crate::compiler::{Compiler, compile_file};
-use crate::diagnostics::{DiagnosticsCollector, Phase, Severity};
-use crate::ide::Index;
+use crate::diagnostics::{Diagnostic, DiagnosticsCollector, Phase, Severity};
+use crate::ide::{Configs, Index};
 use crate::lexer::Lexer;
 use crate::parser::{Parser, ScriptFile};
-use crate::pointer_checker::PointerChecker;
+use crate::pointer_checker::{PointerChecker, ScriptSource};
 use crate::sources::Scope;
 use crate::symbol::SymbolRegistry;
 use crate::text::LineIndex;
 use crate::token::Kind;
 use crate::typechecker::TypeChecker;
 use crate::writer::encode_script;
-use crate::{SourceProvider, lints};
+use crate::{SourceProvider, lints, parallel_chunks, parallel_map_balanced};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, OnceLock,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SourceId(pub u64);
+
+/// A source for `open_all`: label, scope, version and text.
+pub type SourceText = (String, Scope, i64, String);
 
 pub enum Target {
     Rune,
@@ -131,8 +134,11 @@ pub struct Project {
     analyzed_generation: Option<u64>,
     cached_diagnostics: DiagnosticsCollector,
     checked_full: Option<(u64, DiagnosticsCollector)>,
+    deep: Option<(HashMap<PathBuf, i64>, Vec<Diagnostic>)>,
     pub(crate) index: OnceLock<Index>,
-    registry_generation: u64,
+    pub(crate) configs: Mutex<Option<Arc<Configs>>>,
+    pub(crate) config_generation: u64,
+    pub(crate) registry_generation: u64,
     checked: HashMap<SourceId, (i64, u64, DiagnosticsCollector)>,
 }
 
@@ -150,7 +156,10 @@ impl Project {
             analyzed_generation: None,
             cached_diagnostics: DiagnosticsCollector::new(),
             checked_full: None,
+            deep: None,
             index: OnceLock::new(),
+            configs: Mutex::default(),
+            config_generation: 0,
             registry_generation: 0,
             checked: HashMap::new(),
         }
@@ -238,6 +247,7 @@ impl Project {
         );
         self.index.take();
         self.generation += 1;
+        self.config_generation += 1;
     }
 
     /// Reject stale editor updates. Unchanged text reuses its existing syntax.
@@ -273,7 +283,35 @@ impl Project {
         self.checked.remove(&id);
         self.index.take();
         self.generation += 1;
+        self.config_generation += u64::from(document.config.is_some());
         true
+    }
+
+    /// Open many sources at once, lexing and parsing them in parallel. IDs are
+    /// assigned in input order, as `open` would.
+    pub fn open_all(&mut self, sources: Vec<SourceText>) -> Vec<SourceId> {
+        let first = self.next_source;
+        self.next_source += sources.len() as u64;
+        let include_tests = self.options.include_tests;
+        let sources = sources.into_iter().enumerate().collect::<Vec<_>>();
+        let documents = parallel_map_balanced(&sources, |(i, (label, scope, version, text))| {
+            parse_document(
+                SourceId(first + *i as u64),
+                label.into(),
+                *scope,
+                *version,
+                text.as_str().into(),
+                include_tests,
+            )
+        });
+        documents
+            .into_iter()
+            .map(|document| {
+                let id = document.id;
+                self.insert_document(document);
+                id
+            })
+            .collect()
     }
 
     fn set_document(
@@ -284,64 +322,20 @@ impl Project {
         version: i64,
         text: Arc<str>,
     ) {
-        Arc::make_mut(&mut self.registry.visibility).bind(label.clone(), scope);
-        let test_line = crate::find_testscript_line(&text);
-        let end = if !self.options.include_tests {
-            test_line
-                .and_then(|line| LineIndex::new(&text).line(line - 1))
-                .map_or(text.len(), |range| range.start)
-        } else {
-            text.len()
-        };
-        let (tokens, spans, lex_errors) = Lexer::new(&text[..end], &label).tokenize_spanned();
-        let mut diagnostics = DiagnosticsCollector::new();
-        for error in lex_errors {
-            diagnostics.error(
-                label.clone(),
-                error.line,
-                error.position,
-                error.message,
-                Phase::Lexing,
-            );
-        }
-        let token_info = tokens
-            .iter()
-            .map(|token| TokenInfo {
-                kind: token.kind,
-                line: token.line,
-            })
-            .collect();
-        let (file, errors) = Parser::new(tokens, &label).parse_recovering();
-        for error in errors {
-            diagnostics.error(
-                label.clone(),
-                error.line,
-                error.position,
-                error.message,
-                Phase::Parsing,
-            );
-        }
-        let parsed = Some(Source {
-            path: label.clone(),
-            file,
-        });
-        self.documents.insert(
+        let include_tests = self.options.include_tests;
+        self.insert_document(parse_document(
             id,
-            Document {
-                id,
-                label,
-                scope,
-                version,
-                lines: LineIndex::new(&text),
-                config: None,
-                text,
-                parsed,
-                tokens: token_info,
-                spans,
-                diagnostics,
-                test_line: test_line.filter(|_| self.options.include_tests),
-            },
-        );
+            label,
+            scope,
+            version,
+            text,
+            include_tests,
+        ));
+    }
+
+    fn insert_document(&mut self, document: Document) {
+        Arc::make_mut(&mut self.registry.visibility).bind(document.label.clone(), document.scope);
+        self.documents.insert(document.id, document);
         self.index.take();
         self.generation += 1;
     }
@@ -554,21 +548,23 @@ impl Project {
             }
         }
         let interface = interface.finish();
-        let mut checked_documents = 0;
-        for document in self
+        let stale = self
             .documents
             .values()
-            .filter(|doc| self.target.includes(doc.scope))
-        {
-            if self.options.cancellation.is_cancelled() {
-                return self.analysis(diagnostics, true);
-            }
-            if let Some((version, signature, cached)) = self.checked.get(&document.id)
-                && *version == document.version
-                && *signature == interface
-            {
-                diagnostics.merge(cached.clone());
-                continue;
+            .filter(|doc| {
+                self.target.includes(doc.scope)
+                    && !self
+                        .checked
+                        .get(&doc.id)
+                        .is_some_and(|(version, signature, _)| {
+                            *version == doc.version && *signature == interface
+                        })
+            })
+            .collect::<Vec<_>>();
+        let cancellation = &self.options.cancellation;
+        let fresh = parallel_map_balanced(&stale, |document| {
+            if cancellation.is_cancelled() {
+                return None;
             }
             let mut checker = TypeChecker::new(&self.registry);
             if let Some(source) = &document.parsed {
@@ -578,12 +574,27 @@ impl Project {
                     document.test_line,
                 );
             }
-            checked_documents += 1;
-            self.checked.insert(
-                document.id,
-                (document.version, interface, checker.diagnostics.clone()),
-            );
-            diagnostics.merge(checker.diagnostics);
+            Some(checker.diagnostics)
+        });
+        let checked_documents = stale.len();
+        let fresh = stale
+            .iter()
+            .map(|document| (document.id, document.version))
+            .zip(fresh)
+            .collect::<Vec<_>>();
+        if self.options.cancellation.is_cancelled() {
+            return self.analysis(diagnostics, true);
+        }
+        for ((id, version), found) in fresh {
+            self.checked
+                .insert(id, (version, interface, found.unwrap_or_default()));
+        }
+        for document in self
+            .documents
+            .values()
+            .filter(|doc| self.target.includes(doc.scope))
+        {
+            diagnostics.merge(self.checked[&document.id].2.clone());
         }
         self.cached_diagnostics = diagnostics.clone();
         self.analyzed_generation = Some(self.generation);
@@ -720,6 +731,32 @@ impl Project {
         }
     }
 
+    /// The fullest diagnostics on hand without more work: `analyze`, with what
+    /// the last `check` added for each document that has not changed since.
+    pub fn latest(&mut self) -> Analysis {
+        let mut analysis = self.analyze();
+        if analysis.cancelled {
+            return analysis;
+        }
+        if let Some((generation, diagnostics)) = &self.checked_full
+            && *generation == self.generation
+        {
+            analysis.diagnostics = diagnostics.clone();
+        } else if let Some((versions, added)) = &self.deep {
+            let current = self
+                .documents
+                .values()
+                .map(|document| (document.label.as_path(), document.version))
+                .collect::<HashMap<_, _>>();
+            for diagnostic in added {
+                if versions.get(&diagnostic.file) == current.get(diagnostic.file.as_path()) {
+                    analysis.diagnostics.add(diagnostic.clone());
+                }
+            }
+        }
+        analysis
+    }
+
     pub fn check(&mut self) -> Analysis {
         let mut analysis = self.analyze();
         if analysis.cancelled {
@@ -731,31 +768,48 @@ impl Project {
             analysis.diagnostics = diagnostics.clone();
             return analysis;
         }
-        let mut compiled = Vec::new();
-        for document in self
+        let analyzed = analysis.diagnostics.diagnostics().len();
+        let failed = analysis
+            .diagnostics
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .map(|diagnostic| diagnostic.file.as_path())
+            .collect::<HashSet<_>>();
+        let documents = self
             .documents
             .values()
-            .filter(|doc| self.target.includes(doc.scope))
-        {
-            if self.options.cancellation.is_cancelled() {
-                analysis.cancelled = true;
-                return analysis;
+            .filter(|doc| {
+                self.target.includes(doc.scope)
+                    && doc.parsed.is_some()
+                    && !failed.contains(doc.label.as_path())
+            })
+            .collect::<Vec<_>>();
+        let client = matches!(self.target, Target::Client(_));
+        let cancellation = &self.options.cancellation;
+        let files = parallel_map_balanced(&documents, |document| {
+            let mut diagnostics = DiagnosticsCollector::new();
+            if cancellation.is_cancelled() {
+                return (Vec::new(), diagnostics);
             }
-            if analysis.diagnostics.diagnostics().iter().any(|diagnostic| {
-                diagnostic.file == document.label && diagnostic.severity == Severity::Error
-            }) {
-                continue;
-            }
-            let Some(source) = &document.parsed else {
-                continue;
-            };
-            compiled.extend(compile_file(
+            let source = document.parsed.as_ref().unwrap();
+            let compiled = compile_file(
                 &source.file,
                 &document.label,
                 &self.registry,
-                matches!(self.target, Target::Client(_)),
-                &mut analysis.diagnostics,
-            ));
+                client,
+                &mut diagnostics,
+            );
+            (compiled, diagnostics)
+        });
+        if cancellation.is_cancelled() {
+            analysis.cancelled = true;
+            return analysis;
+        }
+        let mut compiled = Vec::new();
+        for (scripts, diagnostics) in files {
+            compiled.extend(scripts);
+            analysis.diagnostics.merge(diagnostics);
         }
         let sources = self
             .documents
@@ -785,21 +839,32 @@ impl Project {
         } else {
             analysis.diagnostics.merge(lint_diagnostics);
         }
-        {
-            let mut checker = match self.target {
-                Target::Client(_) => PointerChecker::new_client(&compiled, &self.registry),
-                Target::Rune => PointerChecker::new(&compiled, &self.registry),
-            };
+        let shared = PointerChecker::build_shared(&compiled, &self.registry, client);
+        let names = compiled
+            .iter()
+            .map(|script| script.name.clone())
+            .collect::<Vec<_>>();
+        for diagnostics in parallel_chunks(&names, |chunk| {
+            let mut checker = PointerChecker::with_shared(
+                ScriptSource::Resident(&compiled),
+                &self.registry,
+                shared.clone(),
+            );
             checker.set_source_cache(source);
-            let names = compiled
-                .iter()
-                .map(|script| script.name.clone())
-                .collect::<Vec<_>>();
-            analysis.diagnostics.merge(checker.validate_names(&names));
+            checker.validate_names_until(chunk, &|| cancellation.is_cancelled())
+        }) {
+            analysis.diagnostics.merge(diagnostics);
         }
         analysis.cancelled = self.options.cancellation.is_cancelled();
         if !analysis.cancelled {
             self.checked_full = Some((self.generation, analysis.diagnostics.clone()));
+            self.deep = Some((
+                self.documents
+                    .values()
+                    .map(|document| (document.label.clone(), document.version))
+                    .collect(),
+                analysis.diagnostics.diagnostics()[analyzed..].to_vec(),
+            ));
         }
         analysis
     }
@@ -809,5 +874,69 @@ impl Project {
             .values()
             .find(|doc| doc.label == label)
             .map(|doc| doc.text.as_ref())
+    }
+}
+
+fn parse_document(
+    id: SourceId,
+    label: PathBuf,
+    scope: Scope,
+    version: i64,
+    text: Arc<str>,
+    include_tests: bool,
+) -> Document {
+    let test_line = crate::find_testscript_line(&text);
+    let end = if !include_tests {
+        test_line
+            .and_then(|line| LineIndex::new(&text).line(line - 1))
+            .map_or(text.len(), |range| range.start)
+    } else {
+        text.len()
+    };
+    let (tokens, spans, lex_errors) = Lexer::new(&text[..end], &label).tokenize_spanned();
+    let mut diagnostics = DiagnosticsCollector::new();
+    for error in lex_errors {
+        diagnostics.error(
+            label.clone(),
+            error.line,
+            error.position,
+            error.message,
+            Phase::Lexing,
+        );
+    }
+    let token_info = tokens
+        .iter()
+        .map(|token| TokenInfo {
+            kind: token.kind,
+            line: token.line,
+        })
+        .collect();
+    let (file, errors) = Parser::new(tokens, &label).parse_recovering();
+    for error in errors {
+        diagnostics.error(
+            label.clone(),
+            error.line,
+            error.position,
+            error.message,
+            Phase::Parsing,
+        );
+    }
+    let parsed = Some(Source {
+        path: label.clone(),
+        file,
+    });
+    Document {
+        id,
+        label,
+        scope,
+        version,
+        lines: LineIndex::new(&text),
+        config: None,
+        text,
+        parsed,
+        tokens: token_info,
+        spans,
+        diagnostics,
+        test_line: test_line.filter(|_| include_tests),
     }
 }

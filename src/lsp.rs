@@ -1,7 +1,7 @@
 //! A stdio Language Server Protocol adapter. The compiler and editor queries
 //! remain usable independently of JSON, filesystem layout, or an editor.
 use crate::clientscript::format::Format;
-use crate::diagnostics::Severity;
+use crate::diagnostics::{Diagnostic, Severity};
 use crate::filesystem::config_kind;
 use crate::ide::{Location, SymbolKind, TextEdit, TokenKind};
 use crate::project::{Analysis, CancellationToken, Options, Project, SourceId, Target};
@@ -11,10 +11,11 @@ use crate::text::{LineIndex, Position};
 use crate::types::Type;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io::{self, BufRead, Write};
 use std::iter::from_fn;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -22,6 +23,9 @@ use std::time::Duration;
 
 type Snapshot = (Scope, Arc<str>, Option<String>);
 type ProjectLoader = Box<dyn Fn() -> Result<Project, String>>;
+
+/// How long the editor must be idle before lints and pointer checks run.
+const DEEP_CHECK_DELAY: Duration = Duration::from_millis(300);
 
 fn open_source(
     project: &mut Project,
@@ -85,6 +89,54 @@ fn file_uri_bytes(uri: &str) -> impl Iterator<Item = u8> + '_ {
             byte
         })
     })
+}
+
+fn uri_key(uri: &str) -> Vec<u8> {
+    match uri.strip_prefix("file:") {
+        Some(path) => b"file:"
+            .iter()
+            .copied()
+            .chain(file_uri_bytes(path))
+            .collect(),
+        None => uri.as_bytes().to_vec(),
+    }
+}
+
+/// The file a `file:` URI names.
+fn uri_path(uri: &str) -> Option<PathBuf> {
+    let path = uri.strip_prefix("file://")?;
+    let path = path.strip_prefix("localhost").unwrap_or(path);
+    let mut bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    while let Some(&byte) = bytes.first() {
+        if let [b'%', high, low, ..] = bytes
+            && let (Some(high), Some(low)) =
+                ((*high as char).to_digit(16), (*low as char).to_digit(16))
+        {
+            decoded.push(((high << 4) | low) as u8);
+            bytes = &bytes[3..];
+        } else {
+            decoded.push(byte);
+            bytes = &bytes[1..];
+        }
+    }
+    let path = String::from_utf8(decoded).ok()?;
+    let path = if cfg!(windows) {
+        path.strip_prefix('/').unwrap_or(&path).to_string()
+    } else {
+        path
+    };
+    Some(PathBuf::from(path))
+}
+
+/// Scripts other than the engine's declarations change nothing the loader builds.
+fn script_only(label: &Path) -> bool {
+    label
+        .extension()
+        .is_some_and(|ext| matches!(ext.to_str(), Some("rs2" | "cs2" | "gs2")))
+        && label
+            .file_stem()
+            .is_none_or(|stem| stem.to_string_lossy() != "engine")
 }
 
 fn has_environment(value: &Value) -> bool {
@@ -318,8 +370,9 @@ fn read_message(input: &mut impl BufRead) -> io::Result<Option<Value>> {
 }
 
 fn write_message(output: &mut impl Write, message: Value) -> io::Result<()> {
-    let bytes = serde_json::to_vec(&message)?;
-    write!(output, "Content-Length: {}\r\n\r\n", bytes.len())?;
+    let body = serde_json::to_vec(&message)?;
+    let mut bytes = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+    bytes.extend_from_slice(&body);
     output.write_all(&bytes)?;
     output.flush()
 }
@@ -373,19 +426,23 @@ pub fn serve_with_loader(
     });
     let mut server = Server::new(project, loader);
     let mut output = io::stdout().lock();
+    let mut next = None;
     loop {
-        let message = match receive.recv_timeout(Duration::from_millis(500)) {
-            Ok(message) => message,
-            Err(RecvTimeoutError::Timeout) => {
-                if server.dirty && server.initialized && !server.shutdown {
-                    let token = CancellationToken::default();
-                    *background.lock().unwrap() = token.clone();
-                    server.project.set_cancellation(token);
-                    server.publish_deep(&mut output)?;
+        let message = match next.take() {
+            Some(message) => message,
+            None => match receive.recv_timeout(DEEP_CHECK_DELAY) {
+                Ok(message) => message,
+                Err(RecvTimeoutError::Timeout) => {
+                    if server.dirty && server.initialized && !server.shutdown {
+                        let token = CancellationToken::default();
+                        *background.lock().unwrap() = token.clone();
+                        server.project.set_cancellation(token);
+                        server.publish_deep(&mut output)?;
+                    }
+                    continue;
                 }
-                continue;
-            }
-            Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
         };
         let (message, token, key) = message?;
         let keep_running = server.process(message, token, &mut output)?;
@@ -394,6 +451,11 @@ pub fn serve_with_loader(
         }
         if !keep_running {
             break;
+        }
+        // Edits arrive in bursts: diagnostics wait until the last is applied.
+        match receive.try_recv() {
+            Ok(message) => next = Some(message),
+            Err(_) => server.settle(&mut output)?,
         }
     }
     Ok(())
@@ -419,6 +481,7 @@ pub fn serve_io_with_loader(
         if !server.process(message, CancellationToken::default(), &mut output)? {
             break;
         }
+        server.settle(&mut output)?;
     }
     Ok(())
 }
@@ -430,6 +493,7 @@ struct Server {
     baseline: HashMap<String, Snapshot>,
     loader: Option<ProjectLoader>,
     pending_load: bool,
+    changed: bool,
     dirty: bool,
     watch_supported: bool,
     apply_supported: bool,
@@ -437,6 +501,7 @@ struct Server {
     request_id: u64,
     open_documents: HashSet<SourceId>,
     published: HashMap<String, (i64, Vec<Value>)>,
+    uris: HashMap<Vec<u8>, SourceId>,
 }
 
 impl Server {
@@ -454,11 +519,12 @@ impl Server {
                 )
             })
             .collect();
-        Self {
+        let mut server = Self {
             project,
             baseline,
             loader,
             pending_load,
+            changed: false,
             dirty: false,
             watch_supported: false,
             apply_supported: false,
@@ -468,7 +534,34 @@ impl Server {
             initialized: false,
             shutdown: false,
             published: HashMap::new(),
+            uris: HashMap::new(),
+        };
+        server.index_uris();
+        server
+    }
+
+    fn index_uris(&mut self) {
+        self.uris.clear();
+        for document in self.project.documents() {
+            self.uris
+                .entry(uri_key(&document.label.to_string_lossy()))
+                .or_insert(document.id);
         }
+    }
+
+    fn find(&self, uri: &str) -> Option<SourceId> {
+        self.uris.get(&uri_key(uri)).copied()
+    }
+
+    /// Publish once a burst of changes has been applied.
+    fn settle(&mut self, output: &mut impl Write) -> io::Result<()> {
+        if !self.changed {
+            return Ok(());
+        }
+        self.changed = false;
+        self.publish(output)?;
+        self.dirty = !self.pull_diagnostics;
+        Ok(())
     }
 
     fn process(
@@ -565,8 +658,7 @@ impl Server {
                     | "workspace/didDeleteFiles"
             )
         {
-            self.publish(output)?;
-            self.dirty = !self.pull_diagnostics;
+            self.changed = true;
             if !self.pull_diagnostics
                 && method == "textDocument/didClose"
                 && self.source(params).is_err()
@@ -581,10 +673,7 @@ impl Server {
     }
     fn source(&self, params: &Value) -> Result<SourceId, String> {
         let uri = field(&params["textDocument"], "uri")?;
-        self.project
-            .documents()
-            .find(|doc| same_uri(&doc.label.to_string_lossy(), uri))
-            .map(|doc| doc.id)
+        self.find(uri)
             .ok_or_else(|| format!("Document '{uri}' is not open"))
     }
 
@@ -631,6 +720,7 @@ impl Server {
                         )
                     })
                     .collect();
+                self.index_uris();
             }
             self.initialized = true;
             self.watch_supported =
@@ -730,6 +820,7 @@ impl Server {
                     config,
                 );
                 self.open_documents.insert(source);
+                self.index_uris();
                 return Ok(Value::Null);
             }
             "textDocument/didClose" => {
@@ -752,6 +843,7 @@ impl Server {
                         config.clone(),
                     );
                 }
+                self.index_uris();
                 return Ok(Value::Null);
             }
             "textDocument/didSave" => {
@@ -762,7 +854,8 @@ impl Server {
                     doc.label.to_string_lossy().into_owned(),
                     (doc.scope, doc.text.clone(), doc.config.clone()),
                 );
-                if self.loader.is_some() {
+                // The open buffer already holds what a script's save wrote.
+                if self.loader.is_some() && (doc.config.is_some() || !script_only(&doc.label)) {
                     self.reload()?;
                 }
                 return Ok(Value::Null);
@@ -856,10 +949,16 @@ impl Server {
                 }
                 self.open_documents = open_documents;
                 self.project = updated;
+                self.index_uris();
                 return Ok(Value::Null);
             }
-            "workspace/didChangeWatchedFiles"
-            | "workspace/didCreateFiles"
+            "workspace/didChangeWatchedFiles" => {
+                if self.watched(params) {
+                    self.reload()?;
+                }
+                return Ok(Value::Null);
+            }
+            "workspace/didCreateFiles"
             | "workspace/didRenameFiles"
             | "workspace/didDeleteFiles" => {
                 self.reload()?;
@@ -1024,7 +1123,8 @@ impl Server {
                 let selection = params.get("range").and_then(|range| {
                     Some(document.lines.offset(&document.text, position(&range["start"]).ok()?)?..document.lines.offset(&document.text, position(&range["end"]).ok()?)?)
                 });
-                let analysis = self.project.check();
+                // Lint fixes follow once the idle check has run.
+                let analysis = self.project.latest();
                 let diagnostics = analysis.diagnostics.diagnostics().iter().filter(|diagnostic| {
                     diagnostic.file == label && (start..=end).contains(&diagnostic.line.saturating_sub(1))
                 }).cloned().collect::<Vec<_>>();
@@ -1081,8 +1181,43 @@ impl Server {
                 }),
             );
         }
-        let analysis = self.project.analyze();
+        let analysis = self.project.latest();
         self.publish_analysis(analysis, output)
+    }
+
+    /// Re-read scripts changed on disk, returning whether anything else needs a
+    /// full reload. The editor owns open buffers; other projects' files are not ours.
+    fn watched(&mut self, params: &Value) -> bool {
+        let mut reload = false;
+        for change in params["changes"].as_array().into_iter().flatten() {
+            let Some(uri) = change["uri"].as_str() else {
+                continue;
+            };
+            let source = self.find(uri);
+            match (change["type"].as_u64(), source) {
+                (Some(2), Some(source)) if self.open_documents.contains(&source) => {}
+                (Some(2), Some(source)) => {
+                    let document = self.project.document(source).unwrap();
+                    let text = uri_path(uri).and_then(|path| fs::read_to_string(path).ok());
+                    match text {
+                        Some(text) if document.config.is_none() && script_only(&document.label) => {
+                            if *document.text != *text {
+                                let version = document.version + 1;
+                                let label = document.label.to_string_lossy().into_owned();
+                                let snapshot = (document.scope, Arc::from(text.as_str()), None);
+                                let _ = self.project.update(source, version, text);
+                                self.baseline.retain(|uri, _| !same_uri(uri, &label));
+                                self.baseline.insert(label, snapshot);
+                            }
+                        }
+                        _ => reload = true,
+                    }
+                }
+                (Some(2) | Some(3), None) => {}
+                _ => reload = true,
+            }
+        }
+        reload
     }
 
     fn publish_deep(&mut self, output: &mut impl Write) -> io::Result<()> {
@@ -1130,6 +1265,7 @@ impl Server {
         self.project = project;
         self.baseline = baseline;
         self.open_documents = open_documents;
+        self.index_uris();
         Ok(())
     }
 
@@ -1162,9 +1298,25 @@ impl Server {
                 json!({"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":uri,"diagnostics":[]}}),
             )?;
         }
+        let mut by_file = HashMap::<&Path, Vec<&Diagnostic>>::new();
+        for diagnostic in analysis.diagnostics.diagnostics() {
+            by_file
+                .entry(diagnostic.file.as_path())
+                .or_default()
+                .push(diagnostic);
+        }
         for document in self.project.documents() {
-            let diagnostics = analysis.diagnostics.diagnostics().iter()
-                .filter(|diagnostic| diagnostic.file == document.label)
+            let found = by_file
+                .get(document.label.as_path())
+                .map_or(&[][..], Vec::as_slice);
+            let uri = document.label.to_string_lossy().into_owned();
+            if found.is_empty()
+                && !self.published.contains_key(&uri)
+                && !self.open_documents.contains(&document.id)
+            {
+                continue;
+            }
+            let diagnostics = found.iter()
                 .map(|diagnostic| {
                     let mut message = diagnostic.message.clone();
                     for help in &diagnostic.help {
@@ -1173,7 +1325,6 @@ impl Server {
                     }
                     json!({"range":self.range(document.id,document.lines.diagnostic_range(&document.text,diagnostic.line,diagnostic.column)),"severity":match diagnostic.severity {Severity::Error=>1,Severity::Warning=>2,Severity::Info=>3},"code":diagnostic.code(),"source":"runec","message":message})
                 }).collect::<Vec<_>>();
-            let uri = document.label.to_string_lossy().into_owned();
             if self.published.get(&uri).is_some_and(|(version, previous)| {
                 *version == document.version && *previous == diagnostics
             }) {

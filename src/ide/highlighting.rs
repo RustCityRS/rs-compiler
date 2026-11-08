@@ -242,7 +242,7 @@ fn code(
         let reference = index
             .at(document.id, symbol_offset)
             .filter(|reference| reference.location.range.start == symbol_offset);
-        let symbol = reference.map(|reference| &index.symbols[reference.symbol]);
+        let symbol = reference.map(|reference| index.symbol(reference.symbol));
         if let Some(reference) = reference
             && reference.location.range.end > span.end
             && reference.location.range.end <= range.end

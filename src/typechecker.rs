@@ -1,5 +1,6 @@
 use crate::arguments::{command_hints, command_returns, proc_hints, stack_hints};
 use crate::clientscript::hooks;
+use crate::compiler::Compiler;
 use crate::diagnostic_messages as msg;
 use crate::diagnostics::{DiagnosticsCollector, Phase};
 use crate::parser::*;
@@ -911,7 +912,13 @@ impl<'a> TypeChecker<'a> {
                     return Some(Type::Int);
                 }
 
-                // Fallback: constants → entity IDs → commands → type chars
+                // Fallback: constants → entity IDs → commands → type chars.
+                // Entity ids are ints, so a string or long slot takes a
+                // same-named command (`name`, not a component called name).
+                let entity = self
+                    .registry
+                    .lookup_entity_id(name)
+                    .filter(|_| !self.registry.command_fills(name, hint));
                 if let Some(sym) = self.registry.lookup_constant(name) {
                     match &sym.kind {
                         SymbolKind::Constant { const_type, .. } => Some(*const_type),
@@ -924,7 +931,7 @@ impl<'a> TypeChecker<'a> {
                             Some(Type::Error)
                         }
                     }
-                } else if let Some(e) = self.registry.lookup_entity_id(name) {
+                } else if let Some(e) = entity {
                     Some(e.const_type)
                 } else if let Some(sym) = self.registry.lookup_command(name).cloned() {
                     if let SymbolKind::Command { return_types, .. } = &sym.kind {
@@ -1234,6 +1241,16 @@ impl<'a> TypeChecker<'a> {
                             if actual != expected {
                                 self.error(*call_line, format!("{name} expects {expected:?} int/string/long arguments, got {actual:?}"));
                             }
+                        } else if let Some(fixed) = Compiler::command_variadic_info(lookup_name) {
+                            self.check_variadic_arguments(
+                                name,
+                                lookup_name,
+                                fixed,
+                                cmd_params,
+                                &arg_types,
+                                args,
+                                *call_line,
+                            );
                         } else if !is_variadic {
                             self.check_call_arguments(
                                 name,
@@ -1488,6 +1505,105 @@ impl<'a> TypeChecker<'a> {
             .collect()
     }
 
+    /// The values `args` supply, when every call among them returns a known number.
+    fn call_values(&self, args: &[Expr], types: &[Option<Type>]) -> Option<Vec<Option<Type>>> {
+        let mut values = Vec::with_capacity(args.len());
+        for (arg, ty) in args.iter().zip(types) {
+            match arg {
+                Expr::ProcCall { name, .. } => {
+                    let symbol = self
+                        .registry
+                        .lookup_script_by_trigger("proc", name)
+                        .or_else(|| self.registry.lookup_script_by_trigger("clientscript", name))?;
+                    let SymbolKind::Script { return_types, .. } = &symbol.kind else {
+                        return None;
+                    };
+                    values.extend(return_types.iter().copied().map(Some));
+                }
+                Expr::CommandCall { name, args, .. } => {
+                    let name = name.trim_start_matches('.');
+                    let returns = if name == "db_getfield" {
+                        self.column_types(args.get(1))?
+                    } else {
+                        command_returns(self.registry, name, args)
+                    };
+                    if returns.is_empty() {
+                        return None;
+                    }
+                    values.extend(returns.into_iter().map(Some));
+                }
+                _ => values.extend(self.expand_call_types(from_ref(arg), from_ref(ty))),
+            }
+        }
+        Some(values)
+    }
+
+    /// The field types a db column argument reads: all of them, or one slot.
+    fn column_types(&self, column: Option<&Expr>) -> Option<Vec<Type>> {
+        let Some(Expr::Identifier(column)) = column else {
+            return None;
+        };
+        if let Some(types) = self.registry.dbcolumn_types.get(column) {
+            return Some(types.clone());
+        }
+        let (column, slot) = column.rsplit_once(':')?;
+        let types = self.registry.dbcolumn_types.get(column)?;
+        Some(vec![*types.get(slot.parse::<usize>().ok()?)?])
+    }
+
+    /// Commands that pass their trailing arguments to a script take what that
+    /// script declares, after their own fixed arguments.
+    #[allow(clippy::too_many_arguments)]
+    fn check_variadic_arguments(
+        &mut self,
+        name: &str,
+        command: &str,
+        fixed: usize,
+        params: &[Type],
+        actual_types: &[Option<Type>],
+        args: &[Expr],
+        line: usize,
+    ) {
+        let script = Compiler::command_script_trigger(command)
+            .zip(args.first())
+            .and_then(|(trigger, arg)| match arg {
+                Expr::Identifier(script) => self.registry.lookup_script_by_trigger(trigger, script),
+                _ => None,
+            })
+            .and_then(|symbol| match &symbol.kind {
+                SymbolKind::Script { param_types, .. } => Some(param_types.clone()),
+                _ => None,
+            });
+        match script {
+            Some(script) if params.len() >= fixed => {
+                let expected = params[..fixed]
+                    .iter()
+                    .copied()
+                    .chain(script)
+                    .collect::<Vec<_>>();
+                self.check_call_arguments(
+                    name,
+                    &expected,
+                    actual_types,
+                    args,
+                    line,
+                    CallKind::Command,
+                );
+            }
+            _ if args.len() < fixed => self.error(
+                line,
+                msg::fmt(
+                    msg::GENERIC_TYPE_MISMATCH,
+                    &[
+                        &format!("{} arg(s)", args.len()),
+                        &format!("{fixed} arg(s)"),
+                    ],
+                ),
+            ),
+            _ => {}
+        }
+    }
+
     fn check_call_arguments(
         &mut self,
         name: &str,
@@ -1555,24 +1671,25 @@ impl<'a> TypeChecker<'a> {
             return;
         }
 
-        // Proc/command call args can produce multiple return values,
-        // making the actual arg count less than the number of values produced.
-        // Skip count validation when any arg is a multi-return call.
-        let has_call_arg = args
-            .iter()
-            .any(|a| matches!(a, Expr::ProcCall { .. } | Expr::CommandCall { .. }));
-
+        // A call passed as an argument supplies each of its return values. When
+        // one returns an unknown number, only a matching argument count is checked.
+        let (actual_types, counted) = match self.call_values(args, actual_types) {
+            Some(values) => (values, true),
+            None => (actual_types.to_vec(), false),
+        };
         if expected_types.len() != actual_types.len() {
-            if has_call_arg {
-                return;
-            }
-            // Strict command arg-count was tightened for the #testscript
-            // assertion framework. Production keeps main's behaviour: a command
-            // signature may be variadic or only partially known in the symbol
-            // set, so enforcing exact arity on commands false-positives on
-            // production content (esp. 225). Only procs/jumps are strictly
-            // arg-counted outside test scripts.
-            if kind == CallKind::Command && !self.current_script_is_test {
+            // The keys a db_find takes follow its column.
+            if !counted
+                || kind == CallKind::Command
+                    && matches!(
+                        name.trim_start_matches('.'),
+                        "db_find"
+                            | "db_find_refine"
+                            | "db_find_with_count"
+                            | "db_find_refine_with_count"
+                            | "db_findbyindex"
+                    )
+            {
                 return;
             }
             self.error(

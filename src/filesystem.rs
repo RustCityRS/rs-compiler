@@ -5,9 +5,11 @@ use crate::diagnostics::DiagnosticsCollector;
 use crate::lexer::Lexer;
 #[cfg(feature = "memprof")]
 use crate::memprof;
-use crate::parallel::{parallel_chunks, parallel_chunks_capped, parallel_map};
+use crate::parallel::{
+    parallel_chunks, parallel_chunks_capped, parallel_map, parallel_map_balanced,
+};
 use crate::parser::{Parser, ScriptFile};
-use crate::project::{Options, Project, Target};
+use crate::project::{Options, Project, SourceText, Target};
 use crate::sources::Scope;
 use crate::symbol::SymbolRegistry;
 use crate::typechecker::TypeChecker;
@@ -17,8 +19,10 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::Write;
 use std::fs;
+use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::thread;
 use tracing::{info, warn};
 
 /// Build an editor project using the legacy directory conventions. No ID file
@@ -71,15 +75,15 @@ pub fn editor_project(
             ..Options::default()
         },
     );
-    for path in sources::script_files(&dir, if client { "cs2" } else { "rs2" })? {
-        let text = fs::read_to_string(&path)?;
-        let scope = if path.extension().is_some_and(|ext| ext == "gs2") {
+    let paths = sources::script_files(&dir, if client { "cs2" } else { "rs2" })?;
+    let files = read_sources(&paths, |path| {
+        if path.extension().is_some_and(|ext| ext == "gs2") {
             Scope::Global
         } else {
             scope
-        };
-        let uri = file_uri(&path)?;
-        let id = project.open(uri, scope, 0, text);
+        }
+    })?;
+    for id in project.open_all(files) {
         if client {
             let ids = project
                 .document(id)
@@ -106,20 +110,14 @@ pub fn editor_project(
             dir.join("clientscript")
         };
         if client_dir.is_dir() {
-            for path in sources::script_files(&client_dir, "cs2")?
+            let paths = sources::script_files(&client_dir, "cs2")?
                 .into_iter()
                 .filter(|path| {
                     path.extension().is_some_and(|ext| ext == "cs2")
                         && path.file_name().is_some_and(|name| name != "engine.cs2")
                 })
-            {
-                project.open(
-                    file_uri(&path)?,
-                    Scope::Client,
-                    0,
-                    fs::read_to_string(&path)?,
-                );
-            }
+                .collect::<Vec<_>>();
+            project.open_all(read_sources(&paths, |_| Scope::Client)?);
         }
     }
     let mut files = sources::config_files(&dir);
@@ -142,22 +140,37 @@ pub fn editor_project(
     }
     files.sort();
     files.dedup();
-    for path in files {
-        let Some(kind) = config_kind(&path) else {
-            continue;
-        };
-        let text = fs::read_to_string(&path)?;
-        let config_scope = if path
+    files.retain(|path| config_kind(path).is_some());
+    let configs = read_sources(&files, |path| {
+        if path
             .components()
             .any(|part| part.as_os_str() == "globalscript")
         {
             Scope::Global
         } else {
             scope
-        };
-        project.open_config(file_uri(&path)?, config_scope, 0, text, kind);
+        }
+    })?;
+    for ((uri, config_scope, version, text), path) in configs.into_iter().zip(&files) {
+        project.open_config(uri, config_scope, version, text, config_kind(path).unwrap());
     }
     Ok(project)
+}
+
+/// Read files and name them by URI, in parallel, failing on the first error in
+/// input order.
+fn read_sources(
+    paths: &[PathBuf],
+    scope: impl Fn(&Path) -> Scope + Sync,
+) -> Result<Vec<SourceText>, Box<dyn Error>> {
+    parallel_map_balanced(paths, |path| {
+        let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        let uri = file_uri(path).map_err(|error| error.to_string())?;
+        Ok((uri, scope(path), 0, text))
+    })
+    .into_iter()
+    .collect::<Result<Vec<_>, String>>()
+    .map_err(Into::into)
 }
 
 pub(crate) fn config_kind(path: &Path) -> Option<String> {
@@ -1191,7 +1204,7 @@ fn check_pointers(
         // rebuilding the full ~700-command pointer table + per-script reverse
         // maps. `names` is just the script order, so derive it directly rather
         // than spinning up a throwaway checker for `script_names()`.
-        let shared = PointerChecker::build_shared(compiled_scripts, registry);
+        let shared = PointerChecker::build_shared(compiled_scripts, registry, false);
         let names: Vec<String> = compiled_scripts.iter().map(|s| s.name.clone()).collect();
         // Each chunk's checker retains its CFG caches until the chunk finishes,
         // so concurrency multiplies peak scratch. RUNEC_PTR_CHUNKS caps the
@@ -1317,6 +1330,12 @@ fn resolve_pack_dir(scripts_dir: &Path, pack_dir: Option<&Path>) -> Option<PathB
 /// registration — which need the parsed sources/ASTs — happen afterwards in
 /// `register_scripts`.
 fn build_symbol_registry(scripts_dir: &Path, resolved_pack_dir: Option<&Path>) -> SymbolRegistry {
+    // Visibility reads every source and config, and only its indexing needs
+    // the registry built meanwhile.
+    let visibility = {
+        let dir = scripts_dir.to_path_buf();
+        thread::spawn(move || sources::Visibility::scan(&dir))
+    };
     let mut registry = SymbolRegistry::new();
 
     if let Some(pd) = resolved_pack_dir {
@@ -1396,7 +1415,11 @@ fn build_symbol_registry(scripts_dir: &Path, resolved_pack_dir: Option<&Path>) -
 
     symloader::patch_command_return_types(&mut registry);
 
-    registry.visibility = Arc::new(sources::Visibility::load(scripts_dir, &registry));
+    let mut visibility = visibility
+        .join()
+        .unwrap_or_else(|panic| panic::resume_unwind(panic));
+    visibility.index_registry(&registry);
+    registry.visibility = Arc::new(visibility);
 
     registry
 }

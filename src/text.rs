@@ -28,6 +28,11 @@ impl LineIndex {
         self.starts.len()
     }
 
+    /// The zero-based line holding `offset`.
+    pub fn line_at(&self, offset: usize) -> usize {
+        self.starts.partition_point(|&start| start <= offset) - 1
+    }
+
     pub fn line(&self, line: usize) -> Option<Range<usize>> {
         let start = *self.starts.get(line)?;
         Some(start..self.starts.get(line + 1).copied().unwrap_or(self.len))

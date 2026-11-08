@@ -504,9 +504,9 @@ pub struct SymbolRegistry {
     /// Pre-assigned script IDs loaded from script.pack: "trigger:name" → ID.
     /// When present, overrides sequential assignment so IDs match the Java compiler.
     pub(crate) preloaded_script_ids: HashMap<String, i32>,
-    /// DB column types: "table:column" → first field Type (from dbcolumn.pack).
-    /// Used by db_find to determine the implicit BaseVarType argument.
-    pub(crate) dbcolumn_types: HashMap<String, Type>,
+    /// DB column field types: "table:column" → each field's Type. db_find takes
+    /// the first field's BaseVarType; db_getfield returns them all.
+    pub(crate) dbcolumn_types: HashMap<String, Vec<Type>>,
     /// Component lookup: "interface_name:component_name" → packed (iface_id << 16 | comp_id).
     pub(crate) components: HashMap<String, i32>,
     /// Interface name → ID mapping (for component resolution).
@@ -515,7 +515,7 @@ pub struct SymbolRegistry {
     pub(crate) test_scripts: HashSet<String>,
     /// Next available script ID.
     pub(crate) client_script_params: HashMap<String, Vec<Type>>,
-    next_script_id: i32,
+    pub(crate) next_script_id: i32,
 }
 
 impl Default for SymbolRegistry {
@@ -878,6 +878,13 @@ impl SymbolRegistry {
     /// Look up a command by name.
     pub fn lookup_command(&self, name: &str) -> Option<&Symbol> {
         self.commands.get(name)
+    }
+
+    /// Whether a bare `name` in a `hint` slot is the command rather than an
+    /// entity: entity ids are ints, so a string or long slot takes the command.
+    pub(crate) fn command_fills(&self, name: &str, hint: Option<Type>) -> bool {
+        hint.is_some_and(|h| h.base_type() != BaseVarType::Integer)
+            && self.commands.contains_key(name)
     }
 
     /// Look up a game variable by name.

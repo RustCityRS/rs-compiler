@@ -214,8 +214,7 @@ impl Project {
             .ok_or("Invalid selection")?;
         let index = self.symbol_index();
         if index
-            .symbols
-            .iter()
+            .symbols()
             .any(|symbol| symbol.container.is_none() && symbol.name == name)
         {
             return Err("A script with this name already exists".into());
@@ -229,8 +228,7 @@ impl Project {
             return Err("Invalid procedure name".into());
         }
         let enclosing = index
-            .symbols
-            .iter()
+            .symbols()
             .find(|symbol| {
                 symbol.container.is_none()
                     && symbol.kind != SymbolKind::Command
@@ -257,11 +255,10 @@ impl Project {
         let mut outputs = Vec::new();
         let mut seen = HashSet::new();
         for reference in index
-            .references
-            .iter()
-            .filter(|r| r.location.source == source && range.contains(&r.location.range.start))
+            .references_in(source)
+            .filter(|r| range.contains(&r.location.range.start))
         {
-            let symbol = &index.symbols[reference.symbol];
+            let symbol = index.symbol(reference.symbol);
             if symbol.container.is_none() || !seen.insert(reference.symbol) {
                 continue;
             }
@@ -272,19 +269,12 @@ impl Project {
             if !defined_inside {
                 params.push(symbol);
             }
-            let used_after = index.references.iter().any(|r| {
-                r.symbol == reference.symbol
-                    && r.location.source == source
-                    && r.location.range.start >= range.end
-            });
+            let used_after = index
+                .references_in(source)
+                .any(|r| r.symbol == reference.symbol && r.location.range.start >= range.end);
             let assigned = index
-                .references
-                .iter()
-                .filter(|r| {
-                    r.symbol == reference.symbol
-                        && r.location.source == source
-                        && range.contains(&r.location.range.start)
-                })
+                .references_in(source)
+                .filter(|r| r.symbol == reference.symbol && range.contains(&r.location.range.start))
                 .any(|r| {
                     document
                         .spans

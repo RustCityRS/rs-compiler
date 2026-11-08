@@ -15,6 +15,7 @@ use crate::sources::Scope;
 use crate::types::Type;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Location {
@@ -143,11 +144,23 @@ pub(crate) struct Reference {
     declaration: bool,
 }
 
-pub(crate) struct Index {
+/// What configs and the registry declare. Kept while only scripts change.
+pub(crate) struct Configs {
+    key: u64,
     symbols: Vec<Symbol>,
+    keys: HashMap<String, usize>,
+    references: Vec<Reference>,
+    links: Vec<index::Link>,
+    compounds: HashSet<String>,
+    config_types: fields::ConfigTypes,
+    config_problems: HashMap<SourceId, Vec<(usize, String)>>,
+}
+
+pub(crate) struct Index {
+    configs: Arc<Configs>,
+    symbols: Vec<Symbol>,
+    entities: Vec<Symbol>,
     references: Vec<Reference>,
     compounds: HashSet<String>,
     hooks: HashMap<SourceId, Vec<hooks::Hook>>,
-    config_types: fields::ConfigTypes,
-    config_problems: HashMap<SourceId, Vec<(usize, String)>>,
 }

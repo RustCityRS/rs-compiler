@@ -1,13 +1,16 @@
 use super::fields::{self, ConfigTypes, Section, Value};
+use super::index::{CONFIG, Link};
 use super::{
     Completion, Hover, Index, Location, Reference, SemanticToken, Symbol, SymbolKind, TokenKind,
     index,
 };
+use crate::parallel_map_balanced;
 use crate::project::{Document, Project, SourceId};
 use crate::sources::Scope;
 use crate::symbol::normalize_comp_name;
 use crate::types::Type;
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::Path;
 
 pub(super) fn entity_type(kind: &str) -> Option<Type> {
@@ -71,14 +74,151 @@ fn lines(document: &Document) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
+#[derive(Default)]
+struct Sections {
+    entries: Vec<(String, Range<usize>, usize, String)>,
+    columns: Vec<(String, Vec<Type>)>,
+    params: Vec<(String, Type)>,
+}
+
+fn sections(document: &Document) -> Sections {
+    let mut out = Sections::default();
+    let kind = document.config.as_deref().unwrap();
+    // A world map area's sections are its file ids, which nothing names.
+    if matches!(kind, "fm" | "fms") {
+        return out;
+    }
+    let pack = kind.strip_prefix("pack:");
+    let kind = pack.unwrap_or(kind);
+    let interfaces = if pack == Some("interface") {
+        lines(document)
+            .filter_map(|(_, line)| {
+                let (id, name) = line.trim().split_once('=')?;
+                Some((id.parse::<u32>().ok()?, name.trim()))
+            })
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
+    // Only a block comment can cover where a line starts.
+    let comments = if document.text.contains("/*") {
+        tokens(document, &ConfigTypes::default())
+            .into_iter()
+            .filter(|token| token.kind == TokenKind::Comment)
+            .map(|token| token.range)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let mut current = String::new();
+    for (offset, line) in lines(document) {
+        let line = line.trim_end_matches(['\r', '\n']);
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.is_empty() {
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        let pos = comments.partition_point(|range| range.start <= offset + indent);
+        if pos
+            .checked_sub(1)
+            .is_some_and(|pos| comments[pos].contains(&(offset + indent)))
+        {
+            continue;
+        }
+        let mut entry_kind = kind;
+        let entry = if pack.is_some() {
+            trimmed.split_once('=').and_then(|(id, value)| {
+                let name = value.split("//").next().unwrap().trim();
+                let start = offset + indent + trimmed.len() - value.trim_start().len();
+                let qualified = if kind == "interface"
+                    && let Some((interface, component)) = id.split_once(':')
+                {
+                    let interface = interfaces.get(&interface.parse::<u32>().ok()?)?;
+                    component.parse::<u32>().ok()?;
+                    entry_kind = "component";
+                    format!("{interface}:{name}")
+                } else {
+                    id.trim().parse::<u32>().ok()?;
+                    if kind == "interface" && name.contains(':') {
+                        entry_kind = "component";
+                    }
+                    name.to_string()
+                };
+                Some((qualified, start..start + name.len()))
+            })
+        } else if let Some(rest) = trimmed.strip_prefix('[') {
+            rest.split_once(']').map(|(name, _)| {
+                if matches!(kind, "if" | "interface") && name.contains(':') {
+                    entry_kind = "component";
+                }
+                let start = offset + indent + 1 + name.len() - name.trim_start().len();
+                let range = start..start + name.trim().len();
+                if kind == "if3" {
+                    entry_kind = "component";
+                    (
+                        format!("{}:{}", file_name(&document.label), name.trim()),
+                        range,
+                    )
+                } else {
+                    (name.trim().to_string(), range)
+                }
+            })
+        } else if kind == "constant" {
+            trimmed.split_once('=').map(|(name, _)| {
+                let name = name.trim().trim_start_matches('^');
+                let start = offset + indent + usize::from(trimmed.starts_with('^'));
+                (name.to_string(), start..start + name.len())
+            })
+        } else {
+            None
+        };
+        if let Some((name, range)) = entry {
+            if name.is_empty() {
+                continue;
+            }
+            current = name.clone();
+            out.entries
+                .push((name, range, offset, entry_kind.to_string()));
+        } else if kind == "dbtable"
+            && let Some(column) = trimmed.strip_prefix("column=")
+        {
+            let name = column.split(',').next().unwrap().trim();
+            out.columns.push((
+                format!("{current}:{name}"),
+                column
+                    .split(',')
+                    .skip(1)
+                    .filter_map(|ty| Type::from_name(ty.trim()))
+                    .collect(),
+            ));
+            let start =
+                offset + indent + "column=".len() + column.len() - column.trim_start().len();
+            out.entries.push((
+                format!("{current}:{name}"),
+                start..start + name.len(),
+                offset,
+                "dbcolumn".into(),
+            ));
+        } else if kind == "param"
+            && let Some(ty) = trimmed
+                .strip_prefix("type=")
+                .and_then(|ty| Type::from_name(ty.trim()))
+        {
+            out.params.push((current.clone(), ty));
+        }
+    }
+    out
+}
+
 pub(super) fn declarations(
     project: &Project,
+    commands: &HashSet<String>,
     symbols: &mut Vec<Symbol>,
     keys: &mut HashMap<String, usize>,
     references: &mut Vec<Reference>,
+    links: &mut Vec<Link>,
     types: &mut ConfigTypes,
 ) {
-    let no_types = ConfigTypes::default();
     let mut documents = project
         .documents()
         .filter(|doc| doc.config.is_some())
@@ -89,159 +229,56 @@ pub(super) fn declarations(
             doc.label.to_string_lossy().contains("_unpack"),
         )
     });
-    for document in documents {
-        let kind = document.config.as_deref().unwrap();
-        // A world map area's sections are its file ids, which nothing names.
-        if matches!(kind, "fm" | "fms") {
-            continue;
+    let found = parallel_map_balanced(&documents, |document| sections(document));
+    for (document, found) in documents.into_iter().zip(found) {
+        let pack = document.config.as_deref().unwrap().starts_with("pack:");
+        for (name, columns) in found.columns {
+            types.columns.entry(name).or_insert(columns);
         }
-        let pack = kind.strip_prefix("pack:");
-        let kind = pack.unwrap_or(kind);
-        let interfaces = if pack == Some("interface") {
-            lines(document)
-                .filter_map(|(_, line)| {
-                    let (id, name) = line.trim().split_once('=')?;
-                    Some((id.parse::<u32>().ok()?, name.trim()))
-                })
-                .collect::<HashMap<_, _>>()
-        } else {
-            HashMap::new()
-        };
-        let comments = tokens(document, &no_types)
-            .into_iter()
-            .filter(|token| token.kind == TokenKind::Comment)
-            .map(|token| token.range)
-            .collect::<Vec<_>>();
-        let mut sections = Vec::new();
-        let mut current = String::new();
-        for (offset, line) in lines(document) {
-            let line = line.trim_end_matches(['\r', '\n']);
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") || trimmed.is_empty() {
-                continue;
-            }
-            let indent = line.len() - trimmed.len();
-            let pos = comments.partition_point(|range| range.start <= offset + indent);
-            if pos
-                .checked_sub(1)
-                .is_some_and(|pos| comments[pos].contains(&(offset + indent)))
-            {
-                continue;
-            }
-            let mut entry_kind = kind;
-            let entry = if pack.is_some() {
-                trimmed.split_once('=').and_then(|(id, value)| {
-                    let name = value.split("//").next().unwrap().trim();
-                    let start = offset + indent + trimmed.len() - value.trim_start().len();
-                    let qualified = if kind == "interface"
-                        && let Some((interface, component)) = id.split_once(':')
-                    {
-                        let interface = interfaces.get(&interface.parse::<u32>().ok()?)?;
-                        component.parse::<u32>().ok()?;
-                        entry_kind = "component";
-                        format!("{interface}:{name}")
-                    } else {
-                        id.trim().parse::<u32>().ok()?;
-                        if kind == "interface" && name.contains(':') {
-                            entry_kind = "component";
-                        }
-                        name.to_string()
-                    };
-                    Some((qualified, start..start + name.len()))
-                })
-            } else if let Some(rest) = trimmed.strip_prefix('[') {
-                rest.split_once(']').map(|(name, _)| {
-                    if matches!(kind, "if" | "interface") && name.contains(':') {
-                        entry_kind = "component";
-                    }
-                    let start = offset + indent + 1 + name.len() - name.trim_start().len();
-                    let range = start..start + name.trim().len();
-                    if kind == "if3" {
-                        entry_kind = "component";
-                        (
-                            format!("{}:{}", file_name(&document.label), name.trim()),
-                            range,
-                        )
-                    } else {
-                        (name.trim().to_string(), range)
-                    }
-                })
-            } else if kind == "constant" {
-                trimmed.split_once('=').map(|(name, _)| {
-                    let name = name.trim().trim_start_matches('^');
-                    let start = offset + indent + usize::from(trimmed.starts_with('^'));
-                    (name.to_string(), start..start + name.len())
-                })
-            } else {
-                None
-            };
-            if let Some((name, range)) = entry {
-                if name.is_empty() {
-                    continue;
-                }
-                current = name.clone();
-                sections.push((name, range, offset, entry_kind.to_string()));
-            } else if kind == "dbtable"
-                && let Some(column) = trimmed.strip_prefix("column=")
-            {
-                let name = column.split(',').next().unwrap().trim();
-                types
-                    .columns
-                    .entry(format!("{current}:{name}"))
-                    .or_insert_with(|| {
-                        column
-                            .split(',')
-                            .skip(1)
-                            .filter_map(|ty| Type::from_name(ty.trim()))
-                            .collect()
-                    });
-                let start =
-                    offset + indent + "column=".len() + column.len() - column.trim_start().len();
-                sections.push((
-                    format!("{current}:{name}"),
-                    start..start + name.len(),
-                    offset,
-                    "dbcolumn".into(),
-                ));
-            } else if kind == "param"
-                && let Some(ty) = trimmed
-                    .strip_prefix("type=")
-                    .and_then(|ty| Type::from_name(ty.trim()))
-            {
-                types.params.entry(current.clone()).or_insert(ty);
-            }
+        for (name, ty) in found.params {
+            types.params.entry(name).or_insert(ty);
         }
+        let sections = found.entries;
         for (i, (name, range, start, kind)) in sections.iter().enumerate() {
-            let symbol_key = if pack.is_some() && matches!(kind.as_str(), "script" | "clientscript")
-            {
+            let symbol_key = if pack && matches!(kind.as_str(), "script" | "clientscript") {
                 let Some((trigger, name)) = name.trim_matches(['[', ']']).split_once(',') else {
                     continue;
                 };
-                let found = keys
-                    .get(&index::key(Scope::Global, trigger, name))
-                    .or_else(|| keys.get(&index::key(document.scope, trigger, name)))
-                    .copied();
-                let Some(id) = found else { continue };
-                references.push(Reference {
+                links.push(Link {
                     location: Location {
                         source: document.id,
                         range: range.start + 1 + trigger.len() + 1..range.end - 1,
                     },
-                    symbol: id,
+                    scripts: vec![
+                        index::key(Scope::Global, trigger, name),
+                        index::key(document.scope, trigger, name),
+                    ],
+                    symbol: None,
                     declaration: true,
+                    fallback: Vec::new(),
                 });
                 continue;
             } else {
                 entity_type(kind).map_or_else(|| key(kind, name), |ty| entity_key(ty, name))
             };
-            let end = sections[i + 1..]
-                .iter()
-                .find(|entry| kind != "dbtable" || entry.3 == "dbtable")
-                .map_or(document.text.len(), |entry| entry.2);
             let location = Location {
                 source: document.id,
                 range: range.clone(),
             };
+            if commands.contains(&symbol_key) {
+                links.push(Link {
+                    location,
+                    scripts: vec![symbol_key],
+                    symbol: None,
+                    declaration: true,
+                    fallback: Vec::new(),
+                });
+                continue;
+            }
+            let end = sections[i + 1..]
+                .iter()
+                .find(|entry| kind != "dbtable" || entry.3 == "dbtable")
+                .map_or(document.text.len(), |entry| entry.2);
             let id = *keys.entry(symbol_key.clone()).or_insert_with(|| {
                 let id = symbols.len();
                 symbols.push(Symbol {
@@ -271,7 +308,7 @@ pub(super) fn declarations(
             }
             references.push(Reference {
                 location,
-                symbol: id,
+                symbol: CONFIG | id,
                 declaration: true,
             });
         }
@@ -506,11 +543,22 @@ fn number(word: &str) -> bool {
     !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit() || b == b'_')
 }
 
+#[derive(Default)]
+struct Resolved {
+    references: Vec<Reference>,
+    problems: Vec<(usize, String)>,
+    links: Vec<Link>,
+    fallbacks: Vec<(usize, Link)>,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn references(
     project: &Project,
+    commands: &HashSet<String>,
     keys: &HashMap<String, usize>,
     symbols: &[Symbol],
     references: &mut Vec<Reference>,
+    links: &mut Vec<Link>,
     types: &ConfigTypes,
     problems: &mut HashMap<SourceId, Vec<(usize, String)>>,
 ) {
@@ -530,21 +578,25 @@ pub(super) fn references(
         declared
             .entry(reference.location.source)
             .or_default()
-            .push(reference.location.range.clone());
+            .push((reference.location.range.clone(), None));
+    }
+    for (i, link) in links.iter().enumerate() {
+        declared
+            .entry(link.location.source)
+            .or_default()
+            .push((link.location.range.clone(), Some(i)));
     }
     for ranges in declared.values_mut() {
-        ranges.sort_by_key(|range| range.start);
+        ranges.sort_by_key(|(range, _)| range.start);
     }
     let vars_known = !project.registry.game_vars.is_empty();
-    for document in project.documents().filter(|doc| doc.config.is_some()) {
+    let documents = project
+        .documents()
+        .filter(|doc| doc.config.is_some())
+        .collect::<Vec<_>>();
+    let found = parallel_map_balanced(&documents, |document| {
         let declarations = declared.get(&document.id).map_or(&[][..], Vec::as_slice);
-        let mut report = |offset: usize, message: String| {
-            let line = document.text[..offset].matches('\n').count() + 1;
-            problems
-                .entry(document.id)
-                .or_default()
-                .push((line, message));
-        };
+        let mut out = Resolved::default();
         for typed in typed_tokens(document, types) {
             let Typed {
                 mut token,
@@ -555,20 +607,27 @@ pub(super) fn references(
             if token.static_ {
                 token.range.start += 1;
             }
-            let pos = declarations.partition_point(|range| range.start <= token.range.start);
+            let pos = declarations.partition_point(|(range, _)| range.start <= token.range.start);
             let id_of_config =
                 token.kind == TokenKind::Number && matches!(value, Some(Value::Config(_)));
             let hook_script = token.kind == TokenKind::Function && value == Some(Value::Hook);
-            if (!matches!(token.kind, TokenKind::Variable | TokenKind::EnumMember)
+            if !matches!(token.kind, TokenKind::Variable | TokenKind::EnumMember)
                 && !id_of_config
-                && !hook_script)
-                || pos
-                    .checked_sub(1)
-                    .is_some_and(|pos| token.range.end <= declarations[pos].end)
+                && !hook_script
             {
                 continue;
             }
+            // Inside a script's entry, these stand only if the script is gone.
+            let within = match pos.checked_sub(1).map(|pos| &declarations[pos]) {
+                Some((range, link)) if token.range.end <= range.end => match link {
+                    Some(link) => Some(*link),
+                    None => continue,
+                },
+                _ => None,
+            };
             let name = &document.text[token.range.clone()];
+            let mut problem = None;
+            let mut scripts = Vec::new();
             let id = match (prefix, value) {
                 (b'^', _) => keys.get(&key("constant", name)).copied(),
                 (b'%', _) => keys.get(&key("varp", name)).copied(),
@@ -577,14 +636,18 @@ pub(super) fn references(
                     .ok()
                     .and_then(|id| project.registry.visibility.config_name(ty, id))
                     .and_then(|name| keys.get(&entity_key(ty, name)).copied()),
-                (_, Some(Value::Hook)) if hook_script => [
-                    (Scope::Client, "clientscript"),
-                    (Scope::Global, "clientscript"),
-                    (Scope::Client, "proc"),
-                    (Scope::Global, "proc"),
-                ]
-                .into_iter()
-                .find_map(|(scope, trigger)| keys.get(&index::key(scope, trigger, name)).copied()),
+                (_, Some(Value::Hook)) if hook_script => {
+                    scripts = [
+                        (Scope::Client, "clientscript"),
+                        (Scope::Global, "clientscript"),
+                        (Scope::Client, "proc"),
+                        (Scope::Global, "proc"),
+                    ]
+                    .into_iter()
+                    .map(|(scope, trigger)| index::key(scope, trigger, name))
+                    .collect();
+                    None
+                }
                 (_, Some(Value::Hook)) => name
                     .contains(':')
                     .then(|| keys.get(&entity_key(Type::Component, name)).copied())
@@ -609,14 +672,14 @@ pub(super) fn references(
                         && project.registry.lookup_reference(name, ty).is_none()
                         && (tables.contains(&table_of(ty)) || (is_var(ty) && vars_known))
                     {
-                        report(token.range.start, mismatch(&names, symbols, ty, name));
+                        problem = Some(mismatch(&names, symbols, ty, name));
                     }
                     found
                 }
                 (_, Some(Value::AnyVar)) => {
                     let found = keys.get(&key("varp", name)).copied();
                     if found.is_none() && vars_known {
-                        report(token.range.start, format!("Unknown var '{name}'"));
+                        problem = Some(format!("Unknown var '{name}'"));
                     }
                     found
                 }
@@ -639,21 +702,65 @@ pub(super) fn references(
                     } else {
                         field.trim_end_matches(|ch: char| ch.is_ascii_digit())
                     };
-                    keys.get(&key(kind, name))
-                        .copied()
-                        .or_else(|| names.get(name).copied())
+                    let named = key(kind, name);
+                    if commands.contains(&named) {
+                        scripts.push(named);
+                        None
+                    } else {
+                        keys.get(&named)
+                            .copied()
+                            .or_else(|| names.get(name).copied())
+                    }
                 }
             };
-            if let Some(symbol) = id {
-                references.push(Reference {
-                    location: Location {
-                        source: document.id,
-                        range: token.range,
-                    },
-                    symbol,
-                    declaration: false,
-                });
+            if within.is_none()
+                && let Some(problem) = problem
+            {
+                out.problems
+                    .push((document.lines.line_at(token.range.start) + 1, problem));
             }
+            let location = Location {
+                source: document.id,
+                range: token.range,
+            };
+            if scripts.is_empty() && within.is_none() {
+                if let Some(id) = id {
+                    out.references.push(Reference {
+                        location,
+                        symbol: CONFIG | id,
+                        declaration: false,
+                    });
+                }
+                continue;
+            }
+            if scripts.is_empty() && id.is_none() {
+                continue;
+            }
+            let link = Link {
+                location,
+                scripts,
+                symbol: id.map(|id| CONFIG | id),
+                declaration: false,
+                fallback: Vec::new(),
+            };
+            match within {
+                Some(i) => out.fallbacks.push((i, link)),
+                None => out.links.push(link),
+            }
+        }
+        out
+    });
+    for (document, found) in documents.iter().zip(found) {
+        references.extend(found.references);
+        if !found.problems.is_empty() {
+            problems
+                .entry(document.id)
+                .or_default()
+                .extend(found.problems);
+        }
+        links.extend(found.links);
+        for (i, link) in found.fallbacks {
+            links[i].fallback.push(link);
         }
     }
 }
@@ -766,7 +873,7 @@ pub(super) fn completions(
     }
     let index = project.symbol_index();
     let sigil = before[..start].chars().next_back();
-    let mut items = match (sigil, expected_at(before, kind, &index.config_types)) {
+    let mut items = match (sigil, expected_at(before, kind, index.config_types())) {
         (Some('^'), _) => symbols_of(index, prefix, |symbol| symbol.kind == SymbolKind::Constant),
         (Some('%'), _) | (_, Some(Value::AnyVar)) => symbols_of(index, prefix, |symbol| {
             symbol.kind == SymbolKind::GameVariable
@@ -813,8 +920,7 @@ fn symbols_of(
     wanted: impl Fn(&Symbol) -> bool,
 ) -> Vec<(String, String, SymbolKind)> {
     index
-        .symbols
-        .iter()
+        .symbols()
         .filter(|symbol| symbol.name.starts_with(prefix) && wanted(symbol))
         .map(|symbol| (symbol.name.clone(), symbol.detail.clone(), symbol.kind))
         .collect()

@@ -24,7 +24,7 @@ impl Project {
         let Some(reference) = index.at(source, offset) else {
             return config::key_hover(self.document(source)?, offset);
         };
-        let symbol = &index.symbols[reference.symbol];
+        let symbol = index.symbol(reference.symbol);
         Some(Hover {
             range: reference.location.range.clone(),
             kind: symbol.kind,
@@ -35,7 +35,8 @@ impl Project {
 
     pub fn definition(&self, source: SourceId, offset: usize) -> Option<Location> {
         let index = self.symbol_index();
-        index.symbols[index.at(source, offset)?.symbol]
+        index
+            .symbol(index.at(source, offset)?.symbol)
             .definition
             .clone()
     }
@@ -51,8 +52,7 @@ impl Project {
             return Vec::new();
         };
         index
-            .references
-            .iter()
+            .references()
             .filter(|reference| {
                 reference.symbol == selected.symbol
                     && (include_declaration || !reference.declaration)
@@ -63,8 +63,7 @@ impl Project {
 
     pub fn document_symbols(&self, source: SourceId) -> Vec<&Symbol> {
         self.symbol_index()
-            .symbols
-            .iter()
+            .symbols()
             .filter(|symbol| {
                 symbol
                     .definition
@@ -77,8 +76,7 @@ impl Project {
     pub fn workspace_symbols(&self, query: &str, limit: usize) -> Vec<&Symbol> {
         let query = query.to_lowercase();
         self.symbol_index()
-            .symbols
-            .iter()
+            .symbols()
             .filter(|symbol| {
                 symbol.container.is_none() && symbol.name.to_lowercase().contains(&query)
             })
@@ -107,7 +105,7 @@ impl Project {
         let selected = index
             .at(source, offset)
             .ok_or("No resolved symbol at this position")?;
-        let symbol = &index.symbols[selected.symbol];
+        let symbol = index.symbol(selected.symbol);
         let name = if matches!(symbol.value_type, Some(Type::Component | Type::DbColumn))
             && let Some((parent, _)) = symbol.name.rsplit_once(':')
         {
@@ -123,8 +121,7 @@ impl Project {
             name.to_string()
         };
         if index
-            .symbols
-            .iter()
+            .symbols()
             .filter(|other| other.key == symbol.key)
             .count()
             > 1
@@ -134,7 +131,7 @@ impl Project {
         if symbol.definition.is_none() {
             return Err("This definition is supplied by the host; rename it through the host's config editor".into());
         }
-        if index.symbols.iter().any(|other| {
+        if index.symbols().any(|other| {
             other.name == name
                 && other.key != symbol.key
                 && (symbol.kind != SymbolKind::Config || other.value_type == symbol.value_type)
@@ -148,7 +145,7 @@ impl Project {
             ));
         }
         if symbol.container.is_some()
-            && index.symbols.iter().any(|other| {
+            && index.symbols().any(|other| {
                 other.name == name
                     && other.key != symbol.key
                     && other.container.is_some()
@@ -216,8 +213,8 @@ impl Project {
         };
         if let Some(child_type) = child_type {
             let prefix = format!("{}:", symbol.name);
-            for reference in &index.references {
-                let child = &index.symbols[reference.symbol];
+            for reference in index.references() {
+                let child = index.symbol(reference.symbol);
                 if child.value_type != Some(child_type) || !child.name.starts_with(&prefix) {
                     continue;
                 }
@@ -262,8 +259,7 @@ impl Project {
                 .and_then(|hooks| hooks.iter().find_map(|hook| hook.transmit_at(offset)))
         {
             return index
-                .symbols
-                .iter()
+                .symbols()
                 .filter(|symbol| {
                     symbol.name.starts_with(prefix)
                         && index::visible(symbol, document, offset)
@@ -284,8 +280,7 @@ impl Project {
                 .any(|hook| hook.callback.start <= offset && offset <= hook.callback.end)
         }) {
             return index
-                .symbols
-                .iter()
+                .symbols()
                 .filter(|symbol| {
                     matches!(
                         symbol.kind,
@@ -348,7 +343,7 @@ impl Project {
                     || (trigger.is_some() && expected == Type::Interface && ty == Type::Component)
             })
         };
-        for symbol in &self.symbol_index().symbols {
+        for symbol in self.symbol_index().symbols() {
             if !symbol.name.starts_with(prefix) || !index::visible(symbol, document, offset) {
                 continue;
             }
@@ -482,7 +477,7 @@ impl Project {
         let document = self.document(source)?;
         let tokens = index::tokens(
             document,
-            &self.symbol_index().compounds,
+            &|name| self.symbol_index().is_compound(name),
             self.symbol_index()
                 .hooks
                 .get(&source)
@@ -522,7 +517,7 @@ impl Project {
             .into_iter()
             .rev()
             .find_map(|(symbol, argument)| symbol.map(|symbol| (symbol, argument)))?;
-        let symbol = &index.symbols[symbol];
+        let symbol = index.symbol(symbol);
         Some(SignatureHelp {
             label: symbol.detail.clone(),
             parameters: symbol.parameters.clone(),
@@ -534,7 +529,7 @@ impl Project {
     /// Config values that do not name what their key holds.
     pub fn config_diagnostics(&self) -> DiagnosticsCollector {
         let mut diagnostics = DiagnosticsCollector::new();
-        for (source, problems) in &self.symbol_index().config_problems {
+        for (source, problems) in self.configs().problems() {
             let Some(document) = self.document(*source) else {
                 continue;
             };
@@ -558,8 +553,8 @@ impl Project {
         if document.config.is_some() {
             // Never waits for the index: until it exists, values typed by a
             // declaration read as plain words.
-            return match self.index.get() {
-                Some(index) => config::tokens(document, &index.config_types),
+            return match self.configs.lock().unwrap().as_ref() {
+                Some(configs) => config::tokens(document, configs.types()),
                 None => config::tokens(document, &Default::default()),
             };
         }

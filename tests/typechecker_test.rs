@@ -121,9 +121,8 @@ fn run_check(
 }
 
 /// Check in **production** context (no `#testscript` boundary). The lenient
-/// type rules apply: integer-base named types are mutually interchangeable and
-/// command arg counts are not strictly enforced — matching pre-test-framework
-/// (and engine reference) behaviour.
+/// type rules apply: integer-base named types are mutually interchangeable,
+/// matching pre-test-framework (and engine reference) behaviour.
 fn check_with_registry(src: &str, registry: SymbolRegistry) -> CheckResult {
     run_check(src, registry, None)
 }
@@ -134,8 +133,7 @@ fn check(src: &str) -> CheckResult {
 
 /// Check as a **test script** (as if the whole fragment sits below a
 /// `#testscript` boundary). The strict assertion-framework rules apply: exact
-/// named types (no integer-base widening) and strict command arg counts, which
-/// `assert_eq` and friends rely on.
+/// named types (no integer-base widening), which `assert_eq` and friends rely on.
 fn check_test_with_registry(src: &str, registry: SymbolRegistry) -> CheckResult {
     run_check(src, registry, Some(0))
 }
@@ -214,6 +212,46 @@ fn unresolved_proc_call_errors() {
         "expected unresolved-proc error, got:\n{}",
         res.dump()
     );
+}
+
+#[test]
+fn missing_arguments_error_for_commands_procs_timers_and_jumps() {
+    let mut reg = empty_registry();
+    seed_mes(&mut reg);
+    reg.register_command(
+        "set_player_op".into(),
+        2001,
+        vec![Type::String, Type::Int, Type::Boolean],
+        vec![],
+    );
+    reg.register_command(
+        "settimer".into(),
+        2002,
+        vec![Type::Timer, Type::Int, Type::Int],
+        vec![],
+    );
+    let res = check_with_registry(
+        "[proc,two](int $a, int $b)\n\
+         mes(\"x\");\n\
+         [proc,one]()(int)\n\
+         return(1);\n\
+         [proc,pair]()(int, int)\n\
+         return(1, 2);\n\
+         [label,jump](int $a)\n\
+         mes(\"y\");\n\
+         [timer,tick](int $a)\n\
+         mes(\"z\");\n\
+         [label,caller]\n\
+         set_player_op();\n\
+         ~two(~one);\n\
+         ~two(~pair);\n\
+         settimer(tick, 5);\n\
+         settimer(tick, 5, 1);\n\
+         @jump();\n",
+        reg,
+    );
+    let lines = res.errors().iter().map(|d| d.line).collect::<Vec<_>>();
+    assert_eq!(lines, [12, 13, 15, 17], "{}", res.dump());
 }
 
 #[test]
@@ -899,12 +937,10 @@ fn bare_command_call_zero_args_errors() {
     );
 }
 
-/// Regression lock: strict command arg-count is `#testscript`-only. The same
-/// `mes()` mismatch must NOT error in a production script — command signatures
-/// can be variadic/partially-known in the symbol set, so enforcing exact arity
-/// false-positived on production content (esp. 225).
+/// Production scripts arg-count commands too. The variadic timer commands and
+/// db_find keys, whose shapes follow another argument, are checked on their own.
 #[test]
-fn command_arg_count_lenient_in_production() {
+fn command_arg_count_enforced_in_production() {
     let mut reg = empty_registry();
     reg.register_command("mes".into(), 2064, vec![Type::String], vec![]);
     let res = check_with_registry(
@@ -912,12 +948,7 @@ fn command_arg_count_lenient_in_production() {
          mes();\n",
         reg,
     );
-    assert_eq!(
-        res.error_count(),
-        0,
-        "production must not strictly arg-count commands, got:\n{}",
-        res.dump()
-    );
+    assert_eq!(res.error_count(), 1, "{}", res.dump());
 }
 
 #[test]

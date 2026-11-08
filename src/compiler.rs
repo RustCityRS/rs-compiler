@@ -1405,7 +1405,9 @@ impl<'a> Compiler<'a> {
                         return;
                     }
                 }
-                if let Some(e) = self.registry.lookup_entity_id(name) {
+                if let Some(e) = self.registry.lookup_entity_id(name)
+                    && !self.registry.command_fills(name, type_hint)
+                {
                     // Param entities should NOT shadow type name identifiers unless
                     // we have a Param-typed hint. This allows "namedobj" etc. to resolve
                     // to their type chars in enum(int, namedobj, ...) contexts.
@@ -1721,6 +1723,7 @@ impl<'a> Compiler<'a> {
                         self.registry
                             .dbcolumn_types
                             .get(col_name.as_str())
+                            .and_then(|types| types.first())
                             .map(|t| match t.base_type() {
                                 crate::types::BaseVarType::Integer => 0,
                                 crate::types::BaseVarType::Long => 1,
@@ -2094,7 +2097,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Returns the trigger type for commands whose first argument is a script name.
-    fn command_script_trigger(cmd_name: &str) -> Option<&'static str> {
+    pub(crate) fn command_script_trigger(cmd_name: &str) -> Option<&'static str> {
         match cmd_name {
             "queue" | "queue*" | "longqueue" | "longqueue*" | "strongqueue" | "strongqueue*"
             | "weakqueue" | "weakqueue*" | "clearqueue" => Some("queue"),
@@ -2107,7 +2110,7 @@ impl<'a> Compiler<'a> {
 
     /// Number of fixed (non-variadic) arguments for commands that push a type descriptor.
     /// Returns None for commands that don't use a type descriptor at all.
-    fn command_variadic_info(cmd_name: &str) -> Option<usize> {
+    pub(crate) fn command_variadic_info(cmd_name: &str) -> Option<usize> {
         match cmd_name {
             // queue/strongqueue/weakqueue have separate * variants (different opcodes)
             "queue*" | "strongqueue*" | "weakqueue*" => Some(2),
