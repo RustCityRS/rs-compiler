@@ -34,10 +34,12 @@ pub enum PointerType {
     ActiveComponent2 = 23,
     ActiveController = 24,
     ActiveController2 = 25,
+    ActiveRegion = 26,
+    ActiveRegion2 = 27,
 }
 
 impl PointerType {
-    pub const COUNT: usize = 26;
+    pub const COUNT: usize = 28;
 
     pub const ALL: [PointerType; Self::COUNT] = [
         PointerType::ActivePlayer,
@@ -66,6 +68,8 @@ impl PointerType {
         PointerType::ActiveComponent2,
         PointerType::ActiveController,
         PointerType::ActiveController2,
+        PointerType::ActiveRegion,
+        PointerType::ActiveRegion2,
     ];
 
     /// The representation string used in diagnostics, matching the TS reference.
@@ -97,6 +101,8 @@ impl PointerType {
             PointerType::ActiveComponent2 => ".active_component",
             PointerType::ActiveController => "active_controller",
             PointerType::ActiveController2 => ".active_controller",
+            PointerType::ActiveRegion => "active_region",
+            PointerType::ActiveRegion2 => ".active_region",
         }
     }
 
@@ -3061,6 +3067,49 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         true,
     );
+
+    // -----------------------------------------------------------------------
+    // Region ops: a region (instance) the script created or found
+    // -----------------------------------------------------------------------
+    for name in [
+        "region_getcoord",
+        "region_set",
+        "region_uid",
+        "region_setexitcoord",
+    ] {
+        add(
+            name,
+            &[ActiveRegion],
+            &[],
+            &[],
+            &[ActiveRegion2],
+            &[],
+            &[],
+            false,
+        );
+    }
+    add(
+        "region_create",
+        &[],
+        &[ActiveRegion],
+        &[],
+        &[],
+        &[ActiveRegion2],
+        &[],
+        false,
+    );
+    for name in ["region_findbycoord", "region_findbyuid"] {
+        add(
+            name,
+            &[],
+            &[ActiveRegion],
+            &[],
+            &[],
+            &[ActiveRegion2],
+            &[],
+            true,
+        );
+    }
 
     // -----------------------------------------------------------------------
     // DB ops

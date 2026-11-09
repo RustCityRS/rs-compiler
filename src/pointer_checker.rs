@@ -2196,6 +2196,40 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Test: region pointers
+    // -----------------------------------------------------------------------
+    // A region command needs a region the script created or found, and its
+    // dot form the secondary one.
+    #[test]
+    fn region_commands_need_their_region() {
+        let (create, set) = (5202, 5203);
+        let registry = registry_with_commands(&[("region_create", create), ("region_set", set)]);
+        let dot = |opcode: i32| opcode | (1 << 16);
+        let warnings = |instructions: Vec<Instruction>| {
+            let scripts = vec![make_script("test", "ai_timer", 0, instructions)];
+            PointerChecker::new(&scripts, &registry)
+                .run()
+                .warning_count()
+        };
+        assert_eq!(
+            warnings(vec![line(1), cmd(create), line(2), cmd(set), ret()]),
+            0
+        );
+        assert!(warnings(vec![line(1), cmd(set), ret()]) > 0);
+        assert!(warnings(vec![line(1), cmd(create), line(2), cmd(dot(set)), ret()]) > 0);
+        assert_eq!(
+            warnings(vec![
+                line(1),
+                cmd(dot(create)),
+                line(2),
+                cmd(dot(set)),
+                ret()
+            ]),
+            0
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Test: jump target landing on a LineNumber instruction
     // -----------------------------------------------------------------------
     // Regression: BranchEquals/Branch targets patched to body_start often
