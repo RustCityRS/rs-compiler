@@ -129,7 +129,7 @@ pub(crate) fn transmit_kind(command: &str) -> Option<&'static str> {
     {
         "setonvartransmit" => Some("varp"),
         "setonvarctransmit" => Some("varc"),
-        "setonvarcstrtransmit" => Some("varcs"),
+        "setonvarcstrtransmit" => Some("varcstr"),
         "setoninvtransmit" => Some("inv"),
         "setonstattransmit" => Some("stat"),
         _ => None,
@@ -140,8 +140,8 @@ pub(crate) fn transmit_kind(command: &str) -> Option<&'static str> {
 pub(crate) fn var_placeholder(kind: &str) -> &str {
     match kind {
         "varp" => "varplayer",
-        "varbit" => "varplayerbit",
-        "varc" | "varcs" => "varclient",
+        "varpbit" => "varplayerbit",
+        "varc" | "varcstr" => "varclient",
         other => other,
     }
 }

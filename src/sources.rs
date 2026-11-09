@@ -191,7 +191,7 @@ fn declarations(file: &Path) -> Vec<(String, String)> {
         {
             if ext == "varc" {
                 declare("varc", name);
-                declare("varcs", name);
+                declare("varcstr", name);
             } else if ext == "varclansetting" {
                 for kind in [
                     "varclansetting",
@@ -250,7 +250,7 @@ fn config_kind(ty: Type) -> Option<&'static str> {
         | Type::VarClan
         | Type::VarClanSetting
         | Type::VarCon
-        | Type::Config44
+        | Type::VarConBit
         | Type::VarNBit
         | Type::VarObj => Some(ty.name()),
         _ => None,
@@ -379,7 +379,7 @@ impl Visibility {
     pub fn declare(&mut self, kind: &str, name: &str, scope: Scope) {
         let normalized;
         let name = if Type::from_name(kind).is_some_and(|ty| config_kind(ty).is_some())
-            && !matches!(kind, "varp" | "varbit" | "varn" | "vars")
+            && !matches!(kind, "varp" | "varpbit" | "varn" | "vars")
         {
             normalized = crate::symbol::normalize_entity_name(name);
             normalized.as_ref()
@@ -408,15 +408,16 @@ impl Visibility {
         let name = if matches!(
             kind,
             "varp"
-                | "varbit"
+                | "varpbit"
                 | "varn"
                 | "vars"
                 | "varc"
-                | "varcs"
+                | "varcstr"
                 | "varclan"
                 | "varobj"
                 | "varnbit"
                 | "varcon"
+                | "varconbit"
         ) {
             name.trim_start_matches('.')
         } else {

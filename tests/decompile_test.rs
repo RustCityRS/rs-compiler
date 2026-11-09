@@ -110,7 +110,7 @@ fn named_transmit_triggers_compile_as_ids_and_decompile_as_names() {
     for (command, kind, name, id) in [
         ("cc_setonvartransmit", "varp", "bank_open", 90),
         ("cc_setonvarctransmit", "varc", "varclient_192", 192),
-        ("cc_setonvarcstrtransmit", "varcs", "varclient_352", 352),
+        ("cc_setonvarcstrtransmit", "varcstr", "varclient_352", 352),
         ("cc_setoninvtransmit", "inv", "tradeoffer", 94),
         ("cc_setonstattransmit", "stat", "magic", 6),
     ] {
@@ -126,7 +126,7 @@ fn named_transmit_triggers_compile_as_ids_and_decompile_as_names() {
         registry.register_script("callback".into(), "clientscript".into(), vec![], vec![]);
         if kind.starts_with("var") {
             // String varcs also work without a pack entry, as with %varcs_N.
-            if kind != "varcs" {
+            if kind != "varcstr" {
                 registry.register_game_var(name.into(), Type::Int, id, kind.into());
             }
         } else {

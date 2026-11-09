@@ -608,7 +608,7 @@ impl Server {
             self.request_id += 1;
             write_message(
                 output,
-                json!({"jsonrpc":"2.0","id":format!("runec/watch/{}",self.request_id),"method":"client/registerCapability","params":{"registrations":[{"id":"runec/files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.{rs2,cs2,gs2,pack,constant,obj,npc,loc,inv,enum,struct,param,dbtable,dbrow,varp,varn,vars,varbit,varc,seq,spotanim,mesanim,hunt,if,interface,idk,flo,flu,anim,mel,order,hashes,config*}","kind":7}]}}]}}),
+                json!({"jsonrpc":"2.0","id":format!("runec/watch/{}",self.request_id),"method":"client/registerCapability","params":{"registrations":[{"id":"runec/files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.{rs2,cs2,gs2,pack,constant,obj,npc,loc,inv,enum,struct,param,dbtable,dbrow,varp,varn,vars,varpbit,varc,seq,spotanim,mesanim,hunt,if,interface,idk,flo,flu,anim,mel,order,hashes,config*}","kind":7}]}}]}}),
             )?;
         }
         let result = if method == "workspace/executeCommand" && self.apply_supported {

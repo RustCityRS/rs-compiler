@@ -28,7 +28,8 @@ pub(super) fn entity_type(kind: &str) -> Option<Type> {
 pub(super) fn key(kind: &str, name: &str) -> String {
     match kind {
         "constant" => format!("constant:{name}"),
-        "varp" | "varn" | "vars" | "varbit" | "varc" | "varcs" | "varclansetting" => {
+        "varp" | "varn" | "vars" | "varpbit" | "varc" | "varcstr" | "varclansetting"
+        | "varclan" | "varobj" | "varnbit" | "varcon" | "varconbit" => {
             format!("gamevar:{name}")
         }
         "command" | "cs2_command" => format!("command:{name}"),
@@ -779,7 +780,7 @@ fn is_placeholder(ty: Type, name: &str) -> bool {
         Type::IdKit => &["idkit", "idk"],
         Type::Texture => &["material", "texture"],
         Type::Varp => &["varplayer", "varp"],
-        Type::Varbit => &["varplayerbit", "varbit"],
+        Type::Varbit => &["varplayerbit", "varpbit"],
         Type::Varn => &["varnpc", "varn"],
         Type::Vars => &["varworld", "vars"],
         Type::Varc => &["varclient", "varc"],

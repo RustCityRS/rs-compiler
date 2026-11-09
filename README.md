@@ -45,7 +45,7 @@ The pack directory maps names to IDs:
 
 | Files | Purpose |
 |---|---|
-| `command.pack` and `script.pack` | Server command opcodes and script IDs |
+| `command.pack` | Server command opcodes; server script IDs are generated in memory |
 | `cs2_command.pack` and `clientscript.pack` | Client opcodes and script IDs |
 | Other packs, such as `obj.pack` and `inv.pack` | Named assets and game data |
 
@@ -185,18 +185,18 @@ quick fixes and Extract Proc. Changes refresh diagnostics in affected open files
 
 Config and pack files use language ID `rs2config` for navigation and editing. Any
 file mapped to it opens as a config file, so add a pattern for each extension in
-use: `*.anim`, `*.area`, `*.bas`, `*.billboard`, `*.category`, `*.config44`, `*.constant`,
+use: `*.anim`, `*.area`, `*.bas`, `*.billboard`, `*.category`, `*.varconbit`, `*.constant`,
 `*.controller`, `*.cursor`, `*.dbrow`, `*.dbtable`, `*.defaults`, `*.enum`, `*.flo`, `*.flu`,
 `*.fontmetrics`, `*.hashes`, `*.hitmark`, `*.hunt`, `*.idk`, `*.if`, `*.if3`, `*.inv`, `*.itemcode`,
 `*.jingle`, `*.light`, `*.loc`, `*.locshape`, `*.mel`, `*.mesanim`, `*.midi`,
 `*.model`, `*.msi`, `*.npc`, `*.obj`, `*.order`, `*.overlayinterface`, `*.pack`,
 `*.param`, `*.particleeffector`, `*.particleemitter`, `*.quest`, `*.quickchatcat`,
 `*.quickchatphrase`, `*.seq`, `*.spotanim`, `*.stat`, `*.struct`, `*.synth`,
-`*.varbit`, `*.varc`, `*.varclan`, `*.varclansetting`, `*.varcon`,
+`*.varpbit`, `*.varc`, `*.varclan`, `*.varclansetting`, `*.varcon`,
 `*.varn`, `*.varnbit`, `*.varobj`, `*.varp`, `*.vars` and `*.wma`.
 
 ```
-*.anim;*.bas;*.category;*.config15;*.config18;*.config19;*.config20;*.config21;*.config22;*.config23;*.config24;*.config25;*.config37;*.config38;*.config39;*.config40;*.config41;*.config42;*.config43;*.config44;*.config45;*.config47;*.config48;*.config7;*.constant;*.cursor;*.dbrow;*.dbtable;*.enum;*.flo;*.flu;*.fontmetrics;*.hashes;*.hitmark;*.hunt;*.idk;*.if;*.inv;*.jingle;*.light;*.loc;*.locshape;*.mel;*.mesanim;*.midi;*.model;*.msi;*.npc;*.obj;*.order;*.overlayinterface;*.pack;*.param;*.quest;*.seq;*.spotanim;*.stat;*.struct;*.synth;*.varbit;*.varc;*.varclansetting;*.varcstr;*.varn;*.varp;*.vars;*.billboard;*.controller;*.defaults;*.area;*.if3;*.itemcode;*.particleeffector;*.particleemitter;*.quickchatcat;*.quickchatphrase;*.varclan;*.varcon;*.varnbit;*.varobj;*.wma;*.fm;*.fms```
+*.anim;*.bas;*.category;*.config15;*.config18;*.config19;*.config20;*.config21;*.config22;*.config23;*.config24;*.config25;*.config37;*.config38;*.config39;*.config40;*.config41;*.config42;*.config43;*.varconbit;*.config45;*.config47;*.config48;*.config7;*.constant;*.cursor;*.dbrow;*.dbtable;*.enum;*.flo;*.flu;*.fontmetrics;*.hashes;*.hitmark;*.hunt;*.idk;*.if;*.inv;*.jingle;*.light;*.loc;*.locshape;*.mel;*.mesanim;*.midi;*.model;*.msi;*.npc;*.obj;*.order;*.overlayinterface;*.pack;*.param;*.quest;*.seq;*.spotanim;*.stat;*.struct;*.synth;*.varpbit;*.varc;*.varclansetting;*.varn;*.varp;*.vars;*.billboard;*.controller;*.defaults;*.area;*.if3;*.itemcode;*.particleeffector;*.particleemitter;*.quickchatcat;*.quickchatphrase;*.varclan;*.varcon;*.varnbit;*.varobj;*.wma;*.fm;*.fms```
 
 Optional color settings:
 

@@ -575,9 +575,9 @@ impl Decompiler<'_> {
                 Some((format!("{}L", script.long_operands[pc].unwrap()), 2))
             }
             Opcode::PushVarp => Some((variable("varp"), 0)),
-            Opcode::PushVarbit => Some((variable("varbit"), 0)),
+            Opcode::PushVarbit => Some((variable("varpbit"), 0)),
             Opcode::PushVarcInt => Some((variable("varc"), 0)),
-            Opcode::PushVarcString => Some((variable("varcs"), 1)),
+            Opcode::PushVarcString => Some((variable("varcstr"), 1)),
             Opcode::PushClanSettingInt => Some((variable("varclansetting"), 0)),
             Opcode::PushClanSettingVarbit => Some((variable("varclansetting"), 0)),
             Opcode::PushClanSettingLong => Some((variable("varclansetting"), 2)),
@@ -608,9 +608,9 @@ impl Decompiler<'_> {
             | Opcode::PopLongLocal => {
                 let (target, kind) = match opcode {
                     Opcode::PopVarp => (variable("varp"), 0),
-                    Opcode::PopVarbit => (variable("varbit"), 0),
+                    Opcode::PopVarbit => (variable("varpbit"), 0),
                     Opcode::PopVarcInt => (variable("varc"), 0),
-                    Opcode::PopVarcString => (variable("varcs"), 1),
+                    Opcode::PopVarcString => (variable("varcstr"), 1),
                     Opcode::PopIntLocal => (local(0), 0),
                     Opcode::PopStringLocal => (local(1), 1),
                     _ => (local(2), 2),

@@ -785,6 +785,17 @@ const IF3: &[Field] = &[
 
 const VARBIT_FIELDS: &[Field] = &[("basevar", VARP), ("startbit", NUMBER), ("endbit", NUMBER)];
 
+const VARCONBIT_FIELDS: &[Field] = &[
+    ("basevar", &[Config(Type::VarCon)]),
+    ("startbit", NUMBER),
+    ("endbit", NUMBER),
+];
+
+const CONTROLLER: &[Field] = &[
+    ("varcon", &[Config(Type::VarCon), Text]),
+    ("varconbit", &[Config(Type::VarConBit), Number]),
+];
+
 const VAROBJ_FIELDS: &[Field] = &[("startbit", NUMBER), ("endbit", NUMBER)];
 
 const VARC: &[Field] = &[("type", TYPE), ("scope", WORD)];
@@ -839,7 +850,10 @@ pub(super) fn keys(kind: &str) -> &'static [Field] {
         "seq" => SEQ_FIELDS,
         "spotanim" => SPOTANIM,
         "struct" => STRUCT,
-        "varbit" => VARBIT_FIELDS,
+        "varpbit" => VARBIT_FIELDS,
+        "varconbit" => VARCONBIT_FIELDS,
+        "varcon" => VARC,
+        "controller" => CONTROLLER,
         "varc" => VARC,
         "varclansetting" => VARCLANSETTING,
         "varobj" => VAROBJ_FIELDS,
@@ -920,7 +934,7 @@ pub(super) fn describe(values: &[Value]) -> String {
         .iter()
         .map(|value| match value {
             Config(ty) => ty.name(),
-            AnyVar => "varp or varbit",
+            AnyVar => "varp or varpbit",
             Number => "int",
             Flag => "boolean",
             Word => "word",

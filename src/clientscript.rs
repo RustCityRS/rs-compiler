@@ -335,7 +335,7 @@ pub fn registry(source_dir: &Path, pack: &Path) -> Result<SymbolRegistry> {
     registry.game_vars.retain(|_, symbol| {
         matches!(
             &symbol.kind, SymbolKind::GameVar { category, .. }
-            if matches!(category.as_str(), "varp" | "varbit")
+            if matches!(category.as_str(), "varp" | "varpbit")
         )
     });
     let engine_path = source_dir.join("engine.cs2");
@@ -375,12 +375,15 @@ pub fn registry(source_dir: &Path, pack: &Path) -> Result<SymbolRegistry> {
     ] {
         registry.register_command(name.to_owned(), 0, Vec::new(), vec![ty]);
     }
-    for (kind, ty) in [("varc", Type::Int), ("varcs", Type::String)] {
+    for (kind, ty) in [("varc", Type::Int), ("varcstr", Type::String)] {
         let path = pack.join(format!("{kind}.pack"));
         if !path.exists() {
             continue;
         }
         for line in fs::read_to_string(path)?.lines() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
             if let Some((id, name)) = line.split_once('=') {
                 registry.register_game_var(
                     name.to_owned(),
@@ -394,12 +397,7 @@ pub fn registry(source_dir: &Path, pack: &Path) -> Result<SymbolRegistry> {
     {
         let mut files = crate::sources::config_files(source_dir);
         files.retain(|path| path.extension().is_some_and(|ext| ext == "param"));
-        files.sort_by_key(|path| {
-            (
-                !path.components().any(|part| part.as_os_str() == "_unpack"),
-                path.clone(),
-            )
-        });
+        files.sort();
         for file in files {
             let text = fs::read_to_string(file)?;
             let mut id = None;
@@ -662,9 +660,9 @@ fn register_expr_variables(expr: &Expr, registry: &mut SymbolRegistry) {
         Expr::GameVar(name, _) if registry.lookup_game_var(name).is_none() => {
             for (kind, ty) in [
                 ("varp", Type::Int),
-                ("varbit", Type::Int),
+                ("varpbit", Type::Int),
                 ("varc", Type::Int),
-                ("varcs", Type::String),
+                ("varcstr", Type::String),
             ] {
                 if let Some(id) = name
                     .strip_prefix(&format!("{}_", hooks::var_placeholder(kind)))

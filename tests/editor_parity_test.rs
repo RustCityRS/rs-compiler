@@ -427,7 +427,7 @@ const CONFIG_TABLES: &[(&str, Type)] = &[
     ("varclan", Type::VarClan),
     ("varclansetting", Type::VarClanSetting),
     ("varcon", Type::VarCon),
-    ("config44", Type::Config44),
+    ("varconbit", Type::VarConBit),
     ("varnbit", Type::VarNBit),
     ("varobj", Type::VarObj),
 ];
@@ -699,7 +699,7 @@ fn load_packs_reads_every_config_table() {
 fn var_tables_resolve_through_their_game_vars() {
     let mut registry = SymbolRegistry::new();
     registry.register_game_var("varc_1".into(), Type::Int, 1, "varc".into());
-    registry.register_game_var("varc_2".into(), Type::String, 2, "varcs".into());
+    registry.register_game_var("varc_2".into(), Type::String, 2, "varcstr".into());
     registry.register_game_var("clan_3".into(), Type::Int, 3, "clansetting_int".into());
     assert_eq!(registry.lookup_reference("varc_1", Type::Varc), Some(1));
     assert_eq!(registry.lookup_reference("varc_2", Type::Varc), Some(2));

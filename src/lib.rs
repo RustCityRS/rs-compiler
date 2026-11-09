@@ -30,8 +30,8 @@ pub mod filesystem;
 
 pub(crate) use filesystem::find_testscript_line;
 pub use filesystem::{
-    SourceProvider, compile, compile_memory, compile_memory_with_options,
-    compile_memory_with_tests, compile_with_options, lint,
+    ScriptIds, SourceProvider, compile, compile_memory, compile_memory_with_ids,
+    compile_memory_with_options, compile_memory_with_tests, compile_with_options, lint,
 };
 
 mod parallel;

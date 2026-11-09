@@ -15,7 +15,7 @@ use crate::symbol::SymbolRegistry;
 use crate::typechecker::TypeChecker;
 use crate::writer::ScriptWriter;
 use crate::{diagnostics, error, lints, sources, symloader, trigger_table, types};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fmt::Write;
 use std::fs;
@@ -24,6 +24,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use tracing::{info, warn};
+
+pub type ScriptIds = BTreeMap<String, i32>;
 
 /// Build an editor project using the legacy directory conventions. No ID file
 /// is generated or modified; all further editing happens in memory.
@@ -58,9 +60,6 @@ pub fn editor_project(
             &pack.as_ref().unwrap().join("cs2_command.pack"),
         )?)
     } else {
-        if let Some(pack) = &pack {
-            symloader::load_script_ids(&mut registry, pack);
-        }
         Target::Rune
     };
     let mut project = Project::new(
@@ -598,12 +597,40 @@ pub fn compile_memory_with_options(
     include_tests: bool,
     low_mem: bool,
 ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
+    compile_memory_inner(
+        scripts_dir,
+        pack_dir,
+        lint,
+        include_tests,
+        low_mem,
+        &mut ScriptIds::new(),
+    )
+}
+
+/// Reuses a world's script IDs across reloads, reserving removed scripts' IDs.
+pub fn compile_memory_with_ids(
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+    ids: &mut ScriptIds,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
+    compile_memory_inner(scripts_dir, pack_dir, false, false, false, ids)
+}
+
+fn compile_memory_inner(
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+    lint: bool,
+    include_tests: bool,
+    low_mem: bool,
+    ids: &mut ScriptIds,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
     if low_mem || std::env::var("RUNEC_RECOMPILE").is_ok_and(|v| !v.is_empty()) {
         info!("[recompile] low-memory recompile pipeline enabled");
-        return compile_recompile_memory(scripts_dir, pack_dir, lint, include_tests);
+        return compile_recompile_memory(scripts_dir, pack_dir, lint, include_tests, ids);
     }
 
-    let (compiled_scripts, diagnostics) = run_pipeline(scripts_dir, pack_dir, lint, include_tests)?;
+    let (compiled_scripts, diagnostics) =
+        run_pipeline(scripts_dir, pack_dir, lint, include_tests, ids)?;
 
     info!("Writing compiled output to memory...");
     let writer = ScriptWriter::new("".into());
@@ -651,7 +678,8 @@ pub fn compile_with_options(
         return compile_recompile(scripts_dir, pack_dir, output_dir, lint);
     }
 
-    let (compiled_scripts, diagnostics) = run_pipeline(scripts_dir, pack_dir, lint, false)?;
+    let (compiled_scripts, diagnostics) =
+        run_pipeline(scripts_dir, pack_dir, lint, false, &mut ScriptIds::new())?;
 
     let output = output_dir.display().to_string();
     // Normalize separators for a clean, consistent log message (input paths may
@@ -669,7 +697,7 @@ pub fn compile_with_options(
 /// Run all analysis passes (parse, type-check, codegen, pointer-check, lints)
 /// without writing output. Useful for editor tooling and CI lint gates.
 pub fn lint(scripts_dir: &Path, pack_dir: Option<&Path>) -> Result<(), Box<dyn Error>> {
-    let (_, diagnostics) = run_pipeline(scripts_dir, pack_dir, true, false)?;
+    let (_, diagnostics) = run_pipeline(scripts_dir, pack_dir, true, false, &mut ScriptIds::new())?;
 
     diagnostics.print_all();
     info!("Compilation complete!");
@@ -685,6 +713,7 @@ fn run_pipeline(
     pack_dir: Option<&Path>,
     lint: bool,
     include_tests: bool,
+    ids: &mut ScriptIds,
 ) -> Result<(Vec<CompiledScript>, DiagnosticsCollector), Box<dyn Error>> {
     let source_dir = sources::target_dir(scripts_dir, sources::Scope::Rune);
     let scripts_dir = source_dir.as_path();
@@ -698,7 +727,7 @@ fn run_pipeline(
     // with RUNEC_STREAM=1. The default batch path below is unchanged.
     if std::env::var("RUNEC_STREAM").is_ok_and(|v| !v.is_empty()) {
         info!("[stream] streaming pipeline enabled (RUNEC_STREAM)");
-        return run_pipeline_streaming(scripts_dir, pack_dir, lint, include_tests);
+        return run_pipeline_streaming(scripts_dir, pack_dir, lint, include_tests, ids);
     }
 
     let mut rs2_files: Vec<PathBuf> = get_rs2_files(scripts_dir, "rs2")?;
@@ -717,9 +746,6 @@ fn run_pipeline(
 
     let mut all_files: Vec<ParsedFile> = Vec::new();
     let mut source_cache: HashMap<String, Arc<String>> = HashMap::new();
-    // Raw source text keyed by on-disk path, reused by `generate_script_pack`
-    // so it doesn't re-read every file from disk a second time.
-    let mut raw_by_path: HashMap<PathBuf, Arc<String>> = HashMap::new();
     for result in parse_results {
         let parsed = match result.read {
             Ok(p) => p,
@@ -732,7 +758,6 @@ fn run_pipeline(
         // compiled script's `source_path` so codegen needn't canonicalize again.
         let source_path = parsed.cache_key.clone();
         source_cache.insert(parsed.cache_key, rc.clone());
-        raw_by_path.insert(result.path.clone(), rc);
         match parsed.outcome {
             ParseOutcome::Parsed {
                 file,
@@ -761,24 +786,12 @@ fn run_pipeline(
 
     mem_mark("after parse");
 
-    // Phase 2: Register all scripts. Build the pack/config registry, then
-    // regenerate script.pack, load pre-assigned IDs, and register every script.
+    // Phase 2: assign IDs and register every parsed script.
     info!("Registering scripts and building the symbol registry...");
     let resolved_pack_dir = resolve_pack_dir(scripts_dir, pack_dir);
     let mut registry = build_symbol_registry(scripts_dir, resolved_pack_dir.as_deref());
-    register_scripts(
-        &mut registry,
-        scripts_dir,
-        resolved_pack_dir.as_deref(),
-        &mut diagnostics,
-        &all_files,
-        &raw_by_path,
-    );
+    register_scripts(&mut registry, ids, &mut diagnostics, &all_files);
     info!("  Registered {} scripts", registry.scripts.len());
-    // `raw_by_path` was only needed to (re)generate script.pack inside
-    // `register_scripts`; the source text itself stays reachable via
-    // `source_cache` (shared `Arc`s). Drop the redundant index now.
-    drop(raw_by_path);
     // Pre-assigned script ids were consumed during registration; free them
     // before codegen (the compile's peak-memory phase) rather than at scope end.
     registry.drop_registration_scratch();
@@ -893,8 +906,7 @@ enum SigOutcome {
 
 struct FileSigsResult {
     path: PathBuf,
-    /// `(cache_key, raw_source, outcome)` on success.
-    read: Result<(String, String, SigOutcome), std::io::Error>,
+    read: Result<(String, SigOutcome), std::io::Error>,
 }
 
 /// Parse one file, extract signatures, and DROP the AST in-worker, so a parallel
@@ -936,7 +948,7 @@ fn parse_one_file_sigs(path: &Path, include_tests: bool) -> FileSigsResult {
                 phase,
             },
         };
-        (ps.cache_key, ps.raw_source, outcome)
+        (ps.cache_key, outcome)
     });
     FileSigsResult { path: r.path, read }
 }
@@ -946,6 +958,7 @@ fn run_pipeline_streaming(
     pack_dir: Option<&Path>,
     lint: bool,
     include_tests: bool,
+    ids: &mut ScriptIds,
 ) -> Result<(Vec<CompiledScript>, DiagnosticsCollector), Box<dyn Error>> {
     let mut rs2_files: Vec<PathBuf> = get_rs2_files(scripts_dir, "rs2")?;
     rs2_files.sort();
@@ -960,18 +973,15 @@ fn run_pipeline_streaming(
 
     // Streaming keeps only `cache_key -> on-disk path`; source text is re-read
     // lazily for the rare diagnostic that needs it, so the ~4 MB of sources isn't
-    // resident through the peak. `raw_by_path` still holds the text transiently
-    // for `script.pack` regeneration, then is dropped right after registration.
+    // resident through the peak.
     let mut source_paths: HashMap<String, PathBuf> = HashMap::new();
-    let mut raw_by_path: HashMap<PathBuf, Arc<String>> = HashMap::new();
     let mut file_sigs: Vec<FileSigs> = Vec::new();
     for r in sig_results {
-        let (cache_key, raw_source, outcome) = match r.read {
+        let (cache_key, outcome) = match r.read {
             Ok(t) => t,
             Err(e) => return Err(Box::new(e)),
         };
         source_paths.insert(cache_key, r.path.clone());
-        raw_by_path.insert(r.path.clone(), Arc::new(raw_source));
         match outcome {
             SigOutcome::Parsed {
                 sigs,
@@ -1002,16 +1012,8 @@ fn run_pipeline_streaming(
     info!("[stream] Registering scripts and building the symbol registry...");
     let resolved_pack_dir = resolve_pack_dir(scripts_dir, pack_dir);
     let mut registry = build_symbol_registry(scripts_dir, resolved_pack_dir.as_deref());
-    register_scripts_from_sigs(
-        &mut registry,
-        scripts_dir,
-        resolved_pack_dir.as_deref(),
-        &mut diagnostics,
-        &file_sigs,
-        &raw_by_path,
-    );
+    register_scripts_from_sigs(&mut registry, ids, &mut diagnostics, &file_sigs);
     info!("  Registered {} scripts", registry.scripts.len());
-    drop(raw_by_path);
     registry.drop_registration_scratch();
 
     for fs in &file_sigs {
@@ -1108,20 +1110,44 @@ fn run_pipeline_streaming(
     Ok((compiled_scripts, diagnostics))
 }
 
+fn assign_script_ids<'a>(
+    registry: &mut SymbolRegistry,
+    ids: &mut ScriptIds,
+    scripts: impl Iterator<Item = (&'a str, &'a str)>,
+) {
+    let mut next = ids.values().max().map_or(0, |id| id + 1);
+    let mut scripts: Vec<_> = scripts
+        .filter(|(trigger, _)| *trigger != "command")
+        .collect();
+    scripts.sort_unstable();
+    scripts.dedup();
+    for (trigger, name) in scripts {
+        let id = *ids.entry(format!("{trigger}:{name}")).or_insert_with(|| {
+            let id = next;
+            next += 1;
+            id
+        });
+        registry.set_script_id(trigger, name, id);
+    }
+}
+
 /// `register_scripts` for the streaming path: identical logic, driven by the
 /// extracted signatures instead of the (already-dropped) ASTs.
 fn register_scripts_from_sigs(
     registry: &mut SymbolRegistry,
-    scripts_dir: &Path,
-    resolved_pack_dir: Option<&Path>,
+    ids: &mut ScriptIds,
     diagnostics: &mut DiagnosticsCollector,
     file_sigs: &[FileSigs],
-    raw_by_path: &HashMap<PathBuf, Arc<String>>,
 ) {
-    if let Some(pd) = resolved_pack_dir {
-        symloader::generate_script_pack(scripts_dir, pd, raw_by_path);
-        symloader::load_script_ids(registry, pd);
-    }
+    assign_script_ids(
+        registry,
+        ids,
+        file_sigs.iter().flat_map(|file| {
+            file.sigs
+                .iter()
+                .map(|sig| (sig.trigger.as_str(), sig.name.as_str()))
+        }),
+    );
 
     use crate::diagnostic_messages as msg;
     let mut registered_scripts: std::collections::HashSet<String> =
@@ -1324,11 +1350,7 @@ fn resolve_pack_dir(scripts_dir: &Path, pack_dir: Option<&Path>) -> Option<PathB
         })
 }
 
-/// Build the part of the registry that does NOT depend on the parsed scripts:
-/// pack files, `.constant`/`.var`/`.dbtable` configs, and engine command params.
-/// This runs concurrently with parsing; `script.pack` (re)generation and script
-/// registration — which need the parsed sources/ASTs — happen afterwards in
-/// `register_scripts`.
+/// Build the source-independent registry before registering parsed scripts.
 fn build_symbol_registry(scripts_dir: &Path, resolved_pack_dir: Option<&Path>) -> SymbolRegistry {
     // Visibility reads every source and config, and only its indexing needs
     // the registry built meanwhile.
@@ -1407,9 +1429,6 @@ fn build_symbol_registry(scripts_dir: &Path, resolved_pack_dir: Option<&Path>) -
         scripts_dir.join("clientscript")
     };
     if client_dir.is_dir() {
-        if let Some(pack) = resolved_pack_dir {
-            symloader::load_clientscript_pack(&mut registry, &pack.join("clientscript.pack"));
-        }
         symloader::load_clientscript_signatures(&mut registry, &client_dir);
     }
 
@@ -1424,22 +1443,23 @@ fn build_symbol_registry(scripts_dir: &Path, resolved_pack_dir: Option<&Path>) -
     registry
 }
 
-/// Finalize the registry once parsing is done: regenerate `script.pack` from the
-/// parsed sources, load pre-assigned script IDs, then register every parsed
-/// script (emitting trigger/redeclaration/return diagnostics). Builds on the
-/// registry produced concurrently by `build_symbol_registry`.
+/// Assign IDs and register the parsed scripts, reporting declaration errors.
 fn register_scripts(
     registry: &mut SymbolRegistry,
-    scripts_dir: &Path,
-    resolved_pack_dir: Option<&Path>,
+    ids: &mut ScriptIds,
     diagnostics: &mut DiagnosticsCollector,
     all_files: &[ParsedFile],
-    raw_by_path: &HashMap<PathBuf, Arc<String>>,
 ) {
-    if let Some(pd) = resolved_pack_dir {
-        symloader::generate_script_pack(scripts_dir, pd, raw_by_path);
-        symloader::load_script_ids(registry, pd);
-    }
+    assign_script_ids(
+        registry,
+        ids,
+        all_files.iter().flat_map(|file| {
+            file.file
+                .scripts
+                .iter()
+                .map(|script| (script.trigger.as_str(), script.name.as_str()))
+        }),
+    );
 
     {
         use crate::diagnostic_messages as msg;
@@ -1594,6 +1614,7 @@ fn recompile_to_encoded(
     pack_dir: Option<&Path>,
     lint: bool,
     include_tests: bool,
+    ids: &mut ScriptIds,
 ) -> Result<RecompiledOutput, Box<dyn Error>> {
     let source_dir = sources::target_dir(scripts_dir, sources::Scope::Rune);
     let scripts_dir = source_dir.as_path();
@@ -1605,20 +1626,17 @@ fn recompile_to_encoded(
     mem_mark("startup");
     let mut diagnostics = DiagnosticsCollector::new();
 
-    // Pass 1: signatures only (ASTs dropped in-worker); keep file paths for lazy
-    // source + raw text for script.pack regeneration.
+    // Pass 1: signatures only (ASTs dropped in-worker); keep paths for lazy source reads.
     info!("[recompile] Pass 1: parsing for signatures...");
     let sig_results = parallel_map(&rs2_files, |path| parse_one_file_sigs(path, include_tests));
     let mut source_paths: HashMap<String, PathBuf> = HashMap::new();
-    let mut raw_by_path: HashMap<PathBuf, Arc<String>> = HashMap::new();
     let mut file_sigs: Vec<FileSigs> = Vec::new();
     for r in sig_results {
-        let (cache_key, raw_source, outcome) = match r.read {
+        let (cache_key, outcome) = match r.read {
             Ok(t) => t,
             Err(e) => return Err(Box::new(e)),
         };
         source_paths.insert(cache_key, r.path.clone());
-        raw_by_path.insert(r.path.clone(), Arc::new(raw_source));
         match outcome {
             SigOutcome::Parsed {
                 sigs,
@@ -1648,16 +1666,8 @@ fn recompile_to_encoded(
     info!("[recompile] Registering scripts and building the symbol registry...");
     let resolved_pack_dir = resolve_pack_dir(scripts_dir, pack_dir);
     let mut registry = build_symbol_registry(scripts_dir, resolved_pack_dir.as_deref());
-    register_scripts_from_sigs(
-        &mut registry,
-        scripts_dir,
-        resolved_pack_dir.as_deref(),
-        &mut diagnostics,
-        &file_sigs,
-        &raw_by_path,
-    );
+    register_scripts_from_sigs(&mut registry, ids, &mut diagnostics, &file_sigs);
     info!("  Registered {} scripts", registry.scripts.len());
-    drop(raw_by_path);
     registry.drop_registration_scratch();
     for fs in &file_sigs {
         for sig in &fs.sigs {
@@ -1847,7 +1857,8 @@ fn compile_recompile(
     output_dir: &Path,
     lint: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let (encoded, diagnostics) = recompile_to_encoded(scripts_dir, pack_dir, lint, false)?;
+    let (encoded, diagnostics) =
+        recompile_to_encoded(scripts_dir, pack_dir, lint, false, &mut ScriptIds::new())?;
     info!(
         "Writing output to {}...",
         output_dir.display().to_string().replace('\\', "/")
@@ -1866,8 +1877,10 @@ fn compile_recompile_memory(
     pack_dir: Option<&Path>,
     lint: bool,
     include_tests: bool,
+    ids: &mut ScriptIds,
 ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
-    let (encoded, diagnostics) = recompile_to_encoded(scripts_dir, pack_dir, lint, include_tests)?;
+    let (encoded, diagnostics) =
+        recompile_to_encoded(scripts_dir, pack_dir, lint, include_tests, ids)?;
     info!("Writing compiled output to memory...");
     let out = ScriptWriter::new("".into()).build_encoded(&encoded);
     diagnostics.print_all();

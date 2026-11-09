@@ -6,8 +6,6 @@
 use std::fs;
 use std::path::Path;
 
-use tracing::{info, warn};
-
 use crate::clientscript::{self, hooks};
 use crate::parallel::parallel_map;
 use crate::symbol::{SymbolKind, SymbolRegistry, identifier_form, normalize_comp_name};
@@ -130,148 +128,6 @@ pub fn patch_command_return_types(registry: &mut SymbolRegistry) {
     }
 }
 
-/// Load script.pack: `id=[trigger,name]` — pre-assigns script IDs so the
-/// Rust compiler uses the same IDs as the Java compiler.
-fn load_script_pack(registry: &mut SymbolRegistry, path: &Path) {
-    let text = match fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => return,
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let (id_str, rest) = match line.split_once('=') {
-            Some(pair) => pair,
-            None => continue,
-        };
-        let id: i32 = match id_str.parse() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let rest = rest.trim();
-        // Expected format: [trigger,name]
-        if !rest.starts_with('[') || !rest.ends_with(']') {
-            continue;
-        }
-        let inner = &rest[1..rest.len() - 1];
-        let comma = match inner.find(',') {
-            Some(i) => i,
-            None => continue,
-        };
-        let trigger = inner[..comma].trim();
-        let name = inner[comma + 1..].trim();
-        if trigger.is_empty() || name.is_empty() {
-            continue;
-        }
-        let key = format!("{}:{}", trigger, name);
-        registry.preloaded_script_ids.insert(key, id);
-        registry.next_script_id = registry.next_script_id.max(id + 1);
-    }
-}
-
-/// Generate/update script.pack from .rs2 files, matching 2004scape's regenScriptPack().
-/// Scans all `[trigger,name]` declarations, preserves existing IDs, assigns new ones.
-pub fn generate_script_pack(
-    scripts_dir: &Path,
-    pack_dir: &Path,
-    sources: &std::collections::HashMap<std::path::PathBuf, std::sync::Arc<String>>,
-) {
-    use std::collections::BTreeMap;
-
-    let pack_path = pack_dir.join("script.pack");
-
-    // Load existing entries
-    let mut id_to_name: BTreeMap<i32, String> = BTreeMap::new();
-    let mut name_to_id: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
-    let mut max_id: i32 = 0;
-
-    if let Ok(text) = fs::read_to_string(&pack_path) {
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Some((id_str, name)) = line.split_once('=')
-                && let Ok(id) = id_str.parse::<i32>()
-            {
-                let name = name.trim().to_string();
-                name_to_id.insert(name.clone(), id);
-                id_to_name.insert(id, name);
-                if id >= max_id {
-                    max_id = id + 1;
-                }
-            }
-        }
-    }
-
-    // Scan .rs2 files for [trigger,name] declarations
-    let rs2_files = crate::sources::script_files(scripts_dir, "rs2").unwrap_or_default();
-
-    for path in &rs2_files {
-        // Skip engine.rs2 (command signatures, not compiled scripts)
-        if path.file_name().and_then(|n| n.to_str()) == Some("engine.rs2") {
-            continue;
-        }
-        // Reuse the source already read during parsing; only touch disk for a
-        // file somehow absent from the cache. Same bytes either way, so the
-        // scanned declarations (and resulting script IDs) are unchanged.
-        let fallback;
-        let text: &str = if let Some(rc) = sources.get(path) {
-            rc
-        } else {
-            fallback = match fs::read_to_string(path) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            &fallback
-        };
-        for line in text.lines() {
-            let line = line.split("//").next().unwrap_or("").trim();
-            if !line.starts_with('[') {
-                continue;
-            }
-            let bracket_end = match line.find(']') {
-                Some(i) => i,
-                None => continue,
-            };
-            let full_name = &line[..bracket_end + 1]; // e.g. "[proc,foo]"
-            let inner = &line[1..bracket_end];
-            let comma = match inner.find(',') {
-                Some(i) => i,
-                None => continue,
-            };
-            let trigger = &inner[..comma];
-            // Skip command declarations
-            if trigger == "command" {
-                continue;
-            }
-
-            if !name_to_id.contains_key(full_name) {
-                name_to_id.insert(full_name.to_string(), max_id);
-                id_to_name.insert(max_id, full_name.to_string());
-                max_id += 1;
-            }
-        }
-    }
-
-    // Save
-    if let Err(e) = std::fs::create_dir_all(pack_dir) {
-        warn!(target: "runec", "Failed to create pack dir: {}", e);
-        return;
-    }
-    let mut out = String::new();
-    for (id, name) in &id_to_name {
-        out.push_str(&format!("{}={}\n", id, name));
-    }
-    if let Err(e) = fs::write(&pack_path, &out) {
-        warn!(target: "runec", "Failed to write script.pack: {}", e);
-    } else {
-        info!(target: "runec", "script.pack: {} entries", id_to_name.len());
-    }
-}
-
 /// Load all .pack files from `pack_dir` into `registry`.
 ///
 /// Pack files use 2004scape format: `id=name` (one per line).
@@ -286,17 +142,19 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) {
     register_engine_constants(registry);
 
     load_commands(registry, &pack_dir.join("command.pack"));
+    load_clientscript_pack(registry, &pack_dir.join("clientscript.pack"));
 
     load_game_vars(registry, &pack_dir.join("varp.pack"), "varp");
     load_game_vars(registry, &pack_dir.join("varn.pack"), "varn");
     load_game_vars(registry, &pack_dir.join("vars.pack"), "vars");
-    load_game_vars(registry, &pack_dir.join("varbit.pack"), "varbit");
+    load_game_vars(registry, &pack_dir.join("varpbit.pack"), "varpbit");
     load_game_vars(registry, &pack_dir.join("varc.pack"), "varc");
-    load_game_vars(registry, &pack_dir.join("varcs.pack"), "varcs");
+    load_game_vars(registry, &pack_dir.join("varcstr.pack"), "varcstr");
     load_game_vars(registry, &pack_dir.join("varclan.pack"), "varclan");
     load_game_vars(registry, &pack_dir.join("varobj.pack"), "varobj");
     load_game_vars(registry, &pack_dir.join("varnbit.pack"), "varnbit");
     load_game_vars(registry, &pack_dir.join("varcon.pack"), "varcon");
+    load_game_vars(registry, &pack_dir.join("varconbit.pack"), "varconbit");
 
     // Load entity IDs.
     // Load in ascending priority order: later entries overwrite earlier ones
@@ -331,7 +189,7 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) {
         ("quest.pack", Type::Quest),
         ("varclan.pack", Type::VarClan),
         ("varcon.pack", Type::VarCon),
-        ("config44.pack", Type::Config44),
+        ("varconbit.pack", Type::VarConBit),
         ("varnbit.pack", Type::VarNBit),
         ("varobj.pack", Type::VarObj),
         ("category.pack", Type::Category),
@@ -385,20 +243,6 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) {
 
     // Register type-name identifiers so they resolve to their CS2 type chars.
     register_type_chars(registry);
-}
-
-/// Load the script-id packs. Split out of `load_packs` because `script.pack` is
-/// (re)generated from the parsed sources by `generate_script_pack`, so these
-/// must run after parsing — whereas the rest of `load_packs` is parse-independent
-/// and can run concurrently with it.
-pub fn load_script_ids(registry: &mut SymbolRegistry, pack_dir: &Path) {
-    // Pre-assigned script IDs, available before script registration.
-    load_script_pack(registry, &pack_dir.join("script.pack"));
-
-    // Load clientscript.pack: CS2 scripts the server references by name via
-    // runclientscript(). They are never compiled as RS2, so register them
-    // directly into the resolution maps. Safe no-op if file doesn't exist.
-    load_clientscript_pack(registry, &pack_dir.join("clientscript.pack"));
 }
 
 /// Load clientscript.pack: `id=[clientscript,name]` — registers CS2 script IDs
@@ -805,7 +649,7 @@ impl Comments {
 pub fn load_game_var_types(registry: &mut SymbolRegistry, files: &[std::path::PathBuf]) {
     // Track the next auto-assigned ID per category for vars only found in config files.
     let mut next_auto_id: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
-    for ext in &["varp", "varn", "vars", "varbit"] {
+    for ext in &["varp", "varn", "vars", "varpbit"] {
         // Compute the next available ID (one past the highest existing).
         let max_id = registry
             .game_vars
@@ -830,7 +674,16 @@ pub fn load_game_var_types(registry: &mut SymbolRegistry, files: &[std::path::Pa
     }
 
     for ext in &[
-        "varp", "varn", "vars", "varbit", "varc", "varclan", "varobj", "varnbit", "varcon",
+        "varp",
+        "varn",
+        "vars",
+        "varpbit",
+        "varc",
+        "varclan",
+        "varobj",
+        "varnbit",
+        "varcon",
+        "varconbit",
     ] {
         let ext_files = files
             .iter()
@@ -848,7 +701,7 @@ pub fn load_game_var_types(registry: &mut SymbolRegistry, files: &[std::path::Pa
                 if let Some(inner) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
                     let name = inner.trim().to_string();
                     // Register the var if it doesn't exist yet (config-only var)
-                    if matches!(*ext, "varp" | "varn" | "vars" | "varbit")
+                    if matches!(*ext, "varp" | "varn" | "vars" | "varpbit")
                         && !registry.game_vars.contains_key(&name)
                     {
                         let id = next_auto_id.get_mut(*ext).unwrap();
@@ -1443,21 +1296,6 @@ mod tests {
         let mut f = fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path
-    }
-
-    #[test]
-    fn script_pack_spaced_header_keeps_its_id() {
-        let pack = write_temp_pack(
-            "script_spaced.pack",
-            "0=[label,make_ogre_shafts]\n754=[label, please_finish]\n",
-        );
-        let mut r = SymbolRegistry::new();
-        load_script_pack(&mut r, &pack);
-
-        let id = r.register_script("please_finish".into(), "label".into(), vec![], vec![]);
-        assert_eq!(id, 754);
-        let id = r.register_script("unpinned".into(), "label".into(), vec![], vec![]);
-        assert_eq!(id, 755);
     }
 
     // ── 647-style pack ─────────────────────────────────────────────────

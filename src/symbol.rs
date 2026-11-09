@@ -147,7 +147,7 @@ pub enum SymbolKind {
     GameVar {
         var_type: Type,
         var_id: i32,
-        /// Which game var type: "varp", "varn", "vars", "varbit"
+        /// Which game var type: "varp", "varn", "vars", "varpbit"
         category: String,
     },
     /// A constant value.
@@ -501,8 +501,7 @@ pub struct SymbolRegistry {
     /// all trigger variants so `[proc,fib]` isn't overwritten by `[debugproc,fib]`.
     /// Shares each `Symbol` (`Arc`) with `scripts`.
     pub(crate) scripts_by_trigger: HashMap<String, Arc<Symbol>>,
-    /// Pre-assigned script IDs loaded from script.pack: "trigger:name" → ID.
-    /// When present, overrides sequential assignment so IDs match the Java compiler.
+    /// Script IDs supplied by the caller: "trigger:name" → ID.
     pub(crate) preloaded_script_ids: HashMap<String, i32>,
     /// DB column field types: "table:column" → each field's Type. db_find takes
     /// the first field's BaseVarType; db_getfield returns them all.
@@ -557,6 +556,7 @@ impl SymbolRegistry {
     pub fn set_script_id(&mut self, trigger: &str, name: &str, id: i32) {
         self.preloaded_script_ids
             .insert(format!("{trigger}:{name}"), id);
+        self.next_script_id = self.next_script_id.max(id + 1);
     }
 
     /// Stack argument order is shared by client scripts and their global procs.
@@ -839,12 +839,14 @@ impl SymbolRegistry {
             | Type::Vars
             | Type::Varbit
             | Type::Varc
+            | Type::VarCon
+            | Type::VarConBit
             | Type::VarClanSetting => self.lookup_game_var(name).and_then(|symbol| {
                 if let SymbolKind::GameVar {
                     var_id, category, ..
                 } = &symbol.kind
                     && match expected {
-                        Type::Varc => matches!(category.as_str(), "varc" | "varcs"),
+                        Type::Varc => matches!(category.as_str(), "varc" | "varcstr"),
                         Type::VarClanSetting => category.starts_with("clansetting_"),
                         _ => category == expected.name(),
                     }
@@ -914,7 +916,7 @@ impl SymbolRegistry {
     }
 
     /// Free registration-only scratch once every script is registered. The
-    /// pre-assigned IDs from `script.pack` are consulted only while assigning
+    /// pre-assigned IDs are consulted only while assigning
     /// ids in `register_script`; codegen and pointer-checking never read them.
     /// Replacing (not `clear`-ing) the map returns its buckets to the allocator.
     pub(crate) fn drop_registration_scratch(&mut self) {

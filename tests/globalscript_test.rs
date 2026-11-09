@@ -1,6 +1,8 @@
 use runec::clientscript;
+use runec::error::CompilerError;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Project(PathBuf);
@@ -12,7 +14,7 @@ impl Project {
             .join("globalscript")
             .join(format!(
                 "globalscript-{}-{}",
-                std::process::id(),
+                process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed),
             ));
         let project = Self(root);
@@ -299,4 +301,84 @@ fn compiling_the_scripts_parent_keeps_target_boundaries() {
     assert!(runec::compile_memory(&scripts, Some(&pack), false).is_err());
     assert!(runec::compile_memory_with_options(&scripts, Some(&pack), false, false, true).is_err());
     assert!(clientscript::compile_directory(&scripts, &pack).is_err());
+}
+
+#[test]
+fn private_configs_fail_as_type_errors_with_lint_disabled() {
+    for (folder, ext, entry, forbidden) in [
+        ("runescript", "rs2", "rune_entry", "client"),
+        ("clientscript", "cs2", "client_entry", "rune"),
+        ("globalscript", "gs2", "shared", "rune"),
+        ("globalscript", "gs2", "shared", "client"),
+    ] {
+        let project = Project::new();
+        let path = format!(
+            "scripts/{folder}/{}.{}",
+            if folder == "globalscript" {
+                "shared"
+            } else {
+                "main"
+            },
+            ext
+        );
+        project.write(
+            &path,
+            &format!("[proc,{entry}]()(obj) return({forbidden}_obj);\n"),
+        );
+        let pack = project.0.join("pack");
+        if folder != "clientscript" {
+            let error =
+                runec::compile_memory(&project.0.join("scripts/runescript"), Some(&pack), false)
+                    .unwrap_err();
+            assert!(
+                matches!(
+                    error.downcast_ref::<CompilerError>(),
+                    Some(CompilerError::TypeError(_))
+                ),
+                "{folder}: {error}"
+            );
+        }
+        if folder != "runescript" {
+            let error =
+                clientscript::compile_directory(&project.0.join("scripts/clientscript"), &pack)
+                    .unwrap_err()
+                    .to_string();
+            assert!(
+                error.contains(&format!("obj '{forbidden}_obj' is not visible to {folder}")),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn stat_and_type_names_do_not_resolve_as_private_configs() {
+    let project = Project::new();
+    project.write(
+        "pack/obj.pack",
+        "1=shared_obj\n2=rune_obj\n3=client_obj\n4=smithing\n",
+    );
+    project.write("pack/stat.pack", "13=smithing\n");
+    project.write("pack/param.pack", "0=namedobj\n");
+    project.write("scripts/runescript/collisions.obj", "[smithing]\n");
+    project.write(
+        "scripts/runescript/collisions.param",
+        "[namedobj]\ntype=int\n",
+    );
+    for (ty, value) in [("stat", "smithing"), ("char", "namedobj")] {
+        project.write(
+            "scripts/globalscript/shared.gs2",
+            &format!("[proc,shared]()({ty}) return({value});\n"),
+        );
+        project.write(
+            "scripts/runescript/main.rs2",
+            &format!("[proc,rune_entry]()({ty}) return(~shared);\n"),
+        );
+        project.write(
+            "scripts/clientscript/main.cs2",
+            &format!("[proc,client_entry]()({ty}) return(~shared);\n"),
+        );
+        assert!(project.rune(false), "runescript rejected {ty} {value}");
+        assert!(project.client(), "clientscript rejected {ty} {value}");
+    }
 }

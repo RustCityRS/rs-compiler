@@ -57,7 +57,7 @@ fn semantic_token_legend_modifiers_ranges_and_utf16_match_the_reference_palette(
 
 #[test]
 fn reference_config_extensions_open_with_config_highlighting() {
-    let extensions = "pack order hashes constant anim bas cursor dbrow dbtable enum flo flu hitmark hunt idk inv light loc mel mesanim msi npc obj param quest seq spotanim struct varbit varclansetting varp varn vars if synth midi jingle model stat category fontmetrics overlayinterface locshape config7 config48 varc area billboard controller effector emitter varclan varcon varconbit varnbit varobj itemcode mapped_by_the_editor";
+    let extensions = "pack order hashes constant anim bas cursor dbrow dbtable enum flo flu hitmark hunt idk inv light loc mel mesanim msi npc obj param quest seq spotanim struct varpbit varclansetting varp varn vars if synth midi jingle model stat category fontmetrics overlayinterface locshape config7 config48 varc area billboard controller effector emitter varclan varcon varconbit varnbit varobj itemcode mapped_by_the_editor";
     let mut messages = vec![json!({"id":1,"method":"initialize","params":{}})];
     for (i, extension) in extensions.split_whitespace().enumerate() {
         let uri = format!("file:///game/test.{extension}");
@@ -391,10 +391,10 @@ fn empty_editor_settings_preserve_loaded_game_variables() {
         "bank_tab_1".into(),
         runec::types::Type::Int,
         4885,
-        "varbit".into(),
+        "varpbit".into(),
     );
     let mut visibility = runec::sources::Visibility::new();
-    visibility.declare("varbit", "bank_tab_1", runec::sources::Scope::Global);
+    visibility.declare("varpbit", "bank_tab_1", runec::sources::Scope::Global);
     registry.set_visibility(visibility);
     let project = runec::project::Project::new(
         runec::project::Target::Rune,
