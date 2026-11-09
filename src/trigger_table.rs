@@ -220,6 +220,10 @@ const TRIGGERS: &[TriggerInfo] = &[
     // unused: they were opheld6-10.
     area("area", 178),
     area("areaexit", 179),
+    // A controller's one queue script (Jagex's `[ai_conqueue,<controller>]`,
+    // the int queued with it in last_int) and its timer.
+    controller("ai_conqueue", 180),
+    controller("ai_contimer", 181),
 ];
 
 // ── Constructor helpers ──────────────────────────────────────────────
@@ -283,6 +287,16 @@ const fn component(name: &'static str, byte: u8) -> TriggerInfo {
         subject_type: Some(Type::Component),
         validates_subject: true,
         is_button: true,
+    }
+}
+
+const fn controller(name: &'static str, byte: u8) -> TriggerInfo {
+    TriggerInfo {
+        name,
+        byte,
+        subject_type: Some(Type::Controller),
+        validates_subject: true,
+        is_button: false,
     }
 }
 
@@ -557,6 +571,16 @@ mod tests {
         assert!(is_valid_trigger("if_button10"));
         assert_eq!(byte("if_button6"), Some(173));
         assert_eq!(byte("if_button10"), Some(177));
+    }
+
+    #[test]
+    fn controller_triggers() {
+        // Bytes 180-181 must stay in sync with the engine's ServerTriggerType
+        // AiConQueue/AiConTimer.
+        assert_eq!(byte("ai_conqueue"), Some(180));
+        assert_eq!(byte("ai_contimer"), Some(181));
+        assert_eq!(subject_type("ai_conqueue"), Some(Type::Controller));
+        assert_eq!(subject_type("ai_contimer"), Some(Type::Controller));
     }
 
     #[test]

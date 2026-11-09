@@ -413,6 +413,10 @@ pub fn trigger_pointers(trigger: &str) -> PointerSet {
         // AI walktrigger
         "ai_walktrigger" => &[ActiveNpc],
 
+        // Controller queue (its int in last_int) and timer
+        "ai_conqueue" => &[LastInt],
+        "ai_contimer" => &[],
+
         // Unknown trigger — no pointers initialized
         _ => return PointerSet::new(),
     };
