@@ -481,7 +481,9 @@ impl Visibility {
             | Type::Queue
             | Type::Timer
             | Type::SoftTimer
-            | Type::Walktrigger => self.check(path, ty.name(), name, true),
+            | Type::Walktrigger
+            | Type::ControllerQueue
+            | Type::NpcQueue => self.check(path, ty.name(), name, true),
             Type::ClientScript => self.check(
                 path,
                 if registry

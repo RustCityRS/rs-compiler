@@ -1388,6 +1388,8 @@ impl<'a> Compiler<'a> {
                         Type::SoftTimer => Some("softtimer"),
                         Type::Timer => Some("timer"),
                         Type::Walktrigger => Some("walktrigger"),
+                        Type::ControllerQueue => Some("controller_queue"),
+                        Type::NpcQueue => Some("npc_queue"),
                         _ => None,
                     };
                     if let Some(trigger) = trigger_opt {
@@ -2104,6 +2106,8 @@ impl<'a> Compiler<'a> {
             "softtimer" | "softtimer*" => Some("softtimer"),
             "settimer" | "settimer*" | "cleartimer" => Some("timer"),
             "walktrigger" => Some("walktrigger"),
+            "controller_queue*" => Some("controller_queue"),
+            "npc_queue*" => Some("npc_queue"),
             _ => None,
         }
     }
@@ -2113,7 +2117,9 @@ impl<'a> Compiler<'a> {
     pub(crate) fn command_variadic_info(cmd_name: &str) -> Option<usize> {
         match cmd_name {
             // queue/strongqueue/weakqueue have separate * variants (different opcodes)
-            "queue*" | "strongqueue*" | "weakqueue*" => Some(2),
+            "queue*" | "strongqueue*" | "weakqueue*" | "controller_queue*" | "npc_queue*" => {
+                Some(2)
+            }
             "longqueue*" => Some(3),
             // settimer/softtimer are always variadic (no separate * variant)
             "settimer" | "softtimer" => Some(2),

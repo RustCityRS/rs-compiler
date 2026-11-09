@@ -359,6 +359,8 @@ const NAME_KEYED_TRIGGERS: &[&str] = &[
     "queue",
     "timer",
     "softtimer",
+    "controller_queue",
+    "npc_queue",
 ];
 
 // Rev-647 extensions: valid triggers whose byte discriminants are not

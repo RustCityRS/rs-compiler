@@ -633,6 +633,47 @@ fn named_type_to_int_errors() {
     );
 }
 
+/// The region commands, with `region_uid` typed as a region's uid.
+fn region_registry() -> SymbolRegistry {
+    let mut reg = empty_registry();
+    reg.register_command("region_uid".into(), 5206, vec![], vec![Type::RegionUid]);
+    reg.register_command(
+        "region_findbyuid".into(),
+        5207,
+        vec![Type::RegionUid],
+        vec![Type::Boolean],
+    );
+    reg
+}
+
+#[test]
+fn region_uid_is_its_own_type() {
+    assert_eq!(Type::from_name("region_uid"), Some(Type::RegionUid));
+    assert_eq!(Type::from_def_str("def_region_uid"), Some(Type::RegionUid));
+    let res = check_test_with_registry(
+        "[proc,regions]\n\
+         def_region_uid $uid = region_uid;\n\
+         if (region_findbyuid($uid) = true) {\n\
+         }\n\
+         if (region_findbyuid(-1) = false) {\n\
+         }\n\
+         if (region_uid = $uid) {\n\
+         }\n",
+        region_registry(),
+    );
+    assert_eq!(res.error_count(), 0, "got:\n{}", res.dump());
+    let res = check_test_with_registry(
+        "[proc,regions]\n\
+         def_int $uid = region_uid;\n",
+        region_registry(),
+    );
+    assert!(
+        res.has_error_containing("Type mismatch"),
+        "a region uid should not narrow to int, got:\n{}",
+        res.dump()
+    );
+}
+
 /// Regression lock: the narrowing that errors under `#testscript` must be
 /// *accepted* in a production script (integer-base interchangeability). This is
 /// what keeps 225/647 content compiling — losing it regressed 177 scripts.

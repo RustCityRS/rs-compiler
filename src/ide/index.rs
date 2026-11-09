@@ -878,7 +878,9 @@ impl Index {
                             | Type::Queue
                             | Type::Timer
                             | Type::SoftTimer
-                            | Type::Walktrigger,
+                            | Type::Walktrigger
+                            | Type::ControllerQueue
+                            | Type::NpcQueue,
                         ) => script(expected.unwrap().name()),
                         _ if transmit_kind.is_some() => {
                             let kind = transmit_kind.unwrap();

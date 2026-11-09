@@ -184,6 +184,7 @@ impl<'a> TypeChecker<'a> {
         // Only PROC and LOGOUT have allowReturns=true.
         match trigger {
             "debugproc" | "label" | "queue" | "softtimer" | "timer" | "walktrigger" | "login"
+            | "controller_queue" | "npc_queue"
                 if !script.return_types.is_empty() =>
             {
                 self.error(
@@ -248,7 +249,8 @@ impl<'a> TypeChecker<'a> {
             }
 
             // Proc/label/queue: no spaces, no global-only constraint
-            "proc" | "label" | "queue" | "softtimer" | "timer" => {
+            "proc" | "label" | "queue" | "softtimer" | "timer" | "controller_queue"
+            | "npc_queue" => {
                 if subject.contains(' ') {
                     self.error(
                         script.line,

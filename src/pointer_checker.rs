@@ -1201,6 +1201,15 @@ impl<'a> PointerChecker<'a> {
                     analysis.required[pi].push(node_idx);
                 }
 
+                Opcode::PushVarCon | Opcode::PopVarCon if !self.shared.client => {
+                    let pi = if is_secondary_var_operand(&instr.operand) {
+                        PointerType::ActiveController2.index()
+                    } else {
+                        PointerType::ActiveController.index()
+                    };
+                    analysis.required[pi].push(node_idx);
+                }
+
                 // PushVars/PopVars are global server vars — no pointer requirements
                 _ => {}
             }

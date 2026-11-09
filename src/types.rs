@@ -122,6 +122,9 @@ pub enum Type {
     // Controller type (instanced area manager)
     Controller,
     RegionCoord,
+    /// A region (instance), as `region_uid` gives it and
+    /// `region_findbyuid` takes it.
+    RegionUid,
 
     // Script reference types (for parameters that hold script IDs)
     Proc,
@@ -131,6 +134,8 @@ pub enum Type {
     SoftTimer,
     Timer,
     Walktrigger,
+    ControllerQueue,
+    NpcQueue,
 
     // Meta types (used internally by the compiler)
     Any,
@@ -327,6 +332,7 @@ impl Type {
             "msi" => Some(Type::Msi),
             "quest" => Some(Type::Quest),
             "regioncoord" => Some(Type::RegionCoord),
+            "regionuid" | "region_uid" => Some(Type::RegionUid),
             // Script reference types (used when passing proc/label/queue references as params)
             "label" => Some(Type::Label),
             "proc" => Some(Type::Proc),
@@ -335,6 +341,8 @@ impl Type {
             "queue" => Some(Type::Queue),
             "softtimer" => Some(Type::SoftTimer),
             "timer" => Some(Type::Timer),
+            "controller_queue" => Some(Type::ControllerQueue),
+            "npc_queue" => Some(Type::NpcQueue),
             "walktrigger" => Some(Type::Walktrigger),
             "any" => Some(Type::Any),
             "intparam" | "stringparam" => Some(Type::Param),
@@ -466,12 +474,15 @@ impl Type {
             Type::Msi => "msi",
             Type::Quest => "quest",
             Type::RegionCoord => "regioncoord",
+            Type::RegionUid => "regionuid",
             Type::Proc => "proc",
             Type::ClientScript => "clientscript",
             Type::Label => "label",
             Type::Queue => "queue",
             Type::SoftTimer => "softtimer",
             Type::Timer => "timer",
+            Type::ControllerQueue => "controller_queue",
+            Type::NpcQueue => "npc_queue",
             Type::Walktrigger => "walktrigger",
             Type::Any => "any",
             Type::Error => "error",
@@ -557,6 +568,7 @@ impl Type {
             "def_stringvector",
             "def_writeinvobj",
             "def_controller",
+            "def_regionuid",
             "def_bas",
             "def_billboard",
             "def_effector",

@@ -16,6 +16,8 @@ const SCRIPT_TRIGGERS: &[&str] = &[
     "softtimer",
     "walktrigger",
     "command",
+    "controller_queue",
+    "npc_queue",
 ];
 const SCRIPT_COMMANDS: &[&str] = &[
     "queue",
@@ -27,6 +29,8 @@ const SCRIPT_COMMANDS: &[&str] = &[
     "clearsofttimer",
     "gosub",
     "jump",
+    "controller_queue",
+    "npc_queue",
 ];
 
 pub(super) fn script(document: &Document, index: &Index) -> Vec<SemanticToken> {

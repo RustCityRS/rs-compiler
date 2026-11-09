@@ -32,10 +32,12 @@ pub enum PointerType {
     LastUseslot = 21,
     ActiveComponent = 22,
     ActiveComponent2 = 23,
+    ActiveController = 24,
+    ActiveController2 = 25,
 }
 
 impl PointerType {
-    pub const COUNT: usize = 24;
+    pub const COUNT: usize = 26;
 
     pub const ALL: [PointerType; Self::COUNT] = [
         PointerType::ActivePlayer,
@@ -62,6 +64,8 @@ impl PointerType {
         PointerType::LastUseslot,
         PointerType::ActiveComponent,
         PointerType::ActiveComponent2,
+        PointerType::ActiveController,
+        PointerType::ActiveController2,
     ];
 
     /// The representation string used in diagnostics, matching the TS reference.
@@ -91,6 +95,8 @@ impl PointerType {
             PointerType::LastUseslot => "last_useslot",
             PointerType::ActiveComponent => "active_component",
             PointerType::ActiveComponent2 => ".active_component",
+            PointerType::ActiveController => "active_controller",
+            PointerType::ActiveController2 => ".active_controller",
         }
     }
 
@@ -413,9 +419,14 @@ pub fn trigger_pointers(trigger: &str) -> PointerSet {
         // AI walktrigger
         "ai_walktrigger" => &[ActiveNpc],
 
-        // Controller queue (its int in last_int) and timer
-        "ai_conqueue" => &[LastInt],
-        "ai_contimer" => &[],
+        // A controller is an npc with no body: one queue (its int in last_int)
+        // and a timer.
+        "ai_conqueue" => &[ActiveController, LastInt],
+        "ai_contimer" => &[ActiveController],
+        // `controller_queue*` runs a named one with its own args.
+        "controller_queue" => &[ActiveController],
+        // `npc_queue*` runs a named one with its own args.
+        "npc_queue" => &[ActiveNpc],
 
         // Unknown trigger — no pointers initialized
         _ => return PointerSet::new(),
@@ -511,26 +522,62 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         false,
     );
-    add("readyanim", &[ActivePlayer], &[], &[], &[], &[], &[], false);
-    add("runanim", &[ActivePlayer], &[], &[], &[], &[], &[], false);
-    add("turnanim", &[ActivePlayer], &[], &[], &[], &[], &[], false);
+    add(
+        "readyanim",
+        &[ActivePlayer],
+        &[],
+        &[],
+        &[ActivePlayer2],
+        &[],
+        &[],
+        false,
+    );
+    add(
+        "runanim",
+        &[ActivePlayer],
+        &[],
+        &[],
+        &[ActivePlayer2],
+        &[],
+        &[],
+        false,
+    );
+    add(
+        "turnanim",
+        &[ActivePlayer],
+        &[],
+        &[],
+        &[ActivePlayer2],
+        &[],
+        &[],
+        false,
+    );
     add(
         "walkanim_b",
         &[ActivePlayer],
         &[],
         &[],
-        &[],
+        &[ActivePlayer2],
         &[],
         &[],
         false,
     );
-    add("walkanim", &[ActivePlayer], &[], &[], &[], &[], &[], false);
+    add(
+        "walkanim",
+        &[ActivePlayer],
+        &[],
+        &[],
+        &[ActivePlayer2],
+        &[],
+        &[],
+        false,
+    );
     add(
         "walkanim_l",
         &[ActivePlayer],
         &[],
         &[],
-        &[],
+        &[ActivePlayer2],
         &[],
         &[],
         false,
@@ -540,7 +587,7 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[ActivePlayer],
         &[],
         &[],
-        &[],
+        &[ActivePlayer2],
         &[],
         &[],
         false,
@@ -550,7 +597,7 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[ActivePlayer],
         &[],
         &[],
-        &[],
+        &[ActivePlayer2],
         &[],
         &[],
         false,
@@ -620,7 +667,7 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[ActivePlayer],
         &[],
         &[],
-        &[],
+        &[ActivePlayer2],
         &[],
         &[],
         false,
@@ -740,7 +787,7 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[ActivePlayer],
         &[],
         &[],
-        &[],
+        &[ActivePlayer2],
         &[],
         &[],
         false,
@@ -750,7 +797,7 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[ActivePlayer],
         &[],
         &[],
-        &[],
+        &[ActivePlayer2],
         &[],
         &[],
         false,
@@ -760,7 +807,7 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[ActivePlayer],
         &[],
         &[],
-        &[],
+        &[ActivePlayer2],
         &[],
         &[],
         false,
@@ -790,12 +837,21 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[ActivePlayer, ActivePlayer2],
         &[],
         &[],
-        &[],
+        &[ActivePlayer2, ActivePlayer],
         &[],
         &[],
         false,
     );
-    add("hint_stop", &[ActivePlayer], &[], &[], &[], &[], &[], false);
+    add(
+        "hint_stop",
+        &[ActivePlayer],
+        &[],
+        &[],
+        &[ActivePlayer2],
+        &[],
+        &[],
+        false,
+    );
     add("huntall", &[], &[FindPlayer], &[], &[], &[], &[], false);
     add(
         "huntnext",
@@ -844,7 +900,7 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[ActivePlayer],
         &[],
         &[],
-        &[],
+        &[ActivePlayer2],
         &[],
         &[],
         false,
@@ -909,7 +965,7 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[ActivePlayer],
         &[],
         &[],
-        &[],
+        &[ActivePlayer2],
         &[],
         &[],
         false,
@@ -959,7 +1015,7 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[ActivePlayer],
         &[],
         &[],
-        &[],
+        &[ActivePlayer2],
         &[],
         &[],
         false,
@@ -979,7 +1035,7 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[ActivePlayer],
         &[],
         &[],
-        &[],
+        &[ActivePlayer2],
         &[],
         &[],
         false,
@@ -994,7 +1050,16 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         false,
     );
-    add("if_settab", &[ActivePlayer], &[], &[], &[], &[], &[], false);
+    add(
+        "if_settab",
+        &[ActivePlayer],
+        &[],
+        &[],
+        &[ActivePlayer2],
+        &[],
+        &[],
+        false,
+    );
     add(
         "if_settabactive",
         &[ActivePlayer],
@@ -1096,7 +1161,7 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[ActivePlayer],
         &[],
         &[],
-        &[],
+        &[ActivePlayer2],
         &[],
         &[],
         false,
@@ -1162,9 +1227,9 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[PActivePlayer],
         &[],
         &delay_corrupt,
+        &[PActivePlayer2],
         &[],
-        &[],
-        &[],
+        &delay_corrupt,
         false,
     );
     add(
@@ -1291,9 +1356,9 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
             &[PActivePlayer],
             &[LastCom],
             &corrupt,
-            &[],
-            &[],
-            &[],
+            &[PActivePlayer2],
+            &[LastCom],
+            &corrupt,
             false,
         );
     }
@@ -1570,11 +1635,11 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
     );
     add(
         "findhero",
-        &[],
+        &[ActivePlayer],
         &[ActivePlayer2],
         &[],
-        &[],
-        &[ActivePlayer],
+        &[ActivePlayer2],
+        &[ActivePlayer2],
         &[],
         true,
     );
@@ -1707,6 +1772,102 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         &[],
         false,
+    );
+
+    for name in [
+        "afk_event",
+        "applydesign",
+        "buffer_full",
+        "getwindowmode",
+        "hint_coord_slot",
+        "hint_stop_slot",
+        "if_closesub",
+        "if_opensub",
+        "if_opentop_mode",
+        "if_setgraphic",
+        "if_setrecol",
+        "if_setresumebuttons",
+        "loc_prefetch",
+        "lowmemory",
+        "music_playjingle",
+        "music_playsong",
+        "p_projanim_halfsq",
+        "p_transmogrify",
+        "playermember",
+        "runclientscript",
+        "runclientscriptvararg",
+        "session_log",
+        "setskincolour",
+        "stat_total",
+        "wealth_event",
+    ] {
+        add(name, &[ActivePlayer], &[], &[], &[], &[], &[], false);
+    }
+    // 647 compiles `queue*` and the other `*` queues as `queuevararg` and so on.
+    for name in [
+        "bas_readyanim",
+        "bas_running",
+        "bas_turnonspot",
+        "bas_walk_b",
+        "bas_walk_f",
+        "bas_walk_l",
+        "bas_walk_r",
+        "if_setevents",
+        "longqueuevararg",
+        "queuevararg",
+        "strongqueuevararg",
+        "weakqueuevararg",
+    ] {
+        add(
+            name,
+            &[ActivePlayer],
+            &[],
+            &[],
+            &[ActivePlayer2],
+            &[],
+            &[],
+            false,
+        );
+    }
+    add(
+        "hint_player",
+        &[ActivePlayer, ActivePlayer2],
+        &[],
+        &[],
+        &[ActivePlayer2, ActivePlayer],
+        &[],
+        &[],
+        false,
+    );
+    add(
+        "last_targetcom",
+        &[LastTargetslot],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        false,
+    );
+    add(
+        "player_findallzone",
+        &[],
+        &[FindPlayer],
+        &[],
+        &[],
+        &[],
+        &[],
+        false,
+    );
+    add(
+        "player_findnext",
+        &[FindPlayer],
+        &[ActivePlayer],
+        &[],
+        &[FindPlayer],
+        &[ActivePlayer2],
+        &[],
+        true,
     );
 
     // -----------------------------------------------------------------------
@@ -1856,8 +2017,26 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         true,
     );
-    add("npc_findallany", &[], &[FindNpc], &[], &[], &[], &[], false);
-    add("npc_findall", &[], &[FindNpc], &[], &[], &[], &[], false);
+    add(
+        "npc_findallany",
+        &[],
+        &[FindNpc],
+        &[],
+        &[],
+        &[FindNpc],
+        &[],
+        false,
+    );
+    add(
+        "npc_findall",
+        &[],
+        &[FindNpc],
+        &[],
+        &[],
+        &[FindNpc],
+        &[],
+        false,
+    );
     add(
         "npc_findallzone",
         &[],
@@ -1873,7 +2052,7 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[FindNpc],
         &[ActiveNpc],
         &[],
-        &[],
+        &[FindNpc],
         &[ActiveNpc2],
         &[],
         true,
@@ -1950,6 +2129,16 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
     );
     add(
         "npc_queue",
+        &[ActiveNpc],
+        &[],
+        &[],
+        &[ActiveNpc2],
+        &[],
+        &[],
+        false,
+    );
+    add(
+        "npc_queuevararg",
         &[ActiveNpc],
         &[],
         &[],
@@ -2173,6 +2362,37 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         false,
     );
 
+    add(
+        "npc_destination",
+        &[ActiveNpc],
+        &[],
+        &[],
+        &[ActiveNpc2],
+        &[],
+        &[],
+        false,
+    );
+    add(
+        "npc_huntnext",
+        &[FindNpc],
+        &[ActiveNpc],
+        &[],
+        &[FindNpc],
+        &[ActiveNpc2],
+        &[],
+        true,
+    );
+    add(
+        "npc_projanim_halfsq",
+        &[ActiveNpc],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        false,
+    );
+
     // -----------------------------------------------------------------------
     // Loc ops
     // -----------------------------------------------------------------------
@@ -2316,6 +2536,8 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         false,
     );
+
+    add("loc_merge", &[ActiveLoc], &[], &[], &[], &[], &[], false);
 
     // -----------------------------------------------------------------------
     // Obj ops
@@ -2787,6 +3009,57 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         &[],
         false,
+    );
+
+    // -----------------------------------------------------------------------
+    // Controller ops
+    // -----------------------------------------------------------------------
+    for name in [
+        "controller_coord",
+        "controller_queue",
+        "controller_queuevararg",
+        "controller_settimer",
+    ] {
+        add(
+            name,
+            &[ActiveController],
+            &[],
+            &[],
+            &[ActiveController2],
+            &[],
+            &[],
+            false,
+        );
+    }
+    add(
+        "controller_del",
+        &[ActiveController],
+        &[],
+        &[ActiveController],
+        &[ActiveController2],
+        &[],
+        &[ActiveController2],
+        false,
+    );
+    add(
+        "controller_add",
+        &[],
+        &[ActiveController],
+        &[],
+        &[],
+        &[ActiveController2],
+        &[],
+        false,
+    );
+    add(
+        "controller_findexact",
+        &[],
+        &[ActiveController],
+        &[],
+        &[],
+        &[ActiveController2],
+        &[],
+        true,
     );
 
     // -----------------------------------------------------------------------

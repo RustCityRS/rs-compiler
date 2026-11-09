@@ -372,6 +372,8 @@ impl Project {
                             | Type::Timer
                             | Type::SoftTimer
                             | Type::Walktrigger
+                            | Type::ControllerQueue
+                            | Type::NpcQueue
                             | Type::ClientScript
                     );
                     if script_type {
@@ -452,7 +454,7 @@ impl Project {
         {
             let keywords =
                 "if else while return case default calc switch_int switch_string true false null";
-            let types = "int boolean string long char colour coord loc npc obj namedobj player_uid npc_uid seq spotanim synth midi jingle graphic fontmetrics model texture idkit mesanim hitmark stat component iftype setposh setposv setsize settextalignh settextalignv interface toplevelinterface overlayinterface inv enum struct param dbtable dbrow dbcolumn category varp varn vars varbit mapzone maparea mapelement locshape npc_mode npc_stat area hunt movespeed entityoverlay stringvector writeinvobj controller regioncoord label proc clientscript queue softtimer timer walktrigger any";
+            let types = "int boolean string long char colour coord loc npc obj namedobj player_uid npc_uid seq spotanim synth midi jingle graphic fontmetrics model texture idkit mesanim hitmark stat component iftype setposh setposv setsize settextalignh settextalignv interface toplevelinterface overlayinterface inv enum struct param dbtable dbrow dbcolumn category varp varn vars varbit mapzone maparea mapelement locshape npc_mode npc_stat area hunt movespeed entityoverlay stringvector writeinvobj controller regioncoord region_uid label proc clientscript queue softtimer timer walktrigger any";
             for name in keywords
                 .split_whitespace()
                 .map(str::to_string)
