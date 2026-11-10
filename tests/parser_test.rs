@@ -10,6 +10,88 @@ fn parse_source(source: &str) -> runec::parser::ScriptFile {
 }
 
 #[test]
+fn compiler_annotations_attach_to_declarations_without_consuming_label_jumps() {
+    let file = parse_source(
+        "[proc,caller]\n@target(1);\n@stack(component_last)\n@signature(hook_component)\n\
+        [command,paint](component $component, clientscript $callback, string $signature)\n\
+        @signature(fixed)\n[command,plain](int $value)\n",
+    );
+    assert_eq!(file.scripts.len(), 3);
+    assert!(matches!(
+        &file.scripts[0].body[0],
+        runec::parser::Statement::Expression {
+            expr: runec::parser::Expr::JumpCall { name, .. }, ..
+        } if name == "target"
+    ));
+    let command = &file.scripts[1];
+    assert_eq!(command.line, 5);
+    assert!(command.body.is_empty());
+    assert_eq!(command.annotations.len(), 2);
+    let stack = &command.annotations[0];
+    assert_eq!(stack.name, "stack");
+    assert_eq!(stack.value, "component_last");
+    assert_eq!((stack.line, stack.column), (3, 1));
+    assert_eq!((stack.value_line, stack.value_column), (3, 8));
+    assert_eq!((stack.end_line, stack.end_column), (3, 23));
+    assert_eq!(file.scripts[2].annotations[0].value, "fixed");
+    for name in ["destination", "stack", "signature"] {
+        for terminator in [";", ""] {
+            for after in ["[proc,next]\nreturn;", "return;"] {
+                let jump = parse_source(&format!(
+                    "[label,{name}]\nreturn;\n[proc,caller]\n@{name}(1){terminator}\n{after}\n"
+                ));
+                assert!(jump.scripts[1].annotations.is_empty());
+                assert!(matches!(
+                    &jump.scripts[1].body[0],
+                    runec::parser::Statement::Expression {
+                        expr: runec::parser::Expr::JumpCall { name: target, .. }, ..
+                    } if target == name
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn compiler_annotations_reject_unknown_duplicate_and_misplaced_values() {
+    for (source, message) in [
+        (
+            "@unknown(value)\n[command,test]",
+            "Unknown compiler annotation",
+        ),
+        (
+            "@signature(unknown)\n[command,test]",
+            "Unknown @signature value",
+        ),
+        (
+            "@signature(hook)\n@signature(param)\n[command,test]",
+            "Duplicate compiler annotation",
+        ),
+        (
+            "@signature(hook)\n[proc,test]",
+            "only valid on command declarations",
+        ),
+        (
+            "@stack(component_last)",
+            "must precede a command declaration",
+        ),
+        (
+            "@stack(component_last)\n[command,test](int $value)",
+            "requires a component",
+        ),
+        (
+            "[proc,test] {\n@signature(hook)\nreturn;\n}",
+            "must precede a command declaration",
+        ),
+    ] {
+        let path = PathBuf::from("annotations.cs2");
+        let tokens = Lexer::new(source, &path).tokenize().unwrap();
+        let error = Parser::new(tokens, &path).parse().unwrap_err();
+        assert!(error.message.contains(message), "{source}: {error}");
+    }
+}
+
+#[test]
 fn test_parse_proc_with_params() {
     let file = parse_source("[proc,my_proc](int $a, string $b)(int)\nreturn($a);");
     assert_eq!(file.scripts.len(), 1);

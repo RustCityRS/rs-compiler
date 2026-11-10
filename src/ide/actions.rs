@@ -35,6 +35,9 @@ fn insertion(document: &Document, offset: usize) -> usize {
 
 impl Project {
     pub fn quick_fixes(&self, source: SourceId, diagnostics: &[Diagnostic]) -> Vec<CodeAction> {
+        if diagnostics.is_empty() {
+            return Vec::new();
+        }
         let mut actions = self.code_actions(diagnostics);
         let Some(document) = self.document(source) else {
             return actions;

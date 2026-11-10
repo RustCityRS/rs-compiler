@@ -3,14 +3,15 @@
 use crate::clientscript::format::Format;
 use crate::diagnostics::{Diagnostic, Severity};
 use crate::filesystem::config_kind;
-use crate::ide::{Location, SymbolKind, TextEdit, TokenKind};
+use crate::ide::{Color, Location, SymbolKind, TextEdit, TokenKind};
+use crate::parallel::with_worker_limit;
 use crate::project::{Analysis, CancellationToken, Options, Project, SourceId, Target};
 use crate::sources::{Scope, Visibility};
 use crate::symbol::{ReturnType, SymbolRegistry};
 use crate::text::{LineIndex, Position};
-use crate::types::Type;
+use crate::types::{BaseVarType, Type};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::iter::from_fn;
@@ -19,13 +20,101 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+#[cfg(test)]
+mod tests;
 
 type Snapshot = (Scope, Arc<str>, Option<String>);
 type ProjectLoader = Box<dyn Fn() -> Result<Project, String>>;
+type PendingRequests = HashMap<String, (CancellationToken, bool)>;
 
 /// How long the editor must be idle before lints and pointer checks run.
 const DEEP_CHECK_DELAY: Duration = Duration::from_millis(300);
+const MAX_PENDING_BYTECODE_PREVIEWS: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Performance {
+    max_workers: usize,
+    analysis_paused: bool,
+    watch_debounce: Duration,
+}
+
+impl Default for Performance {
+    fn default() -> Self {
+        Self {
+            max_workers: 2,
+            analysis_paused: false,
+            watch_debounce: DEEP_CHECK_DELAY,
+        }
+    }
+}
+
+impl Performance {
+    fn updated(self, settings: &Value) -> Result<Self, String> {
+        let Some(value) = settings.get("performance") else {
+            return Ok(self);
+        };
+        let object = value
+            .as_object()
+            .ok_or("Expected performance settings object")?;
+        let mut updated = self;
+        for (name, value) in object {
+            match name.as_str() {
+                "maxWorkers" => {
+                    updated.max_workers = value
+                        .as_u64()
+                        .filter(|n| (1..=32).contains(n))
+                        .ok_or("performance.maxWorkers must be an integer from 1 to 32")?
+                        as usize;
+                }
+                "analysisPaused" => {
+                    updated.analysis_paused = value
+                        .as_bool()
+                        .ok_or("performance.analysisPaused must be a boolean")?;
+                }
+                "watchDebounceMs" => {
+                    updated.watch_debounce = Duration::from_millis(
+                        value.as_u64().filter(|n| (50..=2000).contains(n)).ok_or(
+                            "performance.watchDebounceMs must be an integer from 50 to 2000",
+                        )?,
+                    );
+                }
+                _ => return Err(format!("Unknown performance setting '{name}'")),
+            }
+        }
+        Ok(updated)
+    }
+}
+
+fn runec_settings(value: &Value) -> &Value {
+    value.get("runec").unwrap_or(value)
+}
+
+fn changes_project(method: &str) -> bool {
+    matches!(
+        method,
+        "textDocument/didOpen"
+            | "textDocument/didChange"
+            | "textDocument/didSave"
+            | "textDocument/didClose"
+            | "workspace/didChangeConfiguration"
+            | "workspace/didChangeWatchedFiles"
+            | "workspace/didCreateFiles"
+            | "workspace/didRenameFiles"
+            | "workspace/didDeleteFiles"
+    )
+}
+
+fn cancel_obsolete_requests(method: &str, requests: &PendingRequests) {
+    if changes_project(method) {
+        for (token, supersedable) in requests.values() {
+            if *supersedable {
+                token.cancel();
+            }
+        }
+    }
+}
 
 fn open_source(
     project: &mut Project,
@@ -102,6 +191,23 @@ fn uri_key(uri: &str) -> Vec<u8> {
     }
 }
 
+/// Match complete directory boundaries, using the same URI normalization as
+/// document lookup. Portable projects and virtual documents remain unrestricted.
+fn in_editor_roots(project: &Project, uri: &str) -> bool {
+    let Some(roots) = &project.editor_roots else {
+        return true;
+    };
+    if !uri.starts_with("file:") {
+        return true;
+    }
+    let key = uri_key(uri);
+    roots.iter().any(|root| {
+        let mut root = uri_key(root.trim_end_matches('/'));
+        root.push(b'/');
+        key.starts_with(&root)
+    })
+}
+
 /// The file a `file:` URI names.
 fn uri_path(uri: &str) -> Option<PathBuf> {
     let path = uri.strip_prefix("file://")?;
@@ -152,6 +258,7 @@ fn has_environment(value: &Value) -> bool {
                     | "constants"
                     | "scriptIds"
                     | "params"
+                    | "switchValues"
                     | "sources"
             )
         })
@@ -209,6 +316,7 @@ pub fn project_from_json(value: &Value) -> Result<Project, String> {
         "scriptIds",
         "params",
         "sources",
+        "switchValues",
     ] {
         if let Some(rows) = value.get(name)
             && !rows.is_array()
@@ -242,6 +350,16 @@ pub fn project_from_json(value: &Value) -> Result<Project, String> {
         if registry.lookup_command(name).is_some() {
             return Err(format!("Duplicate command '{name}'"));
         }
+        let component_last = match command.get("stack") {
+            None => false,
+            Some(Value::String(stack)) if stack == "component_last" => true,
+            Some(_) => return Err(format!("Unknown command stack order for '{name}'")),
+        };
+        if component_last && (!client || params.first() != Some(&Type::Component)) {
+            return Err(format!(
+                "Command '{name}' with stack 'component_last' must be a client command declaring a component first"
+            ));
+        }
         let dynamic = match kind {
             "enum" => Some(ReturnType::TypeArgument(1)),
             "param" => Some(ReturnType::ParamArgument(params.len().saturating_sub(1))),
@@ -258,6 +376,13 @@ pub fn project_from_json(value: &Value) -> Result<Project, String> {
             },
             dynamic,
         );
+        registry.set_component_first_command(name, component_last);
+        if let Some(value) = command.get("suspends") {
+            let suspends = value
+                .as_bool()
+                .ok_or_else(|| format!("Expected boolean 'suspends' for '{name}'"))?;
+            registry.set_command_suspends(name, suspends);
+        }
     }
     for entity in rows(value, "entities") {
         let name = field(entity, "name")?;
@@ -286,6 +411,25 @@ pub fn project_from_json(value: &Value) -> Result<Project, String> {
         };
         registry.register_constant(name.into(), kind, integer, string);
         visibility.declare("constant", name, scope(field(constant, "scope")?)?);
+    }
+    for domain in rows(value, "switchValues") {
+        let kind = ty(field(domain, "type")?)?;
+        if kind.base_type() != BaseVarType::Integer {
+            return Err("Switch value domains require an integer-backed type".into());
+        }
+        let values = domain["values"]
+            .as_array()
+            .ok_or("Expected switch domain values")?;
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+        for entry in values {
+            let id = integer(entry, "value")?;
+            if !seen.insert(id) {
+                return Err(format!("Duplicate switch value {id}"));
+            }
+            entries.push((id, field(entry, "name")?.to_owned()));
+        }
+        registry.set_switch_values(kind, entries);
     }
     for script in rows(value, "scriptIds") {
         registry.set_script_id(
@@ -334,6 +478,21 @@ fn position(value: &Value) -> Result<Position, String> {
         character: value["character"]
             .as_u64()
             .ok_or("Expected position character")? as usize,
+    })
+}
+
+fn color(value: &Value) -> Result<Color, String> {
+    let channel = |name: &str| {
+        value[name]
+            .as_f64()
+            .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+            .ok_or_else(|| format!("Expected color channel '{name}' in [0, 1]"))
+    };
+    Ok(Color {
+        red: channel("red")?,
+        green: channel("green")?,
+        blue: channel("blue")?,
+        alpha: channel("alpha")?,
     })
 }
 
@@ -386,7 +545,7 @@ pub fn serve_with_loader(
     loader: Option<ProjectLoader>,
 ) -> io::Result<()> {
     let (send, receive) = mpsc::sync_channel(8);
-    let pending: Arc<Mutex<HashMap<String, CancellationToken>>> = Arc::default();
+    let pending: Arc<Mutex<PendingRequests>> = Arc::default();
     let requests = pending.clone();
     let background = Arc::new(Mutex::new(CancellationToken::default()));
     let changed = background.clone();
@@ -402,7 +561,7 @@ pub fn serve_with_loader(
                 }
             };
             if message["method"] == "$/cancelRequest" {
-                if let Some(token) = requests
+                if let Some((token, _)) = requests
                     .lock()
                     .unwrap()
                     .get(&message["params"]["id"].to_string())
@@ -414,10 +573,18 @@ pub fn serve_with_loader(
             if message.get("method").is_some() {
                 changed.lock().unwrap().cancel();
             }
+            let method = message["method"].as_str().unwrap_or("");
+            cancel_obsolete_requests(method, &requests.lock().unwrap());
             let token = CancellationToken::default();
             let key = message.get("id").map(Value::to_string);
             if let Some(key) = &key {
-                requests.lock().unwrap().insert(key.clone(), token.clone());
+                let supersedable = (method.starts_with("textDocument/")
+                    && !changes_project(method))
+                    || matches!(method, "workspace/symbol" | "workspace/executeCommand");
+                requests
+                    .lock()
+                    .unwrap()
+                    .insert(key.clone(), (token.clone(), supersedable));
             }
             if send.send(Ok((message, token, key))).is_err() {
                 break;
@@ -430,15 +597,17 @@ pub fn serve_with_loader(
     loop {
         let message = match next.take() {
             Some(message) => message,
-            None => match receive.recv_timeout(DEEP_CHECK_DELAY) {
+            None => match receive.recv_timeout(server.idle_delay()) {
                 Ok(message) => message,
                 Err(RecvTimeoutError::Timeout) => {
-                    if server.dirty && server.initialized && !server.shutdown {
-                        let token = CancellationToken::default();
-                        *background.lock().unwrap() = token.clone();
-                        server.project.set_cancellation(token);
-                        server.publish_deep(&mut output)?;
+                    let token = CancellationToken::default();
+                    *background.lock().unwrap() = token.clone();
+                    server.project.set_cancellation(token);
+                    if let Ok(message) = receive.try_recv() {
+                        next = Some(message);
+                        continue;
                     }
+                    server.idle(&mut output)?;
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -495,9 +664,17 @@ struct Server {
     pending_load: bool,
     changed: bool,
     dirty: bool,
+    performance: Performance,
+    pending_watched: HashMap<Vec<u8>, Value>,
+    watched_at: Option<Instant>,
     watch_supported: bool,
     apply_supported: bool,
+    show_document_supported: bool,
+    pending_bytecode_previews: VecDeque<(String, String)>,
     pull_diagnostics: bool,
+    code_lens_refresh: bool,
+    code_lens_requested: bool,
+    code_lens_generation: Option<u64>,
     request_id: u64,
     open_documents: HashSet<SourceId>,
     published: HashMap<String, (i64, Vec<Value>)>,
@@ -526,9 +703,17 @@ impl Server {
             pending_load,
             changed: false,
             dirty: false,
+            performance: Performance::default(),
+            pending_watched: HashMap::new(),
+            watched_at: None,
             watch_supported: false,
             apply_supported: false,
+            show_document_supported: false,
+            pending_bytecode_previews: VecDeque::new(),
             pull_diagnostics: false,
+            code_lens_refresh: false,
+            code_lens_requested: false,
+            code_lens_generation: None,
             request_id: 0,
             open_documents: HashSet::new(),
             initialized: false,
@@ -541,6 +726,7 @@ impl Server {
     }
 
     fn index_uris(&mut self) {
+        self.code_lens_generation = None;
         self.uris.clear();
         for document in self.project.documents() {
             self.uris
@@ -553,14 +739,51 @@ impl Server {
         self.uris.get(&uri_key(uri)).copied()
     }
 
+    fn accepts(&self, uri: &str) -> bool {
+        self.find(uri).is_some() || in_editor_roots(&self.project, uri)
+    }
+
     /// Publish once a burst of changes has been applied.
     fn settle(&mut self, output: &mut impl Write) -> io::Result<()> {
         if !self.changed {
             return Ok(());
         }
         self.changed = false;
-        self.publish(output)?;
-        self.dirty = !self.pull_diagnostics;
+        with_worker_limit(self.performance.max_workers, || self.publish(output))?;
+        self.dirty |= !self.pull_diagnostics
+            || (self.code_lens_requested && !self.project.pointer_requirements_ready());
+        Ok(())
+    }
+
+    fn idle_delay(&self) -> Duration {
+        self.watched_at.map_or(DEEP_CHECK_DELAY, |at| {
+            self.performance
+                .watch_debounce
+                .saturating_sub(at.elapsed())
+                .min(DEEP_CHECK_DELAY)
+        })
+    }
+
+    fn idle(&mut self, output: &mut impl Write) -> io::Result<()> {
+        if !self.initialized || self.shutdown {
+            return Ok(());
+        }
+        if self
+            .watched_at
+            .is_some_and(|at| at.elapsed() >= self.performance.watch_debounce)
+        {
+            if let Err(message) = self.flush_watched() {
+                write_message(
+                    output,
+                    json!({"jsonrpc":"2.0","method":"window/logMessage","params":{"type":1,"message":message}}),
+                )?;
+            }
+            self.settle(output)?;
+            return Ok(());
+        }
+        if self.dirty && !self.performance.analysis_paused && self.pending_watched.is_empty() {
+            with_worker_limit(self.performance.max_workers, || self.publish_deep(output))?;
+        }
         Ok(())
     }
 
@@ -570,11 +793,33 @@ impl Server {
         token: CancellationToken,
         output: &mut impl Write,
     ) -> io::Result<bool> {
+        with_worker_limit(self.performance.max_workers, || {
+            self.process_inner(message, token, output)
+        })
+    }
+
+    fn process_inner(
+        &mut self,
+        message: Value,
+        token: CancellationToken,
+        output: &mut impl Write,
+    ) -> io::Result<bool> {
         if message.get("method").is_none()
-            && message["id"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("runec/"))
+            && let Some(id) = message["id"].as_str().filter(|id| id.starts_with("runec/"))
         {
+            if let Some(index) = self
+                .pending_bytecode_previews
+                .iter()
+                .position(|(pending, _)| pending == id)
+                && let Some((_, markdown)) = self.pending_bytecode_previews.remove(index)
+                && !self.shutdown
+                && (message.get("error").is_some() || message["result"]["success"] != true)
+            {
+                write_message(
+                    output,
+                    json!({"jsonrpc":"2.0","method":"window/showMessage","params":{"type":3,"message":markdown}}),
+                )?;
+            }
             return Ok(true);
         }
         if message["jsonrpc"] != "2.0" || !message["method"].is_string() {
@@ -594,8 +839,18 @@ impl Server {
             };
         }
         let params = &message["params"];
+        let flush = method == "textDocument/didOpen"
+            && params["textDocument"]["uri"].as_str().is_some_and(|uri| {
+                !self.accepts(uri)
+                    && self
+                        .pending_watched
+                        .get(&uri_key(uri))
+                        .is_some_and(|change| change["type"] == 1)
+            });
         let result = if token.is_cancelled() {
             Err((-32800, "Request cancelled".into()))
+        } else if flush && let Err(error) = self.flush_watched() {
+            Err((-32603, error))
         } else {
             self.handle(method, params)
         };
@@ -611,7 +866,52 @@ impl Server {
                 json!({"jsonrpc":"2.0","id":format!("runec/watch/{}",self.request_id),"method":"client/registerCapability","params":{"registrations":[{"id":"runec/files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.{rs2,cs2,gs2,pack,constant,obj,npc,loc,inv,enum,struct,param,dbtable,dbrow,varp,varn,vars,varpbit,varc,seq,spotanim,mesanim,hunt,if,interface,idk,flo,flu,anim,mel,order,hashes,config*}","kind":7}]}}]}}),
             )?;
         }
-        let result = if method == "workspace/executeCommand" && self.apply_supported {
+        let inspection_command = method == "workspace/executeCommand"
+            && matches!(
+                params["command"].as_str(),
+                Some("runec.inspectBytecode" | "runec.inspectScript")
+            );
+        if inspection_command
+            && let Err((code, message)) = &result
+            && *code != -32800
+        {
+            write_message(
+                output,
+                json!({"jsonrpc":"2.0","method":"window/showMessage","params":{"type":1,"message":message}}),
+            )?;
+        }
+        if inspection_command
+            && let Ok(report) = &result
+            && let Some(markdown) = report["markdown"].as_str()
+        {
+            self.request_id += 1;
+            let preview = self
+                .show_document_supported
+                .then(|| bytecode_preview(markdown))
+                .transpose();
+            if let Ok(Some(uri)) = preview {
+                let id = format!("runec/bytecode/{}", self.request_id);
+                if self.pending_bytecode_previews.len() == MAX_PENDING_BYTECODE_PREVIEWS {
+                    self.pending_bytecode_previews.pop_front();
+                }
+                self.pending_bytecode_previews
+                    .push_back((id.clone(), markdown.to_owned()));
+                write_message(
+                    output,
+                    // LSP4IJ 0.21.0 dereferences this optional selection unconditionally.
+                    json!({"jsonrpc":"2.0","id":id,"method":"window/showDocument","params":{"uri":uri,"external":false,"takeFocus":true,"selection":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}}),
+                )?;
+            } else {
+                write_message(
+                    output,
+                    json!({"jsonrpc":"2.0","method":"window/showMessage","params":{"type":3,"message":markdown}}),
+                )?;
+            }
+        }
+        let result = if method == "workspace/executeCommand"
+            && params["command"] == "runec.extractProc"
+            && self.apply_supported
+        {
             if let Ok(edit) = &result {
                 self.request_id += 1;
                 write_message(
@@ -625,7 +925,7 @@ impl Server {
         } else {
             result
         };
-        if method == "initialized"
+        if matches!(method, "initialized" | "workspace/didChangeConfiguration")
             && let Err((_, message)) = &result
         {
             write_message(
@@ -644,6 +944,9 @@ impl Server {
         }
         if self.initialized
             && !self.shutdown
+            && params["textDocument"]["uri"]
+                .as_str()
+                .is_none_or(|uri| self.accepts(uri))
             && matches!(
                 method,
                 "initialized"
@@ -652,7 +955,6 @@ impl Server {
                     | "textDocument/didSave"
                     | "textDocument/didClose"
                     | "workspace/didChangeConfiguration"
-                    | "workspace/didChangeWatchedFiles"
                     | "workspace/didCreateFiles"
                     | "workspace/didRenameFiles"
                     | "workspace/didDeleteFiles"
@@ -668,6 +970,9 @@ impl Server {
                     json!({"jsonrpc":"2.0", "method":"textDocument/publishDiagnostics", "params":{"uri":params["textDocument"]["uri"],"diagnostics":[]}}),
                 )?;
             }
+        }
+        if !self.shutdown {
+            self.refresh_code_lenses(output)?;
         }
         Ok(true)
     }
@@ -694,6 +999,107 @@ impl Server {
         json!({"uri":self.project.document(location.source).unwrap().label.to_string_lossy(), "range":self.range(location.source, location.range.clone())})
     }
 
+    fn script_lens(&self, source: SourceId, range: Range<usize>, title: String) -> Value {
+        let document = self.project.document(source).unwrap();
+        let range = self.range(source, range);
+        json!({"range":range,"command":{"title":title,"command":"runec.inspectScript","arguments":[{
+            "textDocument":{"uri":document.label.to_string_lossy()},"range":range,
+            "version":document.version,"generation":self.project.generation
+        }]}})
+    }
+
+    /// Header clicks use the same cached results that produced the lens, without starting analysis.
+    fn script_report(&self, source: SourceId, args: &Value) -> Result<Value, String> {
+        let document = self
+            .project
+            .document(source)
+            .ok_or("Script is no longer open.")?;
+        if args["version"].as_i64() != Some(document.version)
+            || args["generation"].as_u64() != Some(self.project.generation)
+        {
+            return Err("Script analysis changed; refresh the header hints.".into());
+        }
+        let header = position(&args["range"]["start"])?;
+        let start = document
+            .lines
+            .offset(&document.text, header)
+            .ok_or("Invalid script header.")?;
+        let declaration = document
+            .syntax()
+            .and_then(|file| {
+                file.scripts
+                    .iter()
+                    .find(|script| script.line == header.line + 1 && script.trigger != "command")
+            })
+            .ok_or("Select a script header hint.")?;
+        let script = format!("[{},{}]", declaration.trigger, declaration.name);
+        let effects = self
+            .project
+            .effects_ready()
+            .then(|| self.project.script_effects(source))
+            .unwrap_or_default()
+            .into_iter()
+            .find(|hint| hint.range.start == start);
+        let required = self
+            .project
+            .script_pointers(source)
+            .into_iter()
+            .find(|hint| hint.range.start == start)
+            .map(|hint| {
+                hint.required
+                    .iter()
+                    .map(|pointer| pointer.representation())
+                    .collect::<Vec<_>>()
+            });
+        if effects.is_none() && required.is_none() {
+            return Err(
+                "Script analysis is pending; refresh the header hints when it finishes.".into(),
+            );
+        }
+        let mut markdown = format!("# {script}\n\n## Required pointers\n\n");
+        match &required {
+            Some(required) if required.is_empty() => markdown.push_str("None required on entry.\n"),
+            Some(required) => {
+                for pointer in required {
+                    markdown.push_str(&format!("- `{pointer}`\n"));
+                }
+            }
+            None => {
+                markdown.push_str("Pointer analysis is pending. Requirements are not yet known.\n")
+            }
+        }
+        markdown.push_str("\n## Effects\n\n");
+        if let Some(effects) = &effects {
+            markdown.push_str(if effects.may_suspend {
+                "May suspend execution.\n"
+            } else {
+                "No suspension found in the available command contracts and resolved calls.\n"
+            });
+            if effects.incomplete {
+                markdown.push_str("\nAnalysis is incomplete because a call or declaration could not be resolved reliably.\n");
+            }
+            markdown.push_str("\n### Game-variable writes\n\n");
+            if effects.writes.is_empty() {
+                markdown.push_str("No game-variable assignments found in resolved calls.\n");
+            } else {
+                for name in &effects.writes {
+                    let variable = match name.strip_prefix('.') {
+                        Some(name) => format!(".%{name}"),
+                        None => format!("%{name}"),
+                    };
+                    markdown.push_str(&format!("- `{variable}`\n"));
+                }
+            }
+            markdown.push_str("\nEffects include transitive proc and label calls. Conditional effects are included; absence of known effects does not establish purity.\n");
+        } else {
+            markdown.push_str("Effect analysis is pending.\n");
+        }
+        Ok(json!({"script":script,"requiredPointers":required,
+            "writes":effects.as_ref().map(|effects| &effects.writes),
+            "maySuspend":effects.as_ref().map(|effects| effects.may_suspend),
+            "incomplete":effects.as_ref().map(|effects| effects.incomplete),"markdown":markdown}))
+    }
+
     fn edits(&self, edits: Vec<TextEdit>) -> Value {
         let mut changes: HashMap<String, Vec<Value>> = HashMap::new();
         for edit in edits {
@@ -707,9 +1113,15 @@ impl Server {
             if self.initialized {
                 return Err((-32600, "Server is already initialized".into()));
             }
-            if has_environment(&params["initializationOptions"]) {
-                self.project = project_from_json(&params["initializationOptions"])
-                    .map_err(|error| (-32602, error))?;
+            let settings = runec_settings(&params["initializationOptions"]);
+            self.performance = self
+                .performance
+                .updated(settings)
+                .map_err(|error| (-32602, error))?;
+            if has_environment(settings) {
+                self.project =
+                    with_worker_limit(self.performance.max_workers, || project_from_json(settings))
+                        .map_err(|error| (-32602, error))?;
                 self.baseline = self
                     .project
                     .documents()
@@ -730,9 +1142,17 @@ impl Server {
             self.apply_supported = params["capabilities"]["workspace"]["applyEdit"]
                 .as_bool()
                 .unwrap_or(false);
+            self.show_document_supported =
+                params["capabilities"]["window"]["showDocument"]["support"]
+                    .as_bool()
+                    .unwrap_or(false);
             self.pull_diagnostics = params["capabilities"]["textDocument"]["diagnostic"]
                 .is_object()
                 && params["capabilities"]["workspace"]["diagnostics"]["refreshSupport"]
+                    .as_bool()
+                    .unwrap_or(false);
+            self.code_lens_refresh =
+                params["capabilities"]["workspace"]["codeLens"]["refreshSupport"]
                     .as_bool()
                     .unwrap_or(false);
             let mut result = json!({"capabilities":{
@@ -743,9 +1163,10 @@ impl Server {
                 "signatureHelpProvider":{"triggerCharacters":["(",","]},
                 "semanticTokensProvider":{"legend":{"tokenTypes":TOKEN_TYPES,"tokenModifiers":["declaration","readonly","static","defaultLibrary"]},"full":true,"range":true},
                 "foldingRangeProvider":true,"selectionRangeProvider":true,"documentFormattingProvider":true,
-                "inlayHintProvider":true,"documentHighlightProvider":true,
-                "codeActionProvider":{"codeActionKinds":["quickfix","refactor.extract"]},
-                "executeCommandProvider":{"commands":["runec.extractProc"]}
+                "inlayHintProvider":true,"documentHighlightProvider":true,"colorProvider":true,
+                "codeLensProvider":{"resolveProvider":false},
+                "codeActionProvider":{"codeActionKinds":["quickfix","refactor.extract","runec.inspect"]},
+                "executeCommandProvider":{"commands":["runec.extractProc","runec.inspectBytecode","runec.inspectScript"]}
             }, "serverInfo":{"name":"runec","version":env!("CARGO_PKG_VERSION")}});
             if self.pull_diagnostics {
                 result["capabilities"]["diagnosticProvider"] =
@@ -761,6 +1182,7 @@ impl Server {
         }
         if method == "shutdown" {
             self.shutdown = true;
+            self.pending_bytecode_previews.clear();
             return Ok(Value::Null);
         }
         self.request(method, params).map_err(|error| {
@@ -776,6 +1198,20 @@ impl Server {
     }
 
     fn request(&mut self, method: &str, params: &Value) -> Result<Value, String> {
+        let foreign = params["textDocument"]["uri"]
+            .as_str()
+            .is_some_and(|uri| !self.accepts(uri));
+        if foreign
+            && matches!(
+                method,
+                "textDocument/didOpen"
+                    | "textDocument/didChange"
+                    | "textDocument/didSave"
+                    | "textDocument/didClose"
+            )
+        {
+            return Ok(Value::Null);
+        }
         match method {
             "initialized" => {
                 if self.pending_load {
@@ -904,11 +1340,16 @@ impl Server {
                 return Ok(Value::Array(items));
             }
             "workspace/didChangeConfiguration" => {
-                if !has_environment(&params["settings"]) {
+                let settings = runec_settings(&params["settings"]);
+                self.performance = self.performance.updated(settings)?;
+                if !has_environment(settings) {
                     return Ok(Value::Null);
                 }
-                let mut updated = project_from_json(&params["settings"])?;
-                if params["settings"].get("sources").is_some() {
+                let mut updated = with_worker_limit(self.performance.max_workers, || {
+                    project_from_json(settings)
+                })?;
+                updated.editor_roots = self.project.editor_roots.clone();
+                if settings.get("sources").is_some() {
                     self.baseline = updated
                         .documents()
                         .map(|doc| {
@@ -935,6 +1376,11 @@ impl Server {
                             same_uri(&old.label.to_string_lossy(), &doc.label.to_string_lossy())
                         })
                         .map(|old| old.id);
+                    if previous.is_none()
+                        && !in_editor_roots(&updated, &doc.label.to_string_lossy())
+                    {
+                        continue;
+                    }
                     if let Some(previous) = previous {
                         updated.close(previous);
                     }
@@ -953,8 +1399,24 @@ impl Server {
                 return Ok(Value::Null);
             }
             "workspace/didChangeWatchedFiles" => {
-                if self.watched(params) {
-                    self.reload()?;
+                for change in params["changes"]
+                    .as_array()
+                    .ok_or("Expected watched changes")?
+                {
+                    let uri = field(change, "uri")?;
+                    if !matches!(change["type"].as_u64(), Some(1..=3)) {
+                        return Err("Expected watched change type 1, 2 or 3".into());
+                    }
+                    let key = uri_key(uri);
+                    if change["type"] != 2
+                        || self
+                            .pending_watched
+                            .get(&key)
+                            .is_none_or(|old| old["type"] != 1)
+                    {
+                        self.pending_watched.insert(key, change.clone());
+                    }
+                    self.watched_at = Some(Instant::now());
                 }
                 return Ok(Value::Null);
             }
@@ -965,11 +1427,24 @@ impl Server {
                 return Ok(Value::Null);
             }
             "workspace/executeCommand" => {
-                if params["command"] != "runec.extractProc" {
+                let inspect = params["command"] == "runec.inspectBytecode";
+                let details = params["command"] == "runec.inspectScript";
+                if !inspect && !details && params["command"] != "runec.extractProc" {
                     return Err("Unsupported command".into());
                 }
                 let args = &params["arguments"][0];
                 let source = self.source(args)?;
+                if details {
+                    return self.script_report(source, args);
+                }
+                if inspect {
+                    if let Some(version) = args["version"].as_i64()
+                        && version != self.project.document(source).unwrap().version
+                    {
+                        return Err("The script changed; request bytecode inspection again.".into());
+                    }
+                    self.project.analyze();
+                }
                 let document = self.project.document(source).unwrap();
                 let start = document
                     .lines
@@ -979,6 +1454,26 @@ impl Server {
                     .lines
                     .offset(&document.text, position(&args["range"]["end"])?)
                     .ok_or("Invalid selection")?;
+                if inspect {
+                    if document.config.is_some() {
+                        return Err("Select a call in a script.".into());
+                    }
+                    let inspection = crate::inspection::inspect_code(
+                        &document.text,
+                        &document.label,
+                        start..end,
+                        self.project.registry(),
+                        self.project.target_scope() == Scope::Client,
+                    )?
+                    .ok_or("Select code inside a script.")?;
+                    let instructions = inspection.instructions.iter().map(|row| json!({
+                        "pc":row.pc,"instruction":row.mnemonic,"operand":row.operand,
+                        "stackEffect":row.effect.map(|effect| json!({"pops":effect.pops,"pushes":effect.pushes}))
+                    })).collect::<Vec<_>>();
+                    return Ok(json!({"range":self.range(source,inspection.range.clone()),
+                        "call":inspection.call,"script":inspection.script,"instructions":instructions,
+                        "netStackChange":inspection.net,"wholeScript":inspection.whole_script,"markdown":inspection.markdown()}));
+                }
                 let action = self
                     .project
                     .extract_proc(source, start..end, field(args, "name")?)?;
@@ -1003,12 +1498,86 @@ impl Server {
             "textDocument/inlayHint",
             "textDocument/prepareRename",
             "textDocument/documentHighlight",
+            "textDocument/documentColor",
+            "textDocument/colorPresentation",
+            "textDocument/codeLens",
             "textDocument/diagnostic",
         ];
         if !supported.contains(&method) {
             return Err(format!("Unsupported method '{method}'"));
         }
+        if foreign {
+            return Ok(match method {
+                "textDocument/diagnostic" => json!({"kind":"full","items":[]}),
+                "textDocument/semanticTokens/full" | "textDocument/semanticTokens/range" => {
+                    json!({"data":[]})
+                }
+                "textDocument/hover"
+                | "textDocument/definition"
+                | "textDocument/rename"
+                | "textDocument/prepareRename"
+                | "textDocument/signatureHelp" => Value::Null,
+                _ => json!([]),
+            });
+        }
         let source = self.source(params)?;
+        if method == "textDocument/codeLens" {
+            let document = self.project.document(source).unwrap();
+            if document.scope != Scope::Global && document.scope != self.project.target_scope() {
+                return Ok(json!([]));
+            }
+            let Some(syntax) = document.syntax() else {
+                return Ok(json!([]));
+            };
+            let mut lenses = syntax
+                .scripts
+                .iter()
+                .filter(|script| script.trigger != "command")
+                .filter_map(|script| {
+                    let line = document.lines.line(script.line.saturating_sub(1))?;
+                    let text = &document.text[line.clone()];
+                    let start = line.start + text.len() - text.trim_start().len();
+                    let range = self.range(source, start..start);
+                    Some(json!({"range":range,"command":{
+                        "title":"Inspect bytecode","command":"runec.inspectBytecode",
+                        "arguments":[{"textDocument":{"uri":document.label.to_string_lossy()},
+                            "range":range,"version":document.version}]
+                    }}))
+                })
+                .collect::<Vec<_>>();
+            self.code_lens_requested = true;
+            if !self.project.pointer_requirements_ready() || !self.project.effects_ready() {
+                self.dirty = true;
+            }
+            lenses.extend(
+                self.project
+                    .script_pointers(source)
+                    .into_iter()
+                    .map(|hint| {
+                        let pointers = if hint.required.is_empty() {
+                            "none".to_string()
+                        } else {
+                            hint.required
+                                .iter()
+                                .map(|pointer| pointer.representation())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        self.script_lens(source, hint.range, format!("@requires {pointers}"))
+                    }),
+            );
+            if self.project.effects_ready() {
+                lenses.extend(
+                    self.project
+                        .script_effects(source)
+                        .into_iter()
+                        .filter_map(|hint| {
+                            Some(self.script_lens(source, hint.range.clone(), hint.label()?))
+                        }),
+                );
+            }
+            return Ok(Value::Array(lenses));
+        }
         let document = self.project.document(source).unwrap();
         let offset = if params["position"].is_object() {
             document
@@ -1039,6 +1608,18 @@ impl Server {
                 json!({"range":self.range(source,hover.range.clone()),"placeholder":document.text[hover.range].to_string()})
             }
             "textDocument/documentHighlight" => Value::Array(self.project.references(source,offset,true).into_iter().filter(|location| location.source==source).map(|location|json!({"range":self.range(source,location.range),"kind":1})).collect()),
+            "textDocument/documentColor" => Value::Array(self.project.document_colors(source).into_iter().map(|item| {
+                json!({"range":self.range(source,item.range),"color":{"red":item.color.red,"green":item.color.green,"blue":item.color.blue,"alpha":item.color.alpha}})
+            }).collect()),
+            "textDocument/colorPresentation" => {
+                let start = document.lines.offset(&document.text, position(&params["range"]["start"])?).ok_or("Invalid color range")?;
+                let end = document.lines.offset(&document.text, position(&params["range"]["end"])?).ok_or("Invalid color range")?;
+                if start > end { return Err("Invalid color range".into()); }
+                let color = color(&params["color"])?;
+                self.project.color_presentation(source, start..end, color).map_or_else(|| json!([]), |edit| {
+                    json!([{"label":edit.replacement,"textEdit":{"range":self.range(edit.location.source,edit.location.range),"newText":edit.replacement}}])
+                })
+            }
             "textDocument/inlayHint" => {
                 let start = document.lines.offset(&document.text,position(&params["range"]["start"])?).ok_or("Invalid range")?;
                 let end = document.lines.offset(&document.text,position(&params["range"]["end"])?).ok_or("Invalid range")?;
@@ -1046,7 +1627,8 @@ impl Server {
             }
             "textDocument/diagnostic" => {
                 let label = document.label.clone();
-                let mut analysis = self.project.check();
+                self.dirty |= !self.project.pointer_requirements_ready();
+                let mut analysis = self.project.latest();
                 analysis.diagnostics.merge(self.project.config_diagnostics());
                 let document = self.project.document(source).unwrap();
                 json!({"kind":"full","items":analysis.diagnostics.diagnostics().iter().filter(|d|d.file==label).map(|d|json!({"range":self.range(source,document.lines.diagnostic_range(&document.text,d.line,d.column)),"message":d.message,"source":"runec","code":d.code(),"severity":if d.severity==Severity::Error{1}else{2}})).collect::<Vec<_>>()})
@@ -1118,26 +1700,47 @@ impl Server {
             }
             "textDocument/codeAction" => {
                 let label = document.label.clone();
+                let version = document.version;
+                let requested = |kind: &str| params["context"]["only"].as_array().is_none_or(|kinds| {
+                    kinds.iter().any(|requested| requested.as_str().is_some_and(|requested| kind.starts_with(requested)))
+                });
                 let start = params["range"]["start"]["line"].as_u64().unwrap_or(0) as usize;
                 let end = params["range"]["end"]["line"].as_u64().unwrap_or(usize::MAX as u64) as usize;
                 let selection = params.get("range").and_then(|range| {
                     Some(document.lines.offset(&document.text, position(&range["start"]).ok()?)?..document.lines.offset(&document.text, position(&range["end"]).ok()?)?)
                 });
-                // Lint fixes follow once the idle check has run.
-                let analysis = self.project.latest();
-                let diagnostics = analysis.diagnostics.diagnostics().iter().filter(|diagnostic| {
-                    diagnostic.file == label && (start..=end).contains(&diagnostic.line.saturating_sub(1))
-                }).cloned().collect::<Vec<_>>();
-                let mut fixes = self.project.quick_fixes(source, &diagnostics);
-                if let Some(selection) = selection.filter(|range| !range.is_empty()) {
+                // Keep the action discoverable for a highlighted statement or block too.
+                // Selection and compilation errors are reported when explicitly invoked.
+                let inspection = document.config.is_none().then(|| selection.clone()).flatten()
+                    .filter(|range| range.start <= range.end);
+                let mut fixes = Vec::new();
+                if requested("quickfix") {
+                    // Lint fixes follow once the idle check has run.
+                    let analysis = self.project.latest();
+                    let diagnostics = analysis.diagnostics.diagnostics().iter().filter(|diagnostic| {
+                        diagnostic.file == label && (start..=end).contains(&diagnostic.line.saturating_sub(1))
+                    }).cloned().collect::<Vec<_>>();
+                    fixes = self.project.quick_fixes(source, &diagnostics);
+                }
+                if requested("refactor.extract")
+                    && let Some(selection) = selection.filter(|range| !range.is_empty())
+                {
+                    self.project.analyze();
                     let names = self.project.workspace_symbols("extracted_proc", usize::MAX);
                     let name = (0..=names.len()).map(|i| if i == 0 { "extracted_proc".to_string() } else { format!("extracted_proc_{i}") })
                         .find(|name| names.iter().all(|symbol| symbol.name != *name)).unwrap();
                     if let Ok(action) = self.project.extract_proc(source, selection, &name) { fixes.push(action); }
                 }
-                let actions = fixes.into_iter().filter(|action| params["context"]["only"].as_array().is_none_or(|kinds| kinds.iter().any(|kind| kind.as_str().is_some_and(|kind| action.kind.starts_with(kind))))).map(|action| {
+                let mut actions = fixes.into_iter().map(|action| {
                     json!({"title": action.title, "kind": action.kind, "edit": self.edits(action.edits)})
-                }).collect();
+                }).collect::<Vec<_>>();
+                if let Some(range) = inspection
+                    && requested("runec.inspect")
+                {
+                    actions.push(json!({"title":"Inspect generated bytecode","kind":"runec.inspect",
+                        "command":{"title":"Inspect generated bytecode","command":"runec.inspectBytecode",
+                            "arguments":[{"textDocument":params["textDocument"],"range":self.range(source,range),"version":version}]}}));
+                }
                 Value::Array(actions)
             }
             "textDocument/semanticTokens/full" | "textDocument/semanticTokens/range" => {
@@ -1185,6 +1788,28 @@ impl Server {
         self.publish_analysis(analysis, output)
     }
 
+    fn flush_watched(&mut self) -> Result<(), String> {
+        if self.pending_watched.is_empty() {
+            return Ok(());
+        }
+        let changes = self
+            .pending_watched
+            .drain()
+            .map(|(_, change)| change)
+            .collect::<Vec<_>>();
+        self.watched_at = None;
+        with_worker_limit(self.performance.max_workers, || {
+            let generation = self.project.generation;
+            if self.watched(&json!({"changes":changes})) {
+                self.reload()?;
+                self.changed = true;
+            } else {
+                self.changed |= self.project.generation != generation;
+            }
+            Ok(())
+        })
+    }
+
     /// Re-read scripts changed on disk, returning whether anything else needs a
     /// full reload. The editor owns open buffers; other projects' files are not ours.
     fn watched(&mut self, params: &Value) -> bool {
@@ -1193,6 +1818,12 @@ impl Server {
             let Some(uri) = change["uri"].as_str() else {
                 continue;
             };
+            // A newly created shared or asset directory may not have existed
+            // when roots were discovered. Reload to discover it; the loader
+            // still excludes files belonging to other projects.
+            if change["type"].as_u64() != Some(1) && !self.accepts(uri) {
+                continue;
+            }
             let source = self.find(uri);
             match (change["type"].as_u64(), source) {
                 (Some(2), Some(source)) if self.open_documents.contains(&source) => {}
@@ -1221,9 +1852,35 @@ impl Server {
     }
 
     fn publish_deep(&mut self, output: &mut impl Write) -> io::Result<()> {
+        if self.code_lens_requested && self.project.effect_summaries().is_none() {
+            self.dirty = true;
+            return Ok(());
+        }
         let analysis = self.project.check();
         self.dirty = analysis.cancelled;
-        self.publish_analysis(analysis, output)
+        if self.pull_diagnostics && !analysis.cancelled {
+            self.publish(output)?;
+        } else if !self.pull_diagnostics {
+            self.publish_analysis(analysis, output)?;
+        }
+        self.refresh_code_lenses(output)
+    }
+
+    fn refresh_code_lenses(&mut self, output: &mut impl Write) -> io::Result<()> {
+        if self.code_lens_requested
+            && self.code_lens_refresh
+            && self.project.pointer_requirements_ready()
+            && self.project.effects_ready()
+            && self.code_lens_generation != Some(self.project.generation)
+        {
+            self.code_lens_generation = Some(self.project.generation);
+            self.request_id += 1;
+            write_message(
+                output,
+                json!({"jsonrpc":"2.0","id":format!("runec/codeLens/{}",self.request_id),"method":"workspace/codeLens/refresh"}),
+            )?;
+        }
+        Ok(())
     }
 
     fn reload(&mut self) -> Result<(), String> {
@@ -1250,6 +1907,9 @@ impl Server {
                 .documents()
                 .find(|old| same_uri(&old.label.to_string_lossy(), &doc.label.to_string_lossy()))
                 .map(|old| old.id);
+            if previous.is_none() && !in_editor_roots(&project, &doc.label.to_string_lossy()) {
+                continue;
+            }
             if let Some(previous) = previous {
                 project.close(previous);
             }
@@ -1338,6 +1998,38 @@ impl Server {
         }
         Ok(())
     }
+}
+
+/// An explicit inspection creates a disposable Markdown document in the OS temp directory.
+fn bytecode_preview(markdown: &str) -> io::Result<String> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "runec-inspection-{}-{stamp}.md",
+        std::process::id()
+    ));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    file.write_all(markdown.as_bytes())?;
+    let path = path.to_string_lossy().replace('\\', "/");
+    let mut uri = if path.starts_with('/') {
+        "file://"
+    } else {
+        "file:///"
+    }
+    .to_owned();
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b':' | b'-' | b'_' | b'.' | b'~') {
+            uri.push(byte as char);
+        } else {
+            uri.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    Ok(uri)
 }
 
 fn symbol_kind(kind: SymbolKind) -> usize {

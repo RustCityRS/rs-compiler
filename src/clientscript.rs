@@ -36,6 +36,7 @@ pub struct Command {
     pub params: Vec<Type>,
     pub returns: Vec<Type>,
     pub kind: CommandKind,
+    pub component_last: bool,
 }
 
 pub(crate) fn command_pointers(registry: &SymbolRegistry) -> HashMap<String, PointerHolder> {
@@ -260,7 +261,6 @@ pub fn load_commands(path: &Path, engine_path: &Path) -> Result<Vec<Command>> {
 /// Parse host-supplied command signatures without reading files.
 pub fn commands(format: &Format, engine_text: &str, label: &Path) -> Result<Vec<Command>> {
     let engine = parse(engine_text, label)?;
-    let engine_lines: Vec<_> = engine_text.lines().collect();
     let mut signatures = HashMap::new();
     for script in engine.scripts {
         if script.trigger != "command" || !script.body.is_empty() {
@@ -275,12 +275,15 @@ pub fn commands(format: &Format, engine_text: &str, label: &Path) -> Result<Vec<
         let signature = signatures
             .remove(name)
             .ok_or_else(|| invalid(format!("Missing engine.cs2 signature for {name}")))?;
-        let kind = engine_lines
-            .get(signature.line.saturating_sub(1))
-            .and_then(|line| line.split_once("// @signature="))
-            .map_or("", |(_, kind)| kind.trim());
-        let kind = match kind {
-            "" => CommandKind::Fixed,
+        let annotation = |name| {
+            signature
+                .annotations
+                .iter()
+                .find(|annotation| annotation.name == name)
+                .map(|annotation| annotation.value.as_str())
+        };
+        let kind = match annotation("signature").unwrap_or("fixed") {
+            "fixed" => CommandKind::Fixed,
             "hook" => CommandKind::Hook,
             "hook_component" => CommandKind::HookComponent,
             "enum" => CommandKind::Enum,
@@ -288,6 +291,7 @@ pub fn commands(format: &Format, engine_text: &str, label: &Path) -> Result<Vec<
             "param" => CommandKind::Param,
             kind => return Err(invalid(format!("Unknown command kind {kind}"))),
         };
+        let component_last = annotation("stack") == Some("component_last");
         commands.push(Command {
             opcode,
             name: name.clone(),
@@ -298,6 +302,7 @@ pub fn commands(format: &Format, engine_text: &str, label: &Path) -> Result<Vec<
                 .collect(),
             returns: signature.return_types,
             kind,
+            component_last,
         });
     }
     if !signatures.is_empty() {
@@ -330,8 +335,7 @@ pub fn registry(source_dir: &Path, pack: &Path) -> Result<SymbolRegistry> {
             registry.proc_script_ids.insert(name.to_owned(), id);
         }
     }
-    registry.commands.clear();
-    registry.command_param_types.clear();
+    registry.clear_commands();
     registry.game_vars.retain(|_, symbol| {
         matches!(
             &symbol.kind, SymbolKind::GameVar { category, .. }
@@ -347,6 +351,7 @@ pub fn registry(source_dir: &Path, pack: &Path) -> Result<SymbolRegistry> {
             command.returns.clone(),
         );
         registry.stack_commands.insert(command.name.to_owned());
+        registry.set_component_first_command(&command.name, command.component_last);
         if matches!(command.kind, CommandKind::Hook | CommandKind::HookComponent) {
             registry.hook_commands.insert(
                 command.name.to_owned(),

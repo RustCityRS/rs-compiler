@@ -1,6 +1,8 @@
 use super::Names;
 use super::source::script_name;
-use crate::arguments::{command_hints, command_returns, expression_types, proc_hints, stack_hints};
+use crate::arguments::{
+    command_hints, command_parameters, command_returns, expression_types, proc_hints, stack_hints,
+};
 use crate::clientscript::hooks::{self, HookValue};
 use crate::parser::{
     BinOp, Expr, ScriptDeclaration, ScriptFile, Statement, StringPart, array_name,
@@ -53,6 +55,46 @@ fn event_type(name: &str) -> Option<Type> {
     })
 }
 
+fn wire_parameters(
+    registry: &SymbolRegistry,
+    name: &str,
+    args: &[Expr],
+    locals: &SymbolTable,
+) -> Vec<Type> {
+    if !registry.component_first_command(name) || args.is_empty() {
+        return command_parameters(registry, name, args, locals);
+    }
+    let mut canonical = args.to_vec();
+    if let Some(index) = args.iter().rposition(|arg| {
+        expression_types(arg, registry, locals)
+            .iter()
+            .any(|ty| ty.base_type() == BaseVarType::Integer)
+    }) {
+        let component = canonical.remove(index);
+        canonical.insert(0, component);
+    }
+    let mut parameters = command_parameters(registry, name, &canonical, locals);
+    parameters.rotate_left(1);
+    parameters
+}
+
+fn wire_proc_hints(
+    registry: &SymbolRegistry,
+    name: &str,
+    args: &[Expr],
+    locals: &SymbolTable,
+) -> Vec<Option<Type>> {
+    let parameters = registry
+        .lookup_script_by_trigger("proc", name)
+        .or_else(|| registry.lookup_script_by_trigger("clientscript", name))
+        .and_then(|symbol| match &symbol.kind {
+            SymbolKind::Script { param_types, .. } => Some(param_types.as_slice()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    stack_hints(registry, parameters, args, locals)
+}
+
 struct Inference<'a> {
     registry: &'a SymbolRegistry,
     nodes: Vec<Node>,
@@ -67,9 +109,7 @@ impl Inference<'_> {
         self.nodes.push(Node {
             parent: id,
             kind: ty.base_type(),
-            // Nothing holds a chat filter: only its literals show it.
-            ty: (!matches!(ty, Type::Int | Type::Long | Type::Any | Type::ChatFilter))
-                .then_some(ty),
+            ty: (!matches!(ty, Type::Int | Type::Long | Type::Any)).then_some(ty),
             conflict: false,
             numeric: false,
             only_taken: false,
@@ -141,6 +181,8 @@ impl Inference<'_> {
         let node = &self.nodes[id];
         if !node.conflict
             && let Some(ty) = node.ty
+            // Chat filters stay numeric in storage, but constrain other inferred types.
+            && ty != Type::ChatFilter
             && !(node.numeric && ty.is_int_kind())
         {
             return if ty == Type::NamedObj && node.only_taken {
@@ -354,7 +396,8 @@ impl Inference<'_> {
                         }
                     }
                 }
-                let hints = command_hints(self.registry, name, args, &scope.symbols);
+                let parameters = wire_parameters(self.registry, name, args, &scope.symbols);
+                let hints = stack_hints(self.registry, &parameters, args, &scope.symbols);
                 for (i, arg) in args.iter().enumerate() {
                     // A hook's own signature calls everything without a type an int.
                     let hint = hints
@@ -387,7 +430,7 @@ impl Inference<'_> {
                     format!("clientscript:{name}")
                 };
                 let callee = self.scopes.get(&key).cloned();
-                let hints = proc_hints(self.registry, name, args, &scope.symbols);
+                let hints = wire_proc_hints(self.registry, name, args, &scope.symbols);
                 let values: Vec<_> = args
                     .iter()
                     .enumerate()
@@ -584,7 +627,7 @@ pub fn hook_literal(
         return Expr::Identifier(name.to_owned());
     }
     let mut literal = Expr::IntLiteral(value);
-    format_expr(&mut literal, ty, names, registry, &SymbolTable::new());
+    format_expr(&mut literal, ty, names, registry, &SymbolTable::new(), true);
     literal
 }
 
@@ -818,6 +861,7 @@ fn format_expr(
     names: &dyn Names,
     registry: &SymbolRegistry,
     locals: &SymbolTable,
+    canonical: bool,
 ) {
     if let Expr::BoolLiteral(value) = expr
         && hint != Some(Type::Boolean)
@@ -956,7 +1000,17 @@ fn format_expr(
     }
     match expr {
         Expr::CommandCall { name, args, .. } => {
-            let hints = command_hints(registry, name.trim_start_matches('.'), args, locals);
+            let command = name.trim_start_matches('.');
+            let hints = if canonical {
+                command_hints(registry, command, args, locals)
+            } else {
+                stack_hints(
+                    registry,
+                    &wire_parameters(registry, command, args, locals),
+                    args,
+                    locals,
+                )
+            };
             for (i, arg) in args.iter_mut().enumerate() {
                 format_expr(
                     arg,
@@ -964,18 +1018,24 @@ fn format_expr(
                     names,
                     registry,
                     locals,
+                    canonical,
                 );
             }
             // What a hook's script takes says how its arguments print.
-            if let Some(end) = hooks::arguments_end(registry, name, args)
-                && let Some(Expr::Identifier(target)) = args.first().cloned()
+            let target_index = usize::from(registry.component_first_command(name));
+            if canonical
+                && let Some(end) = hooks::arguments_end(registry, name, args)
+                && let Some(Expr::Identifier(target)) = args.get(target_index).cloned()
             {
-                let hints = hooks::argument_hints(registry, &target, &args[1..end], locals);
-                for (arg, hint) in args[1..end].iter_mut().zip(hints) {
-                    format_expr(arg, hint, names, registry, locals);
+                let start = target_index + 1;
+                let hints = hooks::argument_hints(registry, &target, &args[start..end], locals);
+                for (arg, hint) in args[start..end].iter_mut().zip(hints) {
+                    format_expr(arg, hint, names, registry, locals, canonical);
                 }
             }
-            hooks::compact(registry, name, args, locals);
+            if canonical {
+                hooks::compact(registry, name, args, locals);
+            }
             if args.is_empty()
                 && !name.starts_with("__")
                 && registry
@@ -989,7 +1049,11 @@ fn format_expr(
             }
         }
         Expr::ProcCall { name, args, .. } => {
-            let hints = proc_hints(registry, name, args, locals);
+            let hints = if canonical {
+                proc_hints(registry, name, args, locals)
+            } else {
+                wire_proc_hints(registry, name, args, locals)
+            };
             for (i, arg) in args.iter_mut().enumerate() {
                 format_expr(
                     arg,
@@ -997,12 +1061,13 @@ fn format_expr(
                     names,
                     registry,
                     locals,
+                    canonical,
                 );
             }
         }
         Expr::Tuple(values) => {
             for value in values {
-                format_expr(value, hint, names, registry, locals);
+                format_expr(value, hint, names, registry, locals, canonical);
             }
         }
         Expr::BinaryOp {
@@ -1020,19 +1085,21 @@ fn format_expr(
                 .first()
                 .copied()
                 .filter(|_| equality);
-            format_expr(lhs, right, names, registry, locals);
-            format_expr(rhs, left, names, registry, locals);
+            format_expr(lhs, right, names, registry, locals, canonical);
+            format_expr(rhs, left, names, registry, locals, canonical);
         }
         Expr::BinaryOp { lhs, rhs, .. } | Expr::LogicalOp { lhs, rhs, .. } => {
-            format_expr(lhs, None, names, registry, locals);
-            format_expr(rhs, None, names, registry, locals);
+            format_expr(lhs, None, names, registry, locals, canonical);
+            format_expr(rhs, None, names, registry, locals, canonical);
         }
-        Expr::Calc(value) => format_expr(value, None, names, registry, locals),
-        Expr::ArrayAccess { index, .. } => format_expr(index, None, names, registry, locals),
+        Expr::Calc(value) => format_expr(value, None, names, registry, locals, canonical),
+        Expr::ArrayAccess { index, .. } => {
+            format_expr(index, None, names, registry, locals, canonical)
+        }
         Expr::JoinedString { parts } => {
             for part in parts {
                 if let StringPart::Expr(value) = part {
-                    format_expr(value, None, names, registry, locals);
+                    format_expr(value, None, names, registry, locals, canonical);
                 }
             }
         }
@@ -1046,6 +1113,7 @@ fn format_body(
     registry: &SymbolRegistry,
     locals: &mut SymbolTable,
     returns: &[Type],
+    canonical: bool,
 ) {
     for statement in body {
         match statement {
@@ -1064,17 +1132,31 @@ fn format_body(
                     },
                 );
                 if let Some(value) = value {
-                    format_expr(value, Some(*var_type), names, registry, locals);
+                    format_expr(value, Some(*var_type), names, registry, locals, canonical);
                 }
             }
             Statement::Assignment { target, value, .. } => {
                 let hints = expression_types(target, registry, locals);
                 if let Expr::Tuple(values) = value {
                     for (i, value) in values.iter_mut().enumerate() {
-                        format_expr(value, hints.get(i).copied(), names, registry, locals);
+                        format_expr(
+                            value,
+                            hints.get(i).copied(),
+                            names,
+                            registry,
+                            locals,
+                            canonical,
+                        );
                     }
                 } else {
-                    format_expr(value, hints.first().copied(), names, registry, locals);
+                    format_expr(
+                        value,
+                        hints.first().copied(),
+                        names,
+                        registry,
+                        locals,
+                        canonical,
+                    );
                 }
             }
             Statement::ArrayDeclaration {
@@ -1091,13 +1173,15 @@ fn format_body(
                         is_array: true,
                     },
                 );
-                format_expr(size, None, names, registry, locals);
+                format_expr(size, None, names, registry, locals, canonical);
             }
-            Statement::Expression { expr, .. } => format_expr(expr, None, names, registry, locals),
+            Statement::Expression { expr, .. } => {
+                format_expr(expr, None, names, registry, locals, canonical)
+            }
             Statement::Return { values, .. } => {
                 let hints = stack_hints(registry, returns, values, locals);
                 for (value, hint) in values.iter_mut().zip(hints) {
-                    format_expr(value, hint, names, registry, locals);
+                    format_expr(value, hint, names, registry, locals, canonical);
                 }
             }
             Statement::If {
@@ -1107,21 +1191,21 @@ fn format_body(
                 else_body,
                 ..
             } => {
-                format_expr(condition, None, names, registry, locals);
-                format_body(body, names, registry, locals, returns);
+                format_expr(condition, None, names, registry, locals, canonical);
+                format_body(body, names, registry, locals, returns, canonical);
                 for (condition, body, _) in else_if {
-                    format_expr(condition, None, names, registry, locals);
-                    format_body(body, names, registry, locals, returns);
+                    format_expr(condition, None, names, registry, locals, canonical);
+                    format_body(body, names, registry, locals, returns, canonical);
                 }
                 if let Some(body) = else_body {
-                    format_body(body, names, registry, locals, returns);
+                    format_body(body, names, registry, locals, returns, canonical);
                 }
             }
             Statement::While {
                 condition, body, ..
             } => {
-                format_expr(condition, None, names, registry, locals);
-                format_body(body, names, registry, locals, returns);
+                format_expr(condition, None, names, registry, locals, canonical);
+                format_body(body, names, registry, locals, returns, canonical);
             }
             Statement::Switch {
                 switch_type,
@@ -1136,15 +1220,15 @@ fn format_body(
                 {
                     *switch_type = format!("switch_{}", ty.declared_name());
                 }
-                format_expr(expr, None, names, registry, locals);
+                format_expr(expr, None, names, registry, locals, canonical);
                 for case in cases {
                     for value in &mut case.values {
-                        format_expr(value, hint, names, registry, locals);
+                        format_expr(value, hint, names, registry, locals, canonical);
                     }
-                    format_body(&mut case.body, names, registry, locals, returns);
+                    format_body(&mut case.body, names, registry, locals, returns, canonical);
                 }
                 if let Some(body) = default {
-                    format_body(body, names, registry, locals, returns);
+                    format_body(body, names, registry, locals, returns, canonical);
                 }
             }
             _ => {}
@@ -1156,6 +1240,7 @@ pub fn format_literals(
     script: &mut ScriptDeclaration,
     names: &dyn Names,
     registry: &SymbolRegistry,
+    canonical: bool,
 ) {
     let mut locals = SymbolTable::new();
     for param in &script.params {
@@ -1173,5 +1258,6 @@ pub fn format_literals(
         registry,
         &mut locals,
         &script.return_types,
+        canonical,
     );
 }

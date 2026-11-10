@@ -1,4 +1,7 @@
-use crate::arguments::{command_hints, command_returns, proc_hints, stack_hints};
+use crate::arguments::{
+    command_hints, command_parameters, command_returns, expression_types, positional_hints,
+    proc_hints, stack_hints,
+};
 use crate::bytecode::*;
 use crate::clientscript::decompile::inference::collect_returns;
 use crate::clientscript::hooks;
@@ -6,6 +9,7 @@ use crate::parser::*;
 use crate::symbol::{SymbolKind, SymbolRegistry, SymbolTable};
 use crate::types::{BaseVarType, Type};
 use std::collections::HashMap;
+use std::ops::Range;
 use std::slice::from_ref;
 
 /// Shared lowering for RS2, CS2 and target-selected global sources. Binary
@@ -50,6 +54,14 @@ pub struct Compiler<'a> {
     stack_returns: bool,
     /// The line number of the currently-compiling statement.
     current_stmt_line: usize,
+    trace: Option<Vec<ExpressionTrace>>,
+}
+
+pub(crate) struct ExpressionTrace {
+    pub expression: usize,
+    pub instructions: Range<usize>,
+    pub operation: Option<usize>,
+    pub signature: Option<(Vec<Type>, Vec<Type>)>,
 }
 
 impl<'a> Compiler<'a> {
@@ -87,7 +99,19 @@ impl<'a> Compiler<'a> {
             current_return_types: Vec::new(),
             stack_returns: false,
             current_stmt_line: 0,
+            trace: None,
         }
+    }
+
+    pub(crate) fn compile_traced(
+        &mut self,
+        script: &ScriptDeclaration,
+        client: bool,
+    ) -> (CompiledScript, Vec<ExpressionTrace>) {
+        self.client = client;
+        self.trace = Some(Vec::new());
+        let compiled = self.compile_script(script);
+        (compiled, self.trace.take().unwrap_or_default())
     }
 
     /// Compile a single script declaration into bytecode.
@@ -504,7 +528,7 @@ impl<'a> Compiler<'a> {
                 Self::emit_line(*line, out);
                 let return_types = self.current_return_types.clone();
                 let hints = if self.stack_returns {
-                    stack_hints(self.registry, &return_types, values, locals)
+                    positional_hints(self.registry, &return_types, values, locals)
                 } else {
                     (0..values.len())
                         .map(|i| return_types.get(i).copied())
@@ -517,6 +541,7 @@ impl<'a> Compiler<'a> {
             }
 
             Statement::Expression { expr, line } => {
+                let trace_start = out.len();
                 // Java compiler behavior: for CommandCall expressions, leading ConstantVar
                 // args that resolve to strings are pushed BEFORE the LineNumber instruction.
                 let cmd_args_offset = if let Expr::CommandCall { name, args, .. } = expr {
@@ -563,6 +588,7 @@ impl<'a> Compiler<'a> {
                             out,
                             locals,
                         );
+                        self.trace_expression(expr, trace_start, out, locals);
                     }
                 } else {
                     self.compile_expr(expr, out, locals);
@@ -1237,6 +1263,172 @@ impl<'a> Compiler<'a> {
         locals: &mut SymbolTable,
         type_hint: Option<Type>,
     ) {
+        let start = out.len();
+        self.compile_expr_hinted_inner(expr, out, locals, type_hint);
+        self.trace_expression(expr, start, out, locals);
+    }
+
+    fn trace_expression(
+        &mut self,
+        expr: &Expr,
+        start: usize,
+        out: &CompiledScript,
+        locals: &SymbolTable,
+    ) {
+        if self.trace.is_none() {
+            return;
+        }
+        let (operation, signature) = match expr {
+            Expr::CommandCall {
+                name,
+                args,
+                call_line,
+                ..
+            } => {
+                let server = hooks::server_call(self.registry, name, args, locals, *call_line)
+                    .ok()
+                    .flatten();
+                let (name, args) = match &server {
+                    Some(Expr::CommandCall { name, args, .. }) => (name, args),
+                    _ => (name, args),
+                };
+                let name = name.trim_start_matches('.');
+                let lowered = hooks::lower(self.registry, name, args, locals, *call_line)
+                    .ok()
+                    .flatten();
+                let args = lowered.as_deref().unwrap_or(args);
+                let symbol = self.registry.lookup_command(name).or_else(|| {
+                    name.strip_suffix('*')
+                        .and_then(|base| self.registry.lookup_command(&format!("{base}vararg")))
+                });
+                let signature = symbol.and_then(|symbol| {
+                    let mut params = command_parameters(self.registry, name, args, locals);
+                    let mut returns = command_returns(self.registry, name, args);
+                    if self.registry.lookup_command(name).is_none()
+                        && let SymbolKind::Command {
+                            param_types,
+                            return_types,
+                            ..
+                        } = &symbol.kind
+                    {
+                        params = param_types.clone();
+                        returns = return_types.clone();
+                    }
+                    // An empty server signature accepts arbitrary arguments; it
+                    // is not evidence that the VM command consumes no values.
+                    if params.is_empty() && !args.is_empty() {
+                        return None;
+                    }
+                    if let Some(fixed) = Self::command_variadic_info(name) {
+                        if params.len() < fixed {
+                            return None;
+                        }
+                        params.truncate(fixed);
+                        params.extend(
+                            args.iter()
+                                .skip(fixed)
+                                .flat_map(|arg| expression_types(arg, self.registry, locals)),
+                        );
+                        params.push(Type::String);
+                    }
+                    if matches!(name, "db_find" | "db_find_refine") {
+                        params.push(Type::Int);
+                    }
+                    if params
+                        .iter()
+                        .chain(&returns)
+                        .any(|ty| matches!(ty, Type::Any | Type::Error))
+                    {
+                        return None;
+                    }
+                    Some((params, returns))
+                });
+                (
+                    (!name.starts_with("__")).then_some(Opcode::Command),
+                    signature,
+                )
+            }
+            Expr::Identifier(name) => {
+                let Some(symbol) = self.registry.lookup_command(name.trim_start_matches('.'))
+                else {
+                    return;
+                };
+                let SymbolKind::Command {
+                    param_types,
+                    return_types,
+                    ..
+                } = &symbol.kind
+                else {
+                    return;
+                };
+                if !out
+                    .instructions
+                    .last()
+                    .is_some_and(|i| i.opcode == Opcode::Command)
+                {
+                    return;
+                }
+                (
+                    Some(Opcode::Command),
+                    Some((param_types.clone(), return_types.clone())),
+                )
+            }
+            Expr::ProcCall { name, .. } | Expr::JumpCall { name, .. } => {
+                let jump = matches!(expr, Expr::JumpCall { .. });
+                let symbol = self
+                    .registry
+                    .lookup_script_by_trigger(if jump { "label" } else { "proc" }, name)
+                    .or_else(|| {
+                        (!jump)
+                            .then(|| self.registry.lookup_script_by_trigger("clientscript", name))
+                            .flatten()
+                    });
+                let signature = symbol.and_then(|symbol| match &symbol.kind {
+                    SymbolKind::Script {
+                        param_types,
+                        return_types,
+                        ..
+                    } => Some((
+                        param_types.clone(),
+                        if jump {
+                            Vec::new()
+                        } else {
+                            return_types.clone()
+                        },
+                    )),
+                    _ => None,
+                });
+                (
+                    Some(if jump {
+                        Opcode::JumpWithParams
+                    } else {
+                        Opcode::GosubWithParams
+                    }),
+                    signature,
+                )
+            }
+            _ => return,
+        };
+        let operation = out
+            .instructions
+            .len()
+            .checked_sub(1)
+            .filter(|&pc| pc >= start && Some(out.instructions[pc].opcode) == operation);
+        self.trace.as_mut().unwrap().push(ExpressionTrace {
+            expression: expr as *const Expr as usize,
+            instructions: start..out.len(),
+            operation,
+            signature,
+        });
+    }
+
+    fn compile_expr_hinted_inner(
+        &mut self,
+        expr: &Expr,
+        out: &mut CompiledScript,
+        locals: &mut SymbolTable,
+        type_hint: Option<Type>,
+    ) {
         match expr {
             Expr::IntLiteral(n) => {
                 out.push(Instruction::push_int(*n));
@@ -1658,7 +1850,12 @@ impl<'a> Compiler<'a> {
                 let variadic_info = Self::command_variadic_info(lookup_name);
 
                 // Compile arguments, with special handling for the script-name first arg.
-                for (i, arg) in args.iter().enumerate() {
+                let mut order = (0..args.len()).collect::<Vec<_>>();
+                if self.registry.component_first_command(lookup_name) && !order.is_empty() {
+                    order.rotate_left(1);
+                }
+                for i in order {
+                    let arg = &args[i];
                     // Emit LineNumber before each arg to track multi-line calls.
                     if let Some(&al) = arg_lines.get(i)
                         && al > 0

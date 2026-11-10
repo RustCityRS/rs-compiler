@@ -1,4 +1,100 @@
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+thread_local! {
+    static WORKER_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+pub(crate) fn with_worker_limit<R>(limit: usize, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<usize>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            WORKER_LIMIT.set(self.0);
+        }
+    }
+    let previous = WORKER_LIMIT.replace(Some(limit.max(1)));
+    let _restore = Restore(previous);
+    f()
+}
+
+fn workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(WORKER_LIMIT.get().unwrap_or(usize::MAX))
+}
+
+fn worker<R>(limited: bool, f: impl FnOnce() -> R) -> R {
+    if limited {
+        with_worker_limit(1, f)
+    } else {
+        f()
+    }
+}
+
+pub(crate) enum Background<R> {
+    Ready(R),
+    Thread(std::thread::JoinHandle<R>),
+}
+
+impl<R> Background<R> {
+    pub(crate) fn join(self) -> std::thread::Result<R> {
+        match self {
+            Self::Ready(value) => Ok(value),
+            Self::Thread(thread) => thread.join(),
+        }
+    }
+}
+
+/// Auxiliary work shares the editor's budget; unrestricted CLI calls keep overlap.
+pub(crate) fn background<R: Send + 'static>(
+    f: impl FnOnce() -> R + Send + 'static,
+) -> Background<R> {
+    match WORKER_LIMIT.get() {
+        Some(_) => Background::Ready(f()),
+        None => Background::Thread(std::thread::spawn(f)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_worker_limits_bound_nested_work_and_restore_cli_defaults() {
+        let before = workers();
+        assert_eq!(WORKER_LIMIT.get(), None);
+        with_worker_limit(2, || {
+            assert!(workers() <= 2);
+            with_worker_limit(1, || assert_eq!(workers(), 1));
+            assert_eq!(WORKER_LIMIT.get(), Some(2));
+            let items = [1, 2, 3, 4];
+            let nested = parallel_map_balanced(&items, |value| {
+                let threads = parallel_map(&items, |_| workers());
+                (*value, threads)
+            });
+            for (index, (value, threads)) in nested.iter().enumerate() {
+                assert_eq!(*value, items[index]);
+                assert!(threads.iter().all(|threads| *threads == 1));
+            }
+            assert!(
+                parallel_chunks(&items, |_| workers())
+                    .iter()
+                    .all(|n| *n == 1)
+            );
+            assert_eq!(background(|| WORKER_LIMIT.get()).join().unwrap(), Some(2));
+            with_worker_limit(1, || {
+                let caller = std::thread::current().id();
+                assert_eq!(
+                    background(|| std::thread::current().id()).join().unwrap(),
+                    caller
+                );
+            });
+        });
+        assert_eq!(WORKER_LIMIT.get(), None);
+        assert_eq!(workers(), before);
+    }
+}
 
 /// Map `f` over `items` across worker threads, returning results in the SAME
 /// order as the input. Dependency-free (uses `std::thread::scope`); each item
@@ -10,9 +106,8 @@ where
     R: Send,
     F: Fn(&T) -> R + Sync,
 {
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
+    let threads = workers();
+    let limited = WORKER_LIMIT.get().is_some();
     if threads <= 1 || items.len() <= 1 {
         return items.iter().map(&f).collect();
     }
@@ -24,7 +119,7 @@ where
             .chunks(chunk_size)
             .map(|chunk| {
                 let f = &f;
-                scope.spawn(move || chunk.iter().map(f).collect::<Vec<R>>())
+                scope.spawn(move || worker(limited, || chunk.iter().map(f).collect::<Vec<R>>()))
             })
             .collect();
         // Joining in spawn order concatenates chunks in input order, so the
@@ -44,10 +139,8 @@ where
     R: Send,
     F: Fn(&T) -> R + Sync,
 {
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(items.len());
+    let threads = workers().min(items.len());
+    let limited = WORKER_LIMIT.get().is_some();
     if threads <= 1 {
         return items.iter().map(&f).collect();
     }
@@ -56,14 +149,16 @@ where
         let handles: Vec<_> = (0..threads)
             .map(|_| {
                 scope.spawn(|| {
-                    let mut out = Vec::new();
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(item) = items.get(i) else {
-                            break out;
-                        };
-                        out.push((i, f(item)));
-                    }
+                    worker(limited, || {
+                        let mut out = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(item) = items.get(i) else {
+                                break out;
+                            };
+                            out.push((i, f(item)));
+                        }
+                    })
                 })
             })
             .collect();
@@ -101,10 +196,8 @@ where
     R: Send,
     F: Fn(&[T]) -> R + Sync,
 {
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(max_chunks.max(1));
+    let threads = workers().min(max_chunks.max(1));
+    let limited = WORKER_LIMIT.get().is_some();
     if threads <= 1 || items.len() <= 1 {
         return vec![f(items)];
     }
@@ -116,7 +209,7 @@ where
             .chunks(chunk_size)
             .map(|chunk| {
                 let f = &f;
-                scope.spawn(move || f(chunk))
+                scope.spawn(move || worker(limited, || f(chunk)))
             })
             .collect();
         for h in handles {

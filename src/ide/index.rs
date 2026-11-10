@@ -1,5 +1,6 @@
 use super::{
-    Configs, Index, Location, Reference, Symbol, SymbolKind, config, fields, highlighting, hooks,
+    Configs, Index, Location, Reference, Symbol, SymbolKind, annotations, config, fields,
+    highlighting, hooks,
 };
 use crate::lexer::Lexer;
 use crate::parallel_map_balanced;
@@ -60,7 +61,14 @@ pub(super) fn tokens<'a>(
 ) -> Vec<(Lexeme<'a>, Range<usize>)> {
     let text: &'a str = &document.text;
     let mut result = Vec::new();
+    let annotations = annotations::collect(document);
     for (token, range) in document.tokens.iter().zip(&document.spans) {
+        if annotations
+            .iter()
+            .any(|hint| hint.range.contains(&range.start))
+        {
+            continue;
+        }
         if let Ok(hook) = hooks.binary_search_by_key(&range.start, |hook| hook.range.start)
             && hooks[hook].range == *range
         {
@@ -307,8 +315,20 @@ fn script_symbols(document: &Document) -> Vec<Symbol> {
         let documentation = document.text[..line_start]
             .lines()
             .rev()
-            .take_while(|line| line.trim().starts_with("//"))
-            .map(|line| line.trim().trim_start_matches('/').trim())
+            .enumerate()
+            .take_while(|(offset, line)| {
+                let number = script.line.saturating_sub(offset + 1);
+                line.trim().starts_with("//")
+                    || script
+                        .annotations
+                        .iter()
+                        .any(|annotation| (annotation.line..=annotation.end_line).contains(&number))
+            })
+            .filter_map(|(_, line)| {
+                line.trim()
+                    .strip_prefix("//")
+                    .map(|line| line.trim_start_matches('/').trim())
+            })
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
@@ -422,19 +442,23 @@ fn hook_parameters(symbol: &mut Symbol, registry: &SymbolRegistry) {
     }
     let name = symbol.name.trim_start_matches('.');
     if let Some(&explicit) = registry.hook_commands.get(name) {
+        let component_first = explicit && registry.component_first_command(name);
         symbol.parameters = vec![("hook".into(), Type::ClientScript)];
         if explicit {
-            symbol
-                .parameters
-                .push(("component".into(), Type::Component));
+            symbol.parameters.insert(
+                usize::from(!component_first),
+                ("component".into(), Type::Component),
+            );
         }
         symbol.detail = format!(
-            "{}(hook $hook{})",
+            "{}({})",
             symbol.name,
-            if explicit {
-                ", component $component"
+            if component_first {
+                "component $component, hook $hook"
+            } else if explicit {
+                "hook $hook, component $component"
             } else {
-                ""
+                "hook $hook"
             }
         );
     } else if name == "runclientscript" {
@@ -683,17 +707,12 @@ impl Index {
     pub(super) fn build(project: &Project) -> Self {
         let registry = &project.registry;
         let documents = project.documents.values().collect::<Vec<_>>();
-        let names = registry
-            .hook_commands
-            .keys()
-            .cloned()
-            .collect::<HashSet<_>>();
         let parts = parallel_map_balanced(&documents, |document| {
             (
                 document
                     .config
                     .is_none()
-                    .then(|| hooks::collect(document, &names)),
+                    .then(|| hooks::collect(document, registry)),
                 script_symbols(document),
             )
         });

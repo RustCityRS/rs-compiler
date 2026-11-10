@@ -1,8 +1,8 @@
 use crate::clientscript::hooks::transmit_kind;
 use crate::lexer::Lexer;
 use crate::project::Document;
+use crate::symbol::SymbolRegistry;
 use crate::token::{Kind, Token};
-use std::collections::HashSet;
 use std::ops::Range;
 
 pub(super) struct Hook {
@@ -20,7 +20,7 @@ impl Hook {
     }
 }
 
-pub(super) fn collect(document: &Document, names: &HashSet<String>) -> Vec<Hook> {
+pub(super) fn collect(document: &Document, registry: &SymbolRegistry) -> Vec<Hook> {
     let mut hooks = Vec::new();
     let significant: Vec<_> = document
         .tokens
@@ -30,19 +30,44 @@ pub(super) fn collect(document: &Document, names: &HashSet<String>) -> Vec<Hook>
             !matches!(token.kind, Kind::SingleLineComment | Kind::MultiLineComment)
         })
         .collect();
+    let mut calls = Vec::new();
     for (i, (token, span)) in significant.iter().enumerate() {
+        match token.kind {
+            Kind::LParen => {
+                calls.push((i, 0));
+                continue;
+            }
+            Kind::RParen => {
+                calls.pop();
+                continue;
+            }
+            Kind::Comma => {
+                if let Some((_, argument)) = calls.last_mut() {
+                    *argument += 1;
+                }
+                continue;
+            }
+            _ => {}
+        }
         if !matches!(token.kind, Kind::StringLiteral | Kind::RawStringLiteral)
-            || i < 2
-            || significant[i - 1].0.kind != Kind::LParen
+            || i == 0
+            || !matches!(significant[i - 1].0.kind, Kind::LParen | Kind::Comma)
         {
             continue;
         }
-        let mut command = i - 2;
+        let Some(&(open, argument)) = calls.last() else {
+            continue;
+        };
+        let Some(mut command) = open.checked_sub(1) else {
+            continue;
+        };
         if &document.text[significant[command].1.clone()] == "*" && command > 0 {
             command -= 1;
         }
         let name = &document.text[significant[command].1.clone()];
-        if !names.contains(name) && name != "runclientscript" {
+        if !registry.hook_commands.contains_key(name) && name != "runclientscript"
+            || argument != usize::from(registry.component_first_command(name))
+        {
             continue;
         }
         let range = (*span).clone();

@@ -1,7 +1,62 @@
 use serde_json::{Value, json};
 use std::cell::Cell;
+use std::fs;
 use std::io::{BufRead, Read};
+use std::path::{Path, PathBuf};
+use std::process;
 use std::rc::Rc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[test]
+fn color_previews_and_presentations_follow_utf16_ranges_and_document_changes() {
+    let script = "[proc,colors]\nmes(\"😀<col=ff0000>red</col>\");\ndef_int $count = 123;\n";
+    let config = "[grass]\ncolour=0xff0000\ntexture=123\n";
+    let script_range = json!({"start":{"line":1,"character":12},"end":{"line":1,"character":18}});
+    let config_range = json!({"start":{"line":1,"character":7},"end":{"line":1,"character":15}});
+    let green = json!({"red":0.0,"green":1.0,"blue":0.0,"alpha":1.0});
+    let result = exchange(vec![
+        json!({"id":1,"method":"initialize","params":{}}),
+        json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":"mem:colors","languageId":"rs2","version":1,"text":script}}}),
+        json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///game/colors.flo","languageId":"rs2config","version":1,"text":config}}}),
+        json!({"id":2,"method":"textDocument/documentColor","params":{"textDocument":{"uri":"mem:colors"}}}),
+        json!({"id":3,"method":"textDocument/documentColor","params":{"textDocument":{"uri":"file:///game/colors.flo"}}}),
+        json!({"id":4,"method":"textDocument/colorPresentation","params":{"textDocument":{"uri":"mem:colors"},"range":script_range,"color":green}}),
+        json!({"id":5,"method":"textDocument/colorPresentation","params":{"textDocument":{"uri":"file:///game/colors.flo"},"range":config_range,"color":green}}),
+        json!({"method":"textDocument/didChange","params":{"textDocument":{"uri":"mem:colors","version":2},"contentChanges":[{"range":script_range,"text":"0000ff"}]}}),
+        json!({"id":6,"method":"textDocument/documentColor","params":{"textDocument":{"uri":"mem:colors"}}}),
+        json!({"id":7,"method":"textDocument/colorPresentation","params":{"textDocument":{"uri":"mem:colors"},"range":script_range,"color":{"red":1.1,"green":0.0,"blue":0.0,"alpha":1.0}}}),
+        json!({"id":8,"method":"textDocument/colorPresentation","params":{"textDocument":{"uri":"mem:colors"},"range":{"start":{"line":1,"character":18},"end":{"line":1,"character":12}},"color":green}}),
+        json!({"id":9,"method":"textDocument/colorPresentation","params":{"textDocument":{"uri":"file:///game/colors.flo"},"range":{"start":{"line":2,"character":8},"end":{"line":2,"character":11}},"color":green}}),
+        json!({"id":10,"method":"shutdown"}),
+        json!({"method":"exit"}),
+    ]);
+    let response = |id| result.iter().find(|message| message["id"] == id).unwrap();
+    assert_eq!(response(1)["result"]["capabilities"]["colorProvider"], true);
+    let red = json!({"red":1.0,"green":0.0,"blue":0.0,"alpha":1.0});
+    assert_eq!(
+        response(2)["result"],
+        json!([{"range":script_range,"color":red}])
+    );
+    assert_eq!(
+        response(3)["result"],
+        json!([{"range":config_range,"color":red}])
+    );
+    assert_eq!(
+        response(4)["result"],
+        json!([{"label":"00ff00","textEdit":{"range":script_range,"newText":"00ff00"}}])
+    );
+    assert_eq!(
+        response(5)["result"],
+        json!([{"label":"0x00ff00","textEdit":{"range":config_range,"newText":"0x00ff00"}}])
+    );
+    assert_eq!(
+        response(6)["result"],
+        json!([{"range":script_range,"color":{"red":0.0,"green":0.0,"blue":1.0,"alpha":1.0}}])
+    );
+    assert_eq!(response(7)["error"]["code"], -32602);
+    assert_eq!(response(8)["error"]["code"], -32602);
+    assert_eq!(response(9)["result"], json!([]));
+}
 
 #[test]
 fn semantic_token_legend_modifiers_ranges_and_utf16_match_the_reference_palette() {
@@ -118,42 +173,6 @@ fn directory_loading_waits_until_after_the_initialize_handshake() {
             usize::from(initialized)
         );
     }
-}
-
-#[test]
-fn client_pointer_diagnostics_cross_shared_procedures_and_clear_after_edit() {
-    let uri = "file:///game/scripts/clientscript/entry.cs2";
-    let result = exchange(vec![
-        json!({"id":1,"method":"initialize","params":{"initializationOptions":{
-            "target":"client",
-            "opcodes":"0=PushConstantInt\n3=PushConstantString\n21=Return\n40=GosubWithParams\n150=cc_create\n1112=cc_settext\n",
-            "commands":[
-                {"name":"cc_create","opcode":150,"params":["component","int","int"],"returns":[]},
-                {"name":"cc_settext","opcode":1112,"params":["string"],"returns":[]}
-            ],
-            "sources":[
-                {"uri":"file:///game/scripts/globalscript/paint.gs2","languageId":"gs2","text":"[proc,paint]\ncc_settext(\"x\");"},
-                {"uri":uri,"languageId":"cs2","text":"[clientscript,entry]\n~paint;"}
-            ]
-        }}}),
-        json!({"id":2,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":uri}}}),
-        json!({"method":"textDocument/didChange","params":{"textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":"[clientscript,entry]\ncc_create(1, 4, 0);\n~paint;"}]}}),
-        json!({"id":3,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":uri}}}),
-        json!({"id":4,"method":"shutdown"}),
-        json!({"method":"exit"}),
-    ]);
-    let response = |id| result.iter().find(|message| message["id"] == id).unwrap();
-    assert!(
-        response(2)["result"]["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|diagnostic| diagnostic["severity"] == 2
-                && diagnostic["message"]
-                    .as_str()
-                    .is_some_and(|text| text.contains("active_component")))
-    );
-    assert_eq!(response(3)["result"]["items"], json!([]));
 }
 
 fn exchange(messages: Vec<Value>) -> Vec<Value> {
@@ -332,56 +351,6 @@ fn standard_lsp_hints_config_navigation_rename_and_extract_apply_edits() {
         !result.iter().any(|message| message.get("error").is_some()),
         "{result:?}"
     );
-}
-
-#[test]
-fn watched_file_reload_replaces_disk_sources_and_keeps_unsaved_buffers() {
-    let loaded = runec::lsp::project_from_json(
-        &json!({"sources":[{"uri":"mem:one","languageId":"gs2","text":"[proc,old]\nreturn;"}]}),
-    )
-    .unwrap();
-    let loader = Box::new(|| {
-        runec::lsp::project_from_json(&json!({"sources":[
-            {"uri":"mem:one","languageId":"gs2","text":"[proc,saved]\nreturn;"},
-            {"uri":"mem:created","languageId":"gs2","text":"[proc,created]\nreturn;"}
-        ]}))
-    });
-    let result = exchange_with_loader(
-        vec![
-            json!({"id":1,"method":"initialize","params":{"capabilities":{"workspace":{"didChangeWatchedFiles":{"dynamicRegistration":true}}}}}),
-            json!({"method":"initialized"}),
-            json!({"id":"runec/watch/1","result":null}),
-            json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":"mem:one","languageId":"gs2","version":1,"text":"[proc,unsaved]\nreturn;"}}}),
-            json!({"method":"workspace/didChangeWatchedFiles","params":{"changes":[{"uri":"mem:created","type":1}]}}),
-            json!({"id":2,"method":"workspace/symbol","params":{"query":""}}),
-            json!({"method":"textDocument/didClose","params":{"textDocument":{"uri":"mem:one"}}}),
-            json!({"id":3,"method":"workspace/symbol","params":{"query":""}}),
-            json!({"id":4,"method":"shutdown"}),
-            json!({"method":"exit"}),
-        ],
-        Some(loaded),
-        Some(loader),
-    );
-    assert!(
-        result
-            .iter()
-            .any(|message| message["method"] == "client/registerCapability")
-    );
-    for (id, expected) in [
-        (2, vec!["created", "unsaved"]),
-        (3, vec!["created", "saved"]),
-    ] {
-        let response = result.iter().find(|message| message["id"] == id).unwrap();
-        let mut names = response["result"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|symbol| symbol["name"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        names.sort();
-        assert_eq!(names, expected);
-    }
-    assert!(!result.iter().any(|message| message.get("error").is_some()));
 }
 
 #[test]
@@ -588,4 +557,148 @@ fn distinct_files_still_report_duplicate_scripts() {
                     .any(|diagnostic| diagnostic["code"] == "RUNEC2001")
             })
     }));
+}
+
+#[test]
+fn directory_servers_ignore_other_revisions_but_accept_new_project_files() {
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let root = fs::canonicalize(&self.0).unwrap();
+            let base = fs::canonicalize(env!("CARGO_TARGET_TMPDIR")).unwrap();
+            assert!(root != base && root.starts_with(&base));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "lsp-roots-{}-{}",
+        process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let fixture = Fixture(fs::canonicalize(root).unwrap());
+    let script = "[proc,scroll_elena_hangover_cure_recipe]\nreturn;\n";
+    let callback = "[proc,callback]\nreturn;\n";
+    for (path, text) in [
+        ("647/pack/command.pack", ""),
+        ("647/scripts/runescript/original.rs2", script),
+        (
+            "647/scripts/globalscript/base.gs2",
+            "[proc,shared]\nreturn;\n",
+        ),
+        ("647/scripts/clientscript/callback.cs2", callback),
+        ("647/interfaces/base.if3", "[main]\ntype=layer\n"),
+        ("647/defaults/base.defaults", ""),
+        ("225/scripts/runescript/foreign.rs2", script),
+        ("647/scripts/runescript-other/foreign.rs2", script),
+    ] {
+        let path = fixture.0.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    fs::create_dir_all(fixture.0.join("647/textures")).unwrap();
+    let uri = |relative: &str| {
+        let path = fixture
+            .0
+            .join(relative)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let path = path.strip_prefix("//?/").unwrap_or(&path);
+        format!(
+            "file://{}{path}",
+            if path.starts_with('/') { "" } else { "/" }
+        )
+    };
+    let active = uri("647/scripts/runescript/original.rs2");
+    let foreign = uri("225/scripts/runescript/foreign.rs2");
+    let boundary = uri("647/scripts/runescript-other/foreign.rs2");
+    let global = uri("647/scripts/globalscript/new.gs2");
+    let texture = uri("647/textures/paint.texture");
+    let material = uri("647/materials/new.material");
+    let client = uri("647/scripts/clientscript/callback.cs2");
+    let duplicate = uri("647/scripts/runescript/duplicate.rs2");
+    let watched = uri("647/pack/command.pack");
+    let source = fixture.0.join("647/scripts/runescript");
+    let pack = fixture.0.join("647/pack");
+    let material_path = fixture.0.join("647/materials/new.material");
+    let loads = Rc::new(Cell::new(0));
+    let count = loads.clone();
+    let loader = Box::new(move || {
+        count.set(count.get() + 1);
+        let project = runec::filesystem::editor_project(&source, Some(&pack), false)
+            .map_err(|error| error.to_string())?;
+        if count.get() == 1 {
+            fs::create_dir_all(material_path.parent().unwrap()).unwrap();
+            fs::write(&material_path, "averagecolour=39\n").unwrap();
+        }
+        Ok(project)
+    });
+    let result = exchange_with_loader(
+        vec![
+            json!({"id":1,"method":"initialize","params":{}}),
+            json!({"method":"initialized"}),
+            json!({"method":"workspace/didChangeWatchedFiles","params":{"changes":[{"uri":material,"type":1}]}}),
+            json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":material,"languageId":"rs2config","version":1,"text":"averagecolour=39\n"}}}),
+            json!({"id":12,"method":"textDocument/documentColor","params":{"textDocument":{"uri":material}}}),
+            json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":active,"languageId":"rs2","version":1,"text":script}}}),
+            json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":foreign,"languageId":"rs2","version":1,"text":script}}}),
+            json!({"method":"textDocument/didChange","params":{"textDocument":{"uri":foreign,"version":2},"contentChanges":[{"text":format!("{script}[proc,foreign_only]\nreturn;\n")}]}}),
+            json!({"method":"textDocument/didSave","params":{"textDocument":{"uri":foreign}}}),
+            json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":global,"languageId":"gs2","version":1,"text":"[proc,new_shared]\nreturn;\n"}}}),
+            json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":texture,"languageId":"rs2config","version":1,"text":"[op0]\ntype=constant_color\ncolor=0xff0000\n"}}}),
+            json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":"untitled:scoped","languageId":"rs2","version":1,"text":"[proc,new_virtual]\nreturn;\n"}}}),
+            json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":client,"languageId":"cs2","version":1,"text":callback}}}),
+            json!({"method":"workspace/didChangeWatchedFiles","params":{"changes":[{"uri":watched,"type":2}]}}),
+            json!({"method":"workspace/didChangeConfiguration","params":{"settings":{"target":"rune"}}}),
+            json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":boundary,"languageId":"rs2","version":1,"text":script}}}),
+            json!({"id":2,"method":"workspace/symbol","params":{"query":"scroll_elena_hangover_cure_recipe"}}),
+            json!({"id":3,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":active}}}),
+            json!({"id":4,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":foreign}}}),
+            json!({"id":5,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":foreign}}}),
+            json!({"id":6,"method":"workspace/symbol","params":{"query":"new_"}}),
+            json!({"id":7,"method":"textDocument/documentColor","params":{"textDocument":{"uri":texture}}}),
+            json!({"id":8,"method":"workspace/symbol","params":{"query":"callback"}}),
+            json!({"method":"textDocument/didClose","params":{"textDocument":{"uri":foreign}}}),
+            json!({"method":"textDocument/didClose","params":{"textDocument":{"uri":boundary}}}),
+            json!({"id":9,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":active}}}),
+            json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":duplicate,"languageId":"rs2","version":1,"text":script}}}),
+            json!({"id":10,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":duplicate}}}),
+            json!({"id":11,"method":"shutdown"}),
+            json!({"method":"exit"}),
+        ],
+        None,
+        Some(loader),
+    );
+    assert_eq!(loads.get(), 2);
+    assert!(
+        !result.iter().any(|message| message.get("error").is_some()),
+        "{result:?}"
+    );
+    let response = |id| &result.iter().find(|message| message["id"] == id).unwrap()["result"];
+    assert_eq!(response(2).as_array().unwrap().len(), 1);
+    for id in [3, 4, 9] {
+        assert_eq!(response(id)["items"], json!([]), "{id}: {}", response(id));
+    }
+    assert_eq!(response(5)["data"], json!([]));
+    let mut names = response(6)
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|symbol| symbol["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["new_shared", "new_virtual"]);
+    assert_eq!(response(7).as_array().unwrap().len(), 1);
+    assert_eq!(response(8).as_array().unwrap().len(), 1);
+    assert_eq!(response(12).as_array().unwrap().len(), 1);
+    assert!(
+        response(10)["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "RUNEC2001")
+    );
 }

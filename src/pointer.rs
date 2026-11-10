@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::OnceLock;
 
 /// The pointer types tracked by the script pointer checker.
 ///
@@ -210,6 +211,7 @@ pub struct PointerHolder {
     pub set: PointerSet,
     pub conditional_set: bool,
     pub corrupted: PointerSet,
+    pub may_suspend: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -453,6 +455,15 @@ pub fn trigger_pointers(trigger: &str) -> PointerSet {
 ///
 /// Transcribed from `ScriptOpcodePointers.ts`.
 pub fn command_pointers() -> HashMap<String, PointerHolder> {
+    default_command_pointers().clone()
+}
+
+pub(crate) fn default_command_pointers() -> &'static HashMap<String, PointerHolder> {
+    static POINTERS: OnceLock<HashMap<String, PointerHolder>> = OnceLock::new();
+    POINTERS.get_or_init(build_command_pointers)
+}
+
+fn build_command_pointers() -> HashMap<String, PointerHolder> {
     use PointerType::*;
 
     let mut map = HashMap::new();
@@ -472,6 +483,7 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
             set: set.iter().copied().collect(),
             corrupted: corrupt.iter().copied().collect(),
             conditional_set: conditional,
+            may_suspend: false,
         };
         map.insert(name.to_lowercase(), holder);
 
@@ -482,6 +494,7 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
                 set: set2.iter().copied().collect(),
                 corrupted: corrupt2.iter().copied().collect(),
                 conditional_set: conditional,
+                may_suspend: false,
             };
             map.insert(format!(".{}", name.to_lowercase()), holder2);
         }
@@ -3129,5 +3142,24 @@ pub fn command_pointers() -> HashMap<String, PointerHolder> {
         false,
     );
 
+    // Suspension is part of the command contract, independent of pointer corruption.
+    for name in [
+        "world_delay",
+        "p_arrivedelay",
+        "p_countdialog",
+        "p_stringdialog",
+        "p_setdisplayname",
+        "p_delay",
+        "p_pausebutton",
+        "npc_arrivedelay",
+        "npc_delay",
+        "test_tick",
+        "wait_for",
+    ] {
+        map.entry(name.into()).or_default().may_suspend = true;
+        if let Some(secondary) = map.get_mut(&format!(".{name}")) {
+            secondary.may_suspend = true;
+        }
+    }
     map
 }

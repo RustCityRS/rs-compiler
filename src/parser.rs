@@ -14,12 +14,47 @@ pub struct ScriptFile {
 
 #[derive(Debug, Clone)]
 pub struct ScriptDeclaration {
+    pub annotations: Vec<Annotation>,
     pub trigger: String,
     pub name: String,
     pub params: Vec<ParamDef>,
     pub return_types: Vec<Type>,
     pub body: Vec<Statement>,
     pub line: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct Annotation {
+    pub name: String,
+    pub value: String,
+    pub line: usize,
+    pub column: usize,
+    pub value_line: usize,
+    pub value_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+}
+
+pub const ANNOTATIONS: &[(&str, &[&str])] = &[
+    ("stack", &["component_last"]),
+    (
+        "signature",
+        &[
+            "fixed",
+            "hook",
+            "hook_component",
+            "enum",
+            "enum_output",
+            "param",
+        ],
+    ),
+];
+
+pub fn annotation_values(name: &str) -> Option<&'static [&'static str]> {
+    ANNOTATIONS
+        .iter()
+        .find(|(key, _)| *key == name)
+        .map(|(_, values)| *values)
 }
 
 #[derive(Debug, Clone)]
@@ -316,6 +351,100 @@ impl Parser {
 
     // ── Top-level parsing ──
 
+    fn annotation_value(name: &str, value: &str) -> bool {
+        annotation_values(name).is_some_and(|values| values.contains(&value))
+    }
+
+    fn annotation_ahead(&self) -> bool {
+        let mut tokens = self.tokens[self.pos..].iter().filter(|token| {
+            !matches!(token.kind, Kind::SingleLineComment | Kind::MultiLineComment)
+        });
+        if tokens
+            .next()
+            .is_none_or(|token| token.kind != Kind::JumpCall)
+        {
+            return false;
+        }
+        let Some(name) = tokens.next() else {
+            return false;
+        };
+        if tokens.next().is_none_or(|token| token.kind != Kind::LParen) {
+            return false;
+        }
+        let Some(value) = tokens.next() else {
+            return false;
+        };
+        if value.kind != Kind::Identifier || !Self::annotation_value(&name.value, &value.value) {
+            return false;
+        }
+        if tokens.next().is_none_or(|token| token.kind != Kind::RParen) {
+            return false;
+        }
+        tokens
+            .next()
+            .is_none_or(|token| token.kind != Kind::Semicolon)
+    }
+
+    fn parse_annotations(&mut self) -> Result<Vec<Annotation>, SyntaxError> {
+        let mut annotations: Vec<Annotation> = Vec::new();
+        while self.peek_kind() == Kind::JumpCall {
+            let start = self.next();
+            let name = self.expect(Kind::Identifier)?;
+            if name.line != start.line || name.column != start.column + 1 {
+                return Err(SyntaxError::from_token(
+                    self.file_path.clone(),
+                    &name,
+                    "Annotation name must immediately follow '@'".into(),
+                ));
+            }
+            if annotation_values(&name.value).is_none() {
+                return Err(SyntaxError::from_token(
+                    self.file_path.clone(),
+                    &name,
+                    format!("Unknown compiler annotation @{}", name.value),
+                ));
+            }
+            if annotations
+                .iter()
+                .any(|annotation| annotation.name == name.value)
+            {
+                return Err(SyntaxError::from_token(
+                    self.file_path.clone(),
+                    &name,
+                    format!("Duplicate compiler annotation @{}", name.value),
+                ));
+            }
+            self.expect(Kind::LParen)?;
+            let value = self.expect(Kind::Identifier)?;
+            if !Self::annotation_value(&name.value, &value.value) {
+                return Err(SyntaxError::from_token(
+                    self.file_path.clone(),
+                    &value,
+                    format!("Unknown @{} value '{}'", name.value, value.value),
+                ));
+            }
+            let end = self.expect(Kind::RParen)?;
+            annotations.push(Annotation {
+                name: name.value,
+                value: value.value,
+                line: start.line,
+                column: start.column,
+                value_line: value.line,
+                value_column: value.column,
+                end_line: end.line,
+                end_column: end.column + 1,
+            });
+        }
+        if !annotations.is_empty() && self.peek_kind() != Kind::LBracket {
+            return Err(SyntaxError::from_token(
+                self.file_path.clone(),
+                self.at(),
+                "Compiler annotations must precede a command declaration".into(),
+            ));
+        }
+        Ok(annotations)
+    }
+
     pub fn parse(&mut self) -> Result<ScriptFile, SyntaxError> {
         let mut scripts = Vec::new();
         while !self.is_eof() {
@@ -340,8 +469,9 @@ impl Parser {
                         self.next();
                     }
                     while !self.is_eof() {
-                        if self.peek_kind() == Kind::LBracket
-                            && self.peek_kind_ahead(2) == Kind::Comma
+                        if self.annotation_ahead()
+                            || self.peek_kind() == Kind::LBracket
+                                && self.peek_kind_ahead(2) == Kind::Comma
                         {
                             break;
                         }
@@ -357,12 +487,20 @@ impl Parser {
     }
 
     fn parse_script_declaration(&mut self) -> Result<ScriptDeclaration, SyntaxError> {
+        let annotations = self.parse_annotations()?;
         let line = self.line();
 
         self.expect(Kind::LBracket)?;
 
         // Parse trigger type
         let trigger_tok = self.next();
+        if !annotations.is_empty() && trigger_tok.value != "command" {
+            return Err(SyntaxError::from_token(
+                self.file_path.clone(),
+                &trigger_tok,
+                "Compiler annotations are only valid on command declarations".into(),
+            ));
+        }
         let trigger = trigger_tok.value;
 
         self.expect(Kind::Comma)?;
@@ -385,6 +523,19 @@ impl Parser {
         } else {
             Vec::new()
         };
+        if let Some(annotation) = annotations
+            .iter()
+            .find(|annotation| annotation.name == "stack")
+            && params.first().map(|param| param.param_type) != Some(Type::Component)
+        {
+            return Err(SyntaxError {
+                path: self.file_path.clone(),
+                message: "@stack(component_last) requires a component as the first parameter"
+                    .into(),
+                line: annotation.line,
+                position: annotation.column,
+            });
+        }
 
         // Parse body statements until next script declaration or EOF
         // Some scripts wrap the body in braces: [proc,name] { ... }
@@ -404,7 +555,9 @@ impl Parser {
                 self.next(); // consume '}'
                 break;
             }
-            if (!has_brace || self.recovering) && self.peek_kind() == Kind::LBracket {
+            if (!has_brace || self.recovering)
+                && (self.peek_kind() == Kind::LBracket || self.annotation_ahead())
+            {
                 if has_brace {
                     self.closing_brace()?;
                 }
@@ -430,6 +583,7 @@ impl Parser {
         body.splice(0..0, arrays);
 
         Ok(ScriptDeclaration {
+            annotations,
             trigger,
             name,
             params,
@@ -655,6 +809,13 @@ impl Parser {
     }
 
     fn parse_statement_inner(&mut self) -> Result<Statement, SyntaxError> {
+        if self.annotation_ahead() {
+            return Err(SyntaxError::from_token(
+                self.file_path.clone(),
+                self.at(),
+                "Compiler annotations must precede a command declaration".into(),
+            ));
+        }
         match self.peek_kind() {
             // Empty statement (trailing semicolon after switch/if block, etc.)
             Kind::Semicolon => {

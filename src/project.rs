@@ -1,11 +1,12 @@
 //! Compiler service for caller-owned sources. This module performs no I/O.
-use crate::bytecode::CompiledScript;
+use crate::bytecode::{CompiledScript, Opcode, Operand};
 use crate::clientscript::{self, Source, format::Format};
 use crate::compiler::{Compiler, compile_file};
 use crate::diagnostics::{Diagnostic, DiagnosticsCollector, Phase, Severity};
 use crate::ide::{Configs, Index};
 use crate::lexer::Lexer;
 use crate::parser::{Parser, ScriptFile};
+use crate::pointer::PointerSet;
 use crate::pointer_checker::{PointerChecker, ScriptSource};
 use crate::sources::Scope;
 use crate::symbol::SymbolRegistry;
@@ -125,6 +126,9 @@ pub struct Compilation {
 pub struct Project {
     pub(crate) documents: BTreeMap<SourceId, Document>,
     pub(crate) registry: SymbolRegistry,
+    /// Directory URIs owned by a filesystem-backed editor project. Other hosts
+    /// accept arbitrary source names and leave this unrestricted.
+    pub(crate) editor_roots: Option<Vec<String>>,
     target: Target,
     options: Options,
     next_source: u64,
@@ -134,6 +138,8 @@ pub struct Project {
     analyzed_generation: Option<u64>,
     cached_diagnostics: DiagnosticsCollector,
     checked_full: Option<(u64, DiagnosticsCollector)>,
+    pub(crate) pointer_requirements: Option<(u64, HashMap<SourceId, HashMap<String, PointerSet>>)>,
+    pub(crate) effects: Mutex<Option<Arc<crate::effects::Effects>>>,
     deep: Option<(HashMap<PathBuf, i64>, Vec<Diagnostic>)>,
     pub(crate) index: OnceLock<Index>,
     pub(crate) configs: Mutex<Option<Arc<Configs>>>,
@@ -147,6 +153,7 @@ impl Project {
         Self {
             documents: BTreeMap::new(),
             registry,
+            editor_roots: None,
             target,
             options,
             next_source: 0,
@@ -156,6 +163,8 @@ impl Project {
             analyzed_generation: None,
             cached_diagnostics: DiagnosticsCollector::new(),
             checked_full: None,
+            pointer_requirements: None,
+            effects: Mutex::default(),
             deep: None,
             index: OnceLock::new(),
             configs: Mutex::default(),
@@ -167,6 +176,20 @@ impl Project {
 
     pub fn registry(&self) -> &SymbolRegistry {
         &self.registry
+    }
+    pub(crate) fn target_scope(&self) -> Scope {
+        match self.target {
+            Target::Rune => Scope::Rune,
+            Target::Client(_) => Scope::Client,
+        }
+    }
+    pub(crate) fn analysis_cancelled(&self) -> bool {
+        self.options.cancellation.is_cancelled()
+    }
+    pub(crate) fn pointer_requirements_ready(&self) -> bool {
+        self.pointer_requirements
+            .as_ref()
+            .is_some_and(|(generation, _)| *generation == self.generation)
     }
     pub fn set_cancellation(&mut self, token: CancellationToken) {
         self.options.cancellation = token;
@@ -844,20 +867,47 @@ impl Project {
             .iter()
             .map(|script| script.name.clone())
             .collect::<Vec<_>>();
-        for diagnostics in parallel_chunks(&names, |chunk| {
+        let mut pointer_requirements = HashMap::new();
+        for (diagnostics, requirements) in parallel_chunks(&names, |chunk| {
             let mut checker = PointerChecker::with_shared(
                 ScriptSource::Resident(&compiled),
                 &self.registry,
                 shared.clone(),
             );
             checker.set_source_cache(source);
-            checker.validate_names_until(chunk, &|| cancellation.is_cancelled())
+            checker.validate_names_with_requirements_until(chunk, &|| cancellation.is_cancelled())
         }) {
             analysis.diagnostics.merge(diagnostics);
+            pointer_requirements.extend(requirements);
         }
         analysis.cancelled = self.options.cancellation.is_cancelled();
         if !analysis.cancelled {
+            let Some(incomplete) = incomplete_pointer_scripts(&compiled, cancellation) else {
+                analysis.cancelled = true;
+                return analysis;
+            };
+            let source_ids = documents
+                .iter()
+                .map(|document| (document.label.to_string_lossy(), document.id))
+                .collect::<HashMap<_, _>>();
+            let mut requirements_by_source: HashMap<_, HashMap<_, _>> = HashMap::new();
+            for script in &compiled {
+                if !incomplete.contains(&script.id)
+                    && let Some(&source) = source_ids.get(script.source_path.as_str())
+                    && let Some(&required) = pointer_requirements.get(&script.name)
+                {
+                    requirements_by_source
+                        .entry(source)
+                        .or_default()
+                        .insert(script.name.clone(), required);
+                }
+            }
+            if cancellation.is_cancelled() {
+                analysis.cancelled = true;
+                return analysis;
+            }
             self.checked_full = Some((self.generation, analysis.diagnostics.clone()));
+            self.pointer_requirements = Some((self.generation, requirements_by_source));
             self.deep = Some((
                 self.documents
                     .values()
@@ -875,6 +925,47 @@ impl Project {
             .find(|doc| doc.label == label)
             .map(|doc| doc.text.as_ref())
     }
+}
+
+fn incomplete_pointer_scripts(
+    compiled: &[CompiledScript],
+    cancellation: &CancellationToken,
+) -> Option<HashSet<i32>> {
+    let available = compiled
+        .iter()
+        .map(|script| script.id)
+        .collect::<HashSet<_>>();
+    let mut callers: HashMap<i32, Vec<i32>> = HashMap::new();
+    let mut incomplete = HashSet::new();
+    let mut pending = Vec::new();
+    for script in compiled {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        for instruction in &script.instructions {
+            if matches!(
+                instruction.opcode,
+                Opcode::Gosub | Opcode::GosubWithParams | Opcode::Jump | Opcode::JumpWithParams
+            ) && let Operand::Int(callee) = instruction.operand
+            {
+                callers.entry(callee).or_default().push(script.id);
+                if !available.contains(&callee) && incomplete.insert(callee) {
+                    pending.push(callee);
+                }
+            }
+        }
+    }
+    while let Some(callee) = pending.pop() {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        for &caller in callers.get(&callee).into_iter().flatten() {
+            if incomplete.insert(caller) {
+                pending.push(caller);
+            }
+        }
+    }
+    Some(incomplete)
 }
 
 fn parse_document(

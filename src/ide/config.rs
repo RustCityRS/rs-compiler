@@ -316,9 +316,9 @@ pub(super) fn declarations(
     }
 }
 
-struct Typed<'a> {
-    token: SemanticToken,
-    value: Option<Value>,
+pub(super) struct Typed<'a> {
+    pub(super) token: SemanticToken,
+    pub(super) value: Option<Value>,
     table: Option<&'a str>,
 }
 
@@ -329,7 +329,7 @@ pub(super) fn tokens(document: &Document, types: &ConfigTypes) -> Vec<SemanticTo
         .collect()
 }
 
-fn typed_tokens<'a>(document: &'a Document, types: &ConfigTypes) -> Vec<Typed<'a>> {
+pub(super) fn typed_tokens<'a>(document: &'a Document, types: &ConfigTypes) -> Vec<Typed<'a>> {
     let text: &'a str = &document.text;
     let bytes = text.as_bytes();
     let file_kind = document.config.as_deref().unwrap_or_default();

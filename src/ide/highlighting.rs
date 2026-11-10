@@ -1,4 +1,4 @@
-use super::{Index, SemanticToken, SymbolKind, TokenKind};
+use super::{Index, SemanticToken, SymbolKind, TokenKind, annotations};
 use crate::lexer::Lexer;
 use crate::project::Document;
 use crate::token::Kind;
@@ -132,10 +132,35 @@ fn code(
             },
         );
     let mut signature_end = 0;
+    let annotations = annotations::collect(document);
     let mut i = 0;
     while i < tokens.len() {
         let (kind, mut span) = tokens[i].clone();
         let next = tokens.get(i + 1);
+        if let Some(hint) = annotations
+            .iter()
+            .find(|hint| hint.range.contains(&span.start))
+        {
+            let token_kind = if span.start == hint.name.start {
+                span = hint.name.clone();
+                while tokens
+                    .get(i + 1)
+                    .is_some_and(|(_, next)| next.end <= span.end)
+                {
+                    i += 1;
+                }
+                TokenKind::Decorator
+            } else if span == hint.value {
+                TokenKind::EnumMember
+            } else if matches!(kind, Kind::SingleLineComment | Kind::MultiLineComment) {
+                TokenKind::Comment
+            } else {
+                TokenKind::Operator
+            };
+            out.push(SemanticToken::new(span, token_kind));
+            i += 1;
+            continue;
+        }
         if kind == Kind::LBracket
             && next.is_some_and(|(kind, _)| identifier(*kind))
             && tokens
@@ -341,7 +366,7 @@ fn code(
     }
 }
 
-pub(super) fn interpolations(raw: &str) -> Vec<(Range<usize>, bool)> {
+pub(crate) fn interpolations(raw: &str) -> Vec<(Range<usize>, bool)> {
     let bytes = raw.as_bytes();
     let mut result = Vec::new();
     let mut i = 0;

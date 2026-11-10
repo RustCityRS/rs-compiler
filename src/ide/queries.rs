@@ -1,6 +1,6 @@
 use super::{
     CodeAction, Completion, Hover, Index, Location, SemanticToken, SignatureHelp, Symbol,
-    SymbolKind, TextEdit, config, highlighting, index,
+    SymbolKind, TextEdit, annotations, config, highlighting, index,
 };
 use crate::clientscript::hooks::transmit_id;
 use crate::diagnostics::{Diagnostic, DiagnosticsCollector, Phase};
@@ -20,6 +20,9 @@ impl Project {
     }
 
     pub fn hover(&self, source: SourceId, offset: usize) -> Option<Hover> {
+        if let Some(hover) = annotations::hover(self.document(source)?, offset) {
+            return Some(hover);
+        }
         let index = self.symbol_index();
         let Some(reference) = index.at(source, offset) else {
             return config::key_hover(self.document(source)?, offset);
@@ -240,6 +243,9 @@ impl Project {
         };
         if !document.text.is_char_boundary(offset) {
             return Vec::new();
+        }
+        if let Some(items) = annotations::completions(document, offset, limit) {
+            return items;
         }
         if let Some(items) = config::completions(self, document, offset, limit) {
             return items;

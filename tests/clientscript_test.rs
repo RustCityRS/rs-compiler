@@ -223,6 +223,109 @@ fn multiple_return_values_can_be_forwarded_to_a_call_or_return() {
         "{:?}",
         checker.diagnostics.errors()
     );
+    let reversed = clientscript::parse(
+        "[proc,reversed]()(int,string,long) return(r\"ok\",1,2L);",
+        path,
+    )
+    .unwrap();
+    clientscript::register(
+        &reversed,
+        &HashMap::from([("[proc,reversed]".into(), 4)]),
+        &mut registry,
+    )
+    .unwrap();
+    let mut checker = runec::typechecker::TypeChecker::new(&registry);
+    checker.check_file(&reversed, path);
+    assert!(checker.diagnostics.has_errors());
+}
+
+#[test]
+fn client_calls_require_declared_argument_order_and_types() {
+    let path = Path::new("colours.cs2");
+    let format = Format::parse(
+        "0=PushConstantInt\n3=PushConstantString\n21=Return\n\
+        33=PushIntLocal\n34=PopIntLocal\n35=PushStringLocal\n36=PopStringLocal\n40=GosubWithParams\n\
+        2101=if_setcolour\n2112=if_settext\n9000=set_mixed\n",
+    )
+    .unwrap();
+    for (body, valid) in [
+        ("if_setcolour(0xff0000, panel:button);", false),
+        ("if_setcolour(panel:button, 0xff0000);", true),
+        ("if_setcolour(^red, panel:button);", false),
+        ("if_setcolour(panel:button, ^red);", true),
+        (
+            "def_rgb $colour = ^red; def_component $component = panel:button;\n\
+            if_setcolour($component, $colour);",
+            true,
+        ),
+        (
+            "def_rgb $colour = ^red; def_component $component = panel:button;\n\
+            if_setcolour($colour, $component);",
+            false,
+        ),
+        ("if_setcolour(65538, 16711680);", true),
+        ("if_settext(panel:button, \"text\");", true),
+        ("if_settext(\"text\", panel:button);", false),
+        (
+            "def_string $string0 = \"text\"; def_component $component0 = panel:button;\n\
+            if_settext($string0, $component0);",
+            false,
+        ),
+        ("set_mixed(^red, \"text\", panel:button);", true),
+        ("set_mixed(\"text\", ^red, panel:button);", false),
+        ("set_mixed(\"text\", panel:button, ^red);", false),
+        ("~paint(^red, panel:button);", true),
+        ("~paint(panel:button, ^red);", false),
+        ("~mixed(1, \"text\");", true),
+        ("~mixed(\"text\", 1);", false),
+        ("~paint(~pair());", true),
+        ("if_setcolour(~pair());", false),
+        ("if_setcolour(~reversed_pair());", false),
+    ] {
+        let text = format!(
+            "[proc,paint](rgb $colour, component $component) return;\n\
+            [proc,mixed](int $value, string $text) return;\n\
+            [proc,pair]()(rgb,component) return(^red, panel:button);\n\
+            [proc,reversed_pair]()(component,rgb) return(panel:button, ^red);\n\
+            [clientscript,entry]\n{body}"
+        );
+        let file = clientscript::parse(&text, path).unwrap();
+        let mut registry = SymbolRegistry::new();
+        registry.register_entity_id("panel:button".into(), Type::Component, (1 << 16) | 2);
+        registry.register_constant("red".into(), Type::Colour, Some(0xff0000), None);
+        for (name, opcode, parameters) in [
+            ("if_setcolour", 2101, vec![Type::Component, Type::Colour]),
+            ("if_settext", 2112, vec![Type::Component, Type::String]),
+            (
+                "set_mixed",
+                9000,
+                vec![Type::Colour, Type::String, Type::Component],
+            ),
+        ] {
+            registry.register_command(name.into(), opcode, parameters, Vec::new());
+            registry.set_command_behavior(name, true, None, None);
+            if name.starts_with("if_") {
+                registry.set_component_first_command(name, true);
+            }
+        }
+        let ids = file
+            .scripts
+            .iter()
+            .enumerate()
+            .map(|(id, script)| (format!("[{},{}]", script.trigger, script.name), id as i32))
+            .collect();
+        clientscript::register(&file, &ids, &mut registry).unwrap();
+        let compiled = clientscript::compile(&file, path, &registry, &format);
+        if valid {
+            assert!(compiled.is_ok(), "{body}: {compiled:?}");
+        } else {
+            let error = compiled.expect_err(body).to_string();
+            assert!(
+                error.contains("argument") || error.contains("separate first"),
+                "{body}: {error}"
+            );
+        }
+    }
 }
 
 #[test]

@@ -1,9 +1,82 @@
-use super::{InlayHint, SymbolKind, index};
+use super::{InlayHint, ScriptPointers, SymbolKind, index};
+use crate::effects::ScriptEffects;
 use crate::project::{Project, SourceId};
 use crate::token::Kind;
 use std::ops::Range;
 
 impl Project {
+    /// Cached AST effects, with pointer requirements attached only when already checked.
+    pub fn script_effects(&self, source: SourceId) -> Vec<ScriptEffects> {
+        let Some(document) = self.document(source) else {
+            return Vec::new();
+        };
+        let Some(file) = document.syntax() else {
+            return Vec::new();
+        };
+        let Some(effects) = self.effect_summaries() else {
+            return Vec::new();
+        };
+        let requirements = self
+            .pointer_requirements
+            .as_ref()
+            .filter(|(generation, _)| *generation == self.generation)
+            .and_then(|(_, sources)| sources.get(&source));
+        file.scripts
+            .iter()
+            .filter_map(|script| {
+                if script.trigger == "command" {
+                    return None;
+                }
+                let name = format!("[{},{}]", script.trigger, script.name);
+                let summary = effects.scripts.get(&(source, script.line, name.clone()))?;
+                let line = document.lines.line(script.line.saturating_sub(1))?;
+                let text = &document.text[line.clone()];
+                let start = line.start + text.len() - text.trim_start().len();
+                Some(ScriptEffects {
+                    range: start..start,
+                    may_suspend: summary.may_suspend,
+                    writes: summary.writes.iter().cloned().collect(),
+                    incomplete: summary.incomplete,
+                    required: requirements
+                        .and_then(|requirements| requirements.get(&name))
+                        .copied(),
+                })
+            })
+            .collect()
+    }
+
+    /// Entry pointer requirements from the latest completed `check`. Stale or
+    /// unavailable analysis produces no annotations.
+    pub fn script_pointers(&self, source: SourceId) -> Vec<ScriptPointers> {
+        if !self.pointer_requirements_ready() {
+            return Vec::new();
+        }
+        let Some(document) = self.document(source) else {
+            return Vec::new();
+        };
+        let Some(file) = document.syntax() else {
+            return Vec::new();
+        };
+        let Some(requirements) = self.pointer_requirements.as_ref().unwrap().1.get(&source) else {
+            return Vec::new();
+        };
+        file.scripts
+            .iter()
+            .filter(|script| script.trigger != "command")
+            .filter_map(|script| {
+                let name = format!("[{},{}]", script.trigger, script.name);
+                let required = *requirements.get(&name)?;
+                let line = document.lines.line(script.line.saturating_sub(1))?;
+                let text = &document.text[line.clone()];
+                let start = line.start + text.len() - text.trim_start().len();
+                Some(ScriptPointers {
+                    range: start..start,
+                    required,
+                })
+            })
+            .collect()
+    }
+
     pub fn inlay_hints(&self, source: SourceId, range: Range<usize>) -> Vec<InlayHint> {
         let Some(document) = self.document(source) else {
             return Vec::new();

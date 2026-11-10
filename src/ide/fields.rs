@@ -3,10 +3,11 @@
 //! (`Input`, `Output`, `Declared`, `OfParam`, `OfColumn`) become a real
 //! type in `slot`.
 
+use super::colors::Encoding;
 use crate::types::Type;
 use Value::{
-    AnyVar, ColumnName, Component, Config, Declared, Flag, Floor, Hook, Input, Number, OfColumn,
-    OfParam, Output, Sound, Text, Tile, TypeName, Word,
+    AnyVar, Color, ColumnName, Component, Config, Declared, Flag, Floor, Hook, Input, Number,
+    OfColumn, OfParam, Output, Sound, Text, TextureColor, Tile, TypeName, Word,
 };
 use std::collections::HashMap;
 
@@ -15,6 +16,8 @@ pub(super) enum Value {
     Config(Type),
     AnyVar,
     Number,
+    Color(Encoding),
+    TextureColor(&'static str),
     Flag,
     Word,
     Text,
@@ -70,6 +73,12 @@ impl<'a> Section<'a> {
 type Field = (&'static str, &'static [Value]);
 
 const NUMBER: &[Value] = &[Number];
+const RGB: &[Value] = &[Color(Encoding::Rgb)];
+const ARGB: &[Value] = &[Color(Encoding::Argb)];
+const RGB15: &[Value] = &[Color(Encoding::Rgb15)];
+const HSL: &[Value] = &[Color(Encoding::Hsl)];
+const TEXTURE_COLOR: &[Value] = &[TextureColor("constant_color")];
+const TEXTURE_TARGET_COLOR: &[Value] = &[TextureColor("color_replace")];
 const FLAG: &[Value] = &[Flag];
 const WORD: &[Value] = &[Word];
 const TEXT: &[Value] = &[Text];
@@ -95,7 +104,7 @@ const VARP_RANGE: &[Value] = &[Config(Type::Varp), Number, Number];
 const VARBIT_RANGE: &[Value] = &[Config(Type::Varbit), Number, Number];
 const TILE: &[Value] = &[Tile];
 
-const AREA: &[Field] = &[("colour", NUMBER), ("trigger", FLAG)];
+const AREA: &[Field] = &[("colour", RGB), ("trigger", FLAG)];
 
 const BAS: &[Field] = &[
     ("readyanim", SEQ),
@@ -175,8 +184,8 @@ const PARTICLEEMITTER: &[Field] = &[
     ("localeffectors", EFFECTORS),
     ("worldeffectors", EFFECTORS),
     ("material", TEXTURE),
-    ("rgba", NUMBER),
-    ("rgbatarget", NUMBER),
+    ("rgba", ARGB),
+    ("rgbatarget", ARGB),
     ("rgbtransitionpercent", NUMBER),
     ("size", NUMBER),
     ("sizetarget", NUMBER),
@@ -208,27 +217,27 @@ const ENUM: &[Field] = &[
 ];
 
 const FLO: &[Field] = &[
-    ("color", NUMBER),
-    ("water_color", NUMBER),
+    ("color", RGB),
+    ("water_color", RGB),
     ("texture", &[Config(Type::Texture)]),
-    ("colour", NUMBER),
-    ("mapcolour", NUMBER),
+    ("colour", RGB),
+    ("mapcolour", RGB),
     ("material", TEXTURE),
     ("occlude", FLAG),
     ("priority", NUMBER),
     ("smoothedges", FLAG),
     ("texturescale", NUMBER),
     ("unknown", NUMBER),
-    ("waterfogcolour", NUMBER),
+    ("waterfogcolour", RGB),
     ("waterfogoffset", NUMBER),
     ("waterfogscale", NUMBER),
 ];
 
 const FLU: &[Field] = &[
-    ("color", NUMBER),
+    ("color", RGB),
     ("size", NUMBER),
     ("texture", &[Config(Type::Texture)]),
-    ("colour", NUMBER),
+    ("colour", RGB),
     ("hardshadow", FLAG),
     ("material", TEXTURE),
     ("occlude", FLAG),
@@ -241,6 +250,7 @@ const HITMARK: &[Field] = &[
     ("middlegraphic", GRAPHIC),
     ("rightgraphic", GRAPHIC),
     ("damagefont", &[Config(Type::FontMetrics)]),
+    ("damagecolour", RGB),
     ("damageformat", TEXT),
     ("scrolltooffsety", NUMBER),
     ("fadeout", NUMBER),
@@ -394,11 +404,12 @@ const MEL: &[Field] = &[
     ("show", WORD),
     ("mapfunction", FLAG),
     ("textsize", NUMBER),
-    ("textcolour", NUMBER),
-    ("textbackgroundfill", NUMBER),
-    ("textbackgroundoutline", NUMBER),
-    ("polygonfill", NUMBER),
-    ("polygonoutline", NUMBER),
+    ("textcolour", RGB),
+    ("textmouseovercolour", RGB),
+    ("textbackgroundfill", ARGB),
+    ("textbackgroundoutline", ARGB),
+    ("polygonfill", ARGB),
+    ("polygonoutline", ARGB),
     ("polygonpoint", NUMBER),
     ("condition", &[AnyVar, Number, Number]),
 ];
@@ -409,7 +420,7 @@ const MSI: &[Field] = &[
     ("sprite", GRAPHIC),
     ("nosprite", FLAG),
     ("locsize", FLAG),
-    ("colour", NUMBER),
+    ("colour", RGB),
     ("graphic", GRAPHIC),
     ("resize", FLAG),
 ];
@@ -503,7 +514,7 @@ const NPC_FIELDS: &[Field] = &[
     ("reprioritiseattackop", FLAG),
     ("roughbounding", NUMBER),
     ("spotshadow", FLAG),
-    ("spotshadowcolour", NUMBER),
+    ("spotshadowcolour", HSL),
     ("spotshadowtrans", NUMBER),
     ("alwaysonbottom", FLAG),
     ("active", FLAG),
@@ -669,7 +680,7 @@ const DEFAULTS: &[Field] = &[
 const WMA: &[Field] = &[
     ("name", TEXT),
     ("origin", NUMBER),
-    ("background", NUMBER),
+    ("background", RGB),
     ("listed", FLAG),
     ("zoom", WORD),
     ("buildarea", NUMBER),
@@ -721,10 +732,10 @@ const IF3: &[Field] = &[
     ("alpha", FLAG),
     ("trans", NUMBER),
     ("outline", NUMBER),
-    ("graphicshadow", NUMBER),
+    ("graphicshadow", RGB),
     ("vflip", FLAG),
     ("hflip", FLAG),
-    ("colour", NUMBER),
+    ("colour", RGB),
     ("fill", FLAG),
     ("model", MODEL),
     ("modelorigin", NUMBER),
@@ -865,6 +876,20 @@ pub(super) fn keys(kind: &str) -> &'static [Field] {
 /// A key's parts in comma order. A key numbered per entry (`op1`) shares a row,
 /// and the last part repeats.
 pub(super) fn field(kind: &str, key: &str) -> Option<&'static [Value]> {
+    match (kind, key) {
+        ("material", "averagecolour") => return Some(HSL),
+        ("texture", "color") => return Some(TEXTURE_COLOR),
+        ("texture", "target_color") => return Some(TEXTURE_TARGET_COLOR),
+        _ => {}
+    }
+    if kind == "if"
+        && matches!(
+            key,
+            "colour" | "activecolour" | "overcolour" | "activeovercolour"
+        )
+    {
+        return Some(RGB);
+    }
     let table = keys(kind);
     if table.is_empty() {
         return None;
@@ -874,6 +899,21 @@ pub(super) fn field(kind: &str, key: &str) -> Option<&'static [Value]> {
         return Some(TILE);
     }
     if key.starts_with("recol") {
+        if matches!(kind, "idk" | "loc" | "npc" | "obj" | "spotanim") {
+            let (suffix, values) = if let Some(suffix) = key.strip_prefix("recolhsl") {
+                (suffix, HSL)
+            } else {
+                (&key[5..], RGB15)
+            };
+            if let Some(index) = suffix
+                .strip_suffix('s')
+                .or_else(|| suffix.strip_suffix('d'))
+                && !index.is_empty()
+                && index.bytes().all(|ch| ch.is_ascii_digit())
+            {
+                return Some(values);
+            }
+        }
         return Some(NUMBER);
     }
     if key.starts_with("retex") {
@@ -899,6 +939,7 @@ pub(super) fn slot(
         Input => by_name(section.input),
         Output => by_name(section.output),
         Declared => by_name(section.declared),
+        TextureColor(kind) => (section.declared == Some(kind)).then_some(Color(Encoding::Rgb)),
         OfParam => types.params.get(first).copied().map(of_type),
         OfColumn => {
             let column = types.columns.get(&format!("{}:{first}", section.table?))?;
@@ -924,7 +965,8 @@ fn of_type(ty: Type) -> Value {
     match ty {
         Type::String => Text,
         Type::Boolean => Flag,
-        Type::Int | Type::Long | Type::Char | Type::Colour | Type::Coord => Number,
+        Type::Colour => Color(Encoding::Rgb),
+        Type::Int | Type::Long | Type::Char | Type::Coord => Number,
         _ => Config(ty),
     }
 }
@@ -936,6 +978,12 @@ pub(super) fn describe(values: &[Value]) -> String {
             Config(ty) => ty.name(),
             AnyVar => "varp or varpbit",
             Number => "int",
+            Color(Encoding::Rgb) | TextureColor(_) => "rgb",
+            Color(Encoding::Argb) => "argb",
+            Color(Encoding::Rgb15) => "rgb15",
+            Color(Encoding::Hsl) => "hsl",
+            Color(Encoding::Hsl32) => "hsl32",
+            Color(Encoding::Gray12) => "grayscale",
             Flag => "boolean",
             Word => "word",
             Text => "string",

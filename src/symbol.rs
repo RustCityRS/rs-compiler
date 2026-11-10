@@ -1,5 +1,6 @@
+use crate::pointer::{PointerHolder, default_command_pointers};
 use crate::types::{BaseVarType, Type};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 pub(crate) fn normalize_entity_name(name: &str) -> std::borrow::Cow<'_, str> {
@@ -463,6 +464,9 @@ pub struct SymbolRegistry {
     pub(crate) dynamic_returns: HashMap<String, ReturnType>,
     pub(crate) param_types: HashMap<i32, Type>,
     pub(crate) stack_commands: HashSet<String>,
+    component_first_commands: HashSet<String>,
+    command_pointer_overrides: HashMap<String, PointerHolder>,
+    switch_domains: HashMap<Type, BTreeMap<i32, String>>,
     pub(crate) stack_scripts: HashSet<String>,
     pub(crate) hook_commands: HashMap<String, bool>,
     /// All registered scripts by name (last registration wins). The `Symbol` is
@@ -531,6 +535,7 @@ pub enum ReturnType {
 
 impl SymbolRegistry {
     pub fn set_engine_profile(&mut self, profile: crate::environment::EngineProfile) {
+        self.command_pointer_overrides.clear();
         self.profile = Some(Arc::new(profile));
     }
 
@@ -564,6 +569,82 @@ impl SymbolRegistry {
         self.stack_scripts.insert(format!("{trigger}:{name}"));
     }
 
+    pub fn component_first_command(&self, name: &str) -> bool {
+        let name = name.trim_start_matches('.');
+        self.stack_commands.contains(name) && self.component_first_commands.contains(name)
+    }
+
+    pub fn set_command_suspends(&mut self, name: &str, suspends: bool) {
+        if let Some(profile) = &mut self.profile {
+            Arc::make_mut(profile)
+                .command_pointers
+                .entry(name.to_owned())
+                .or_default()
+                .may_suspend = suspends;
+        } else {
+            self.command_pointer_overrides
+                .entry(name.to_owned())
+                .or_insert_with(|| {
+                    default_command_pointers()
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .may_suspend = suspends;
+        }
+    }
+
+    pub fn command_suspends(&self, name: &str) -> bool {
+        self.command_suspends_for(name, true)
+    }
+
+    pub(crate) fn command_suspends_for(&self, name: &str, server: bool) -> bool {
+        let primary = name.trim_start_matches('.');
+        let lookup = |pointers: &HashMap<String, PointerHolder>| {
+            pointers
+                .get(name)
+                .or_else(|| pointers.get(primary))
+                .map(|holder| holder.may_suspend)
+        };
+        if let Some(profile) = &self.profile {
+            lookup(&profile.command_pointers).unwrap_or(false)
+        } else {
+            lookup(&self.command_pointer_overrides)
+                .or_else(|| server.then(|| lookup(default_command_pointers())).flatten())
+                .unwrap_or(false)
+        }
+    }
+
+    /// Explicit closed value domains; ordinary integer and asset IDs stay open.
+    pub fn set_switch_values(&mut self, ty: Type, values: impl IntoIterator<Item = (i32, String)>) {
+        self.switch_domains.insert(ty, values.into_iter().collect());
+    }
+
+    pub fn switch_values(&self, ty: Type) -> Option<&BTreeMap<i32, String>> {
+        self.switch_domains
+            .get(&ty)
+            .filter(|values| !values.is_empty())
+    }
+
+    pub fn set_component_first_command(&mut self, name: &str, component_first: bool) {
+        let name = name.trim_start_matches('.');
+        if component_first {
+            self.component_first_commands.insert(name.to_owned());
+        } else {
+            self.component_first_commands.remove(name);
+        }
+    }
+
+    pub(crate) fn clear_commands(&mut self) {
+        self.commands.clear();
+        self.command_param_types.clear();
+        self.stack_commands.clear();
+        self.component_first_commands.clear();
+        self.command_pointer_overrides.clear();
+        self.hook_commands.clear();
+        self.dynamic_returns.clear();
+    }
+
     pub fn set_command_behavior(
         &mut self,
         name: &str,
@@ -575,6 +656,7 @@ impl SymbolRegistry {
             self.stack_commands.insert(name.to_owned());
         } else {
             self.stack_commands.remove(name);
+            self.component_first_commands.remove(name);
         }
         if let Some(explicit_component) = hook {
             self.hook_commands
@@ -632,6 +714,15 @@ impl SymbolRegistry {
             dynamic_returns: HashMap::new(),
             param_types: HashMap::new(),
             stack_commands: HashSet::new(),
+            component_first_commands: HashSet::new(),
+            command_pointer_overrides: HashMap::new(),
+            switch_domains: HashMap::from([
+                (
+                    Type::Boolean,
+                    [(0, "false".into()), (1, "true".into())].into(),
+                ),
+                (Type::IntBool, [(0, "0".into()), (1, "1".into())].into()),
+            ]),
             stack_scripts: HashSet::new(),
             hook_commands: HashMap::new(),
             scripts: HashMap::new(),
@@ -713,6 +804,8 @@ impl SymbolRegistry {
         param_types: Vec<Type>,
         return_types: Vec<Type>,
     ) {
+        self.component_first_commands.remove(&name);
+        self.command_pointer_overrides.remove(&name);
         self.command_param_types
             .insert(name.clone(), param_types.clone());
         self.commands.insert(

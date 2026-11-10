@@ -226,7 +226,8 @@ pub(crate) fn lower(
     if args.len() != 1 + usize::from(explicit) {
         return Ok(None);
     }
-    let mut lowered = match &args[0] {
+    let component_first = explicit && registry.component_first_command(name);
+    let mut lowered = match &args[usize::from(component_first)] {
         Expr::NullLiteral => vec![Expr::NullLiteral, Expr::StringLiteral(String::new())],
         Expr::StringLiteral(text) => {
             let mut values = parse_at(text, line)?;
@@ -273,7 +274,11 @@ pub(crate) fn lower(
         _ => return Ok(None),
     };
     if explicit {
-        lowered.push(args[1].clone());
+        if component_first {
+            lowered.insert(0, args[0].clone());
+        } else {
+            lowered.push(args[1].clone());
+        }
     }
     Ok(Some(lowered))
 }
@@ -469,7 +474,10 @@ fn expand(values: &[Expr], registry: &SymbolRegistry, locals: &SymbolTable) -> V
 /// Where the arguments of a hook's script end among a call's stack arguments.
 pub(crate) fn arguments_end(registry: &SymbolRegistry, name: &str, args: &[Expr]) -> Option<usize> {
     let explicit = *registry.hook_commands.get(name.trim_start_matches('.'))?;
-    let signature_index = args.len().checked_sub(1 + usize::from(explicit))?;
+    let component_first = explicit && registry.component_first_command(name);
+    let signature_index = args
+        .len()
+        .checked_sub(1 + usize::from(explicit && !component_first))?;
     let Expr::StringLiteral(signature) = &args[signature_index] else {
         return None;
     };
@@ -491,7 +499,12 @@ pub(crate) fn compact(
     let Some(&explicit) = registry.hook_commands.get(name.trim_start_matches('.')) else {
         return;
     };
-    let Some(signature_index) = args.len().checked_sub(1 + usize::from(explicit)) else {
+    let component_first = explicit && registry.component_first_command(name);
+    let target = usize::from(component_first);
+    let Some(signature_index) = args
+        .len()
+        .checked_sub(1 + usize::from(explicit && !component_first))
+    else {
         return;
     };
     let Expr::StringLiteral(signature) = &args[signature_index] else {
@@ -523,33 +536,41 @@ pub(crate) fn compact(
     } else {
         None
     };
-    if end == 0
+    if end <= target
         || !matches!(
-            args[0],
+            args[target],
             Expr::Identifier(_) | Expr::IntLiteral(_) | Expr::NullLiteral
         )
     {
         return;
     }
-    let hook = if matches!(args[0], Expr::NullLiteral) && signature.is_empty() && end == 1 {
-        Expr::NullLiteral
-    } else {
-        let mut values = vec![args[0].clone(), Expr::Tuple(args[1..end].to_vec())];
-        values.extend(transmits);
-        let expanded = expand(&values, registry, locals);
-        if !matches!(expanded.last(), Some(Expr::StringLiteral(value)) if value == signature) {
-            return;
-        }
-        Expr::CommandCall {
-            name: "__hook".into(),
-            args: values,
-            arg_lines: Vec::new(),
-            call_line: 0,
-        }
-    };
+    let hook =
+        if matches!(args[target], Expr::NullLiteral) && signature.is_empty() && end == target + 1 {
+            Expr::NullLiteral
+        } else {
+            let mut values = vec![
+                args[target].clone(),
+                Expr::Tuple(args[target + 1..end].to_vec()),
+            ];
+            values.extend(transmits);
+            let expanded = expand(&values, registry, locals);
+            if !matches!(expanded.last(), Some(Expr::StringLiteral(value)) if value == signature) {
+                return;
+            }
+            Expr::CommandCall {
+                name: "__hook".into(),
+                args: values,
+                arg_lines: Vec::new(),
+                call_line: 0,
+            }
+        };
     let mut compact = vec![hook];
     if explicit {
-        compact.push(args[signature_index + 1].clone());
+        if component_first {
+            compact.insert(0, args[0].clone());
+        } else {
+            compact.push(args[signature_index + 1].clone());
+        }
     }
     *args = compact;
 }

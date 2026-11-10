@@ -67,6 +67,45 @@ fn scripts_keep_reference_categories_and_complete_sigils() {
 }
 
 #[test]
+fn compiler_annotations_have_highlighting_and_hover_without_label_references() {
+    let mut project = project();
+    let text = "[label,stack](int $value)\n\
+        @stack(component_last)\n\
+        @signature(hook_component)\n\
+        [command,paint](component $component, clientscript $callback, string $signature)\n\
+        [proc,caller]\n@stack(1);\n";
+    let doc = project.open("engine.cs2", Scope::Client, 1, text);
+    let syntax = project.document(doc).unwrap().syntax().unwrap();
+    assert_eq!(syntax.scripts[1].annotations.len(), 2);
+    let tokens = project.semantic_tokens(doc);
+    ordered(text, &tokens);
+    for name in ["@stack", "@signature"] {
+        assert_eq!(at(text, &tokens, name).kind, TokenKind::Decorator);
+        let offset = text.find(name).unwrap() + 1;
+        let hover = project.hover(doc, offset).unwrap();
+        assert!(hover.detail.starts_with(name));
+        assert!(!hover.documentation.is_empty());
+        assert!(project.definition(doc, offset).is_none());
+        assert!(project.references(doc, offset, true).is_empty());
+    }
+    for value in ["component_last", "hook_component"] {
+        assert_eq!(at(text, &tokens, value).kind, TokenKind::EnumMember);
+        assert!(project.hover(doc, text.find(value).unwrap()).is_some());
+    }
+    let jump = text.rfind("@stack").unwrap();
+    assert_eq!(
+        tokens
+            .iter()
+            .find(|token| token.range.start == jump)
+            .unwrap()
+            .kind,
+        TokenKind::Function
+    );
+    assert_eq!(project.definition(doc, jump + 1).unwrap().range, 7..12);
+    assert!(project.format(doc, 4, true).is_empty());
+}
+
+#[test]
 fn constants_named_like_keywords_are_one_constant() {
     let mut project = project();
     let text = "[proc,test]\ndef_boolean $real = false;\ndef_boolean $flag = ^false;\n";

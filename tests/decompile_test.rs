@@ -69,6 +69,7 @@ fn quoted_hooks_preserve_arguments_transmits_and_clearing() {
                 name: "set_hook".into(),
                 params,
                 returns: vec![],
+                component_last: false,
                 kind: if explicit {
                     clientscript::CommandKind::HookComponent
                 } else {
@@ -163,6 +164,7 @@ fn named_transmit_triggers_compile_as_ids_and_decompile_as_names() {
             name: command.into(),
             params,
             returns: vec![],
+            component_last: false,
             kind: clientscript::CommandKind::Hook,
         }];
         let text = decompile::decompile(
@@ -362,7 +364,7 @@ fn hook_descriptors_restore_callback_parameter_types() {
     let params = vec![Type::ClientScript, Type::String];
     registry.register_command("set_hook".into(), 1407, params.clone(), vec![]);
     registry.set_command_behavior("set_hook", true, Some(false), None);
-    let source = Source::parse("[proc,value]\nset_hook(callback, 1, 2, 3, 4, 5, \"zf«ke\");\n[clientscript,callback](int $a, int $b, int $c, int $d, int $e)\n", Path::new("hooks.cs2")).unwrap();
+    let source = Source::parse("[proc,value]\nset_hook(callback, 1, 2, 3, 4, 5, \"zfÂ«ke\");\n[clientscript,callback](int $a, int $b, int $c, int $d, int $e)\n", Path::new("hooks.cs2")).unwrap();
     clientscript::register(
         &source.file,
         &HashMap::from([
@@ -387,6 +389,7 @@ fn hook_descriptors_restore_callback_parameter_types() {
         name: "set_hook".into(),
         params,
         returns: vec![],
+        component_last: false,
         kind: clientscript::CommandKind::Hook,
     }];
     let signatures = decompile::infer_signatures(
@@ -532,6 +535,323 @@ fn decompiler_roundtrips_remapped_opcodes_and_footer_layouts() {
             );
         }
     }
+}
+
+#[test]
+fn component_first_calls_preserve_evaluation_order_and_original_bytes() {
+    struct Names;
+    impl decompile::Names for Names {
+        fn name(&self, kind: &str, id: u32) -> String {
+            if kind == "clientscript" && id == 2 {
+                "[proc,pair]".into()
+            } else {
+                TestNames.name(kind, id)
+            }
+        }
+    }
+    let format = Format::parse("0=PushConstantInt\n3=PushConstantString\n21=Return\n33=PushIntLocal\n35=PushStringLocal\n40=GosubWithParams\n2101=if_setcolour\n2112=if_settext\n9001=read_text\n9002=read_component\n9003=format_text\n9004=consume\n").unwrap();
+    let commands = [
+        (
+            "if_setcolour",
+            2101,
+            vec![Type::Component, Type::Colour],
+            vec![],
+            true,
+        ),
+        (
+            "if_settext",
+            2112,
+            vec![Type::Component, Type::String],
+            vec![],
+            true,
+        ),
+        ("read_text", 9001, vec![], vec![Type::String], false),
+        ("read_component", 9002, vec![], vec![Type::Component], false),
+        (
+            "format_text",
+            9003,
+            vec![Type::Int, Type::String],
+            vec![Type::String],
+            false,
+        ),
+        (
+            "consume",
+            9004,
+            vec![Type::Int, Type::String],
+            vec![],
+            false,
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(name, opcode, params, returns, component_last)| clientscript::Command {
+            name: name.into(),
+            opcode,
+            params,
+            returns,
+            component_last,
+            kind: clientscript::CommandKind::Fixed,
+        },
+    )
+    .collect::<Vec<_>>();
+    for (body, expected, spilled) in [
+        (
+            "if_setcolour(123, $component0);",
+            "if_setcolour($component0,",
+            false,
+        ),
+        (
+            "if_settext($string0, $component0);",
+            "if_settext($component0, $string0)",
+            false,
+        ),
+        (
+            "if_settext(read_component, read_text);",
+            "if_settext(__pop_int(), read_text)",
+            true,
+        ),
+        (
+            "if_settext(~pair());",
+            "if_settext(__pop_int(), __pop_string())",
+            true,
+        ),
+        (
+            "consume(1, format_text(\"hello\", 2));",
+            "format_text(2, __pop_string())",
+            true,
+        ),
+    ] {
+        let source = Source::parse(&format!("[proc,value](component $component0, string $string0)\n{body}\n[proc,pair]()(component,string)\nreturn(65538, \"text\");"), Path::new("old.cs2")).unwrap();
+        let mut legacy = SymbolRegistry::new();
+        for command in &commands {
+            let mut params = command.params.clone();
+            if command.component_last {
+                params.rotate_left(1);
+            }
+            legacy.register_command(
+                command.name.clone(),
+                command.opcode.into(),
+                params,
+                command.returns.clone(),
+            );
+            legacy.set_command_behavior(&command.name, true, None, None);
+        }
+        clientscript::register(
+            &source.file,
+            &HashMap::from([("[proc,value]".into(), 1), ("[proc,pair]".into(), 2)]),
+            &mut legacy,
+        )
+        .unwrap();
+        let originals = source
+            .file
+            .scripts
+            .iter()
+            .map(|script| {
+                let compiled = Compiler::new(&legacy).compile_script(script);
+                (
+                    compiled.id as u32,
+                    clientscript::encode(&compiled, &format).unwrap(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let scripts = originals
+            .iter()
+            .map(|(&id, bytes)| (id, Script::decode(bytes, &format).unwrap()))
+            .collect::<HashMap<_, _>>();
+        let mut registry = legacy;
+        for command in &commands {
+            registry.register_command(
+                command.name.clone(),
+                command.opcode.into(),
+                command.params.clone(),
+                command.returns.clone(),
+            );
+            registry.set_command_behavior(&command.name, true, None, None);
+            registry.set_component_first_command(&command.name, command.component_last);
+        }
+        let signatures = decompile::infer_signatures(
+            &scripts,
+            &[],
+            &Names,
+            &HashMap::new(),
+            &commands,
+            &mut registry,
+        )
+        .unwrap();
+        let text = decompile::decompile(
+            &scripts[&1],
+            1,
+            &Names,
+            &signatures,
+            &HashMap::new(),
+            &commands,
+            &registry,
+        )
+        .unwrap();
+        assert!(text.contains(expected), "{body}: {text}");
+        assert_eq!(text.contains("__push("), spilled, "{body}: {text}");
+        let rebuilt = Source::parse(&text, Path::new("canonical.cs2"))
+            .unwrap()
+            .compile(&registry, &format)
+            .unwrap_or_else(|error| panic!("{body}: {text}\n{error}"))
+            .remove(0)
+            .1;
+        assert_eq!(originals[&1], rebuilt, "{body}: {text}");
+    }
+}
+
+#[test]
+fn oc_find_string_first_signature_removes_spills_without_changing_bytes() {
+    let format = Format::parse("0=PushConstantInt\n21=Return\n34=PopIntLocal\n35=PushStringLocal\n42=PushVarcInt\n47=PushVarcString\n4210=oc_find\n").unwrap();
+    let commands = [clientscript::Command {
+        name: "oc_find".into(),
+        opcode: 4210,
+        params: vec![Type::String, Type::Boolean],
+        returns: vec![Type::Int],
+        component_last: false,
+        kind: clientscript::CommandKind::Fixed,
+    }];
+    for (query, tradable) in [
+        ("$string0", "true"),
+        ("%varcstr_1", "true"),
+        ("%varcstr_1", "%varc_2"),
+    ] {
+        let compile = |body: &str, registry: &mut SymbolRegistry| {
+            let source = Source::parse(
+                &format!("[proc,value](string $string0)\n{body}\n"),
+                Path::new("oc_find.cs2"),
+            )
+            .unwrap();
+            clientscript::register(
+                &source.file,
+                &HashMap::from([("[proc,value]".into(), 1)]),
+                registry,
+            )
+            .unwrap();
+            source.compile(registry, &format).unwrap().remove(0).1
+        };
+        let mut registry = SymbolRegistry::new();
+        registry.register_game_var("varcstr_1".into(), Type::String, 1, "varcstr".into());
+        registry.register_game_var("varc_2".into(), Type::Boolean, 2, "varc".into());
+        registry.register_command(
+            "oc_find".into(),
+            4210,
+            vec![Type::Boolean, Type::String],
+            vec![Type::Int],
+        );
+        registry.set_command_behavior("oc_find", true, None, None);
+        let original = compile(
+            &format!("__push({query});\ndef_int $int0 = oc_find({tradable}, __pop_string());"),
+            &mut registry,
+        );
+        registry.register_command(
+            "oc_find".into(),
+            4210,
+            commands[0].params.clone(),
+            commands[0].returns.clone(),
+        );
+        registry.set_command_behavior("oc_find", true, None, None);
+        let call = format!("oc_find({query}, {tradable})");
+        let direct = compile(&format!("def_int $int0 = {call};"), &mut registry);
+        assert_eq!(original, direct, "{call}");
+        let scripts = HashMap::from([(1, Script::decode(&original, &format).unwrap())]);
+        let signatures = decompile::infer_signatures(
+            &scripts,
+            &[],
+            &TestNames,
+            &HashMap::new(),
+            &commands,
+            &mut registry,
+        )
+        .unwrap();
+        let text = decompile::decompile(
+            &scripts[&1],
+            1,
+            &TestNames,
+            &signatures,
+            &HashMap::new(),
+            &commands,
+            &registry,
+        )
+        .unwrap();
+        assert!(text.contains(&call), "{text}");
+        assert!(
+            !text.contains("__push(") && !text.contains("__pop_"),
+            "{text}"
+        );
+        let rebuilt = Source::parse(&text, Path::new("rebuilt.cs2"))
+            .unwrap()
+            .compile(&registry, &format)
+            .unwrap()
+            .remove(0)
+            .1;
+        assert_eq!(original, rebuilt, "{text}");
+    }
+}
+
+#[test]
+fn conflicting_chat_filter_uses_keep_numeric_storage() {
+    let format =
+        Format::parse("21=Return\n33=PushIntLocal\n9001=as_boolean\n9002=as_chatfilter\n").unwrap();
+    let mut registry = SymbolRegistry::new();
+    let commands = [
+        ("as_boolean", 9001, Type::Boolean),
+        ("as_chatfilter", 9002, Type::ChatFilter),
+    ]
+    .into_iter()
+    .map(|(name, opcode, ty)| {
+        registry.register_command(name.into(), opcode, vec![ty], vec![]);
+        registry.set_command_behavior(name, true, None, None);
+        clientscript::Command {
+            name: name.into(),
+            opcode: opcode as u16,
+            params: vec![ty],
+            returns: vec![],
+            component_last: false,
+            kind: clientscript::CommandKind::Fixed,
+        }
+    })
+    .collect::<Vec<_>>();
+    let source = Source::parse(
+        "[proc,value](int $value)\nas_boolean($value);\nas_chatfilter($value);",
+        Path::new("conflicting.cs2"),
+    )
+    .unwrap();
+    clientscript::register(
+        &source.file,
+        &HashMap::from([("[proc,value]".into(), 1)]),
+        &mut registry,
+    )
+    .unwrap();
+    let original = source.compile(&registry, &format).unwrap().remove(0).1;
+    let scripts = HashMap::from([(1, Script::decode(&original, &format).unwrap())]);
+    let signatures = decompile::infer_signatures(
+        &scripts,
+        &[],
+        &TestNames,
+        &HashMap::new(),
+        &commands,
+        &mut registry,
+    )
+    .unwrap();
+    assert_eq!(signatures[&1].param_types, [Type::Int]);
+    let text = decompile::decompile(
+        &scripts[&1],
+        1,
+        &TestNames,
+        &signatures,
+        &HashMap::new(),
+        &commands,
+        &registry,
+    )
+    .unwrap();
+    let rebuilt = Source::parse(&text, Path::new("restored.cs2"))
+        .unwrap()
+        .compile(&registry, &format)
+        .unwrap_or_else(|error| panic!("{text}\n{error}"))
+        .remove(0)
+        .1;
+    assert_eq!(original, rebuilt, "{text}");
 }
 
 #[test]

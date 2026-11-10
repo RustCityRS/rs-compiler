@@ -1,15 +1,18 @@
 //! Editor queries over the same documents and definitions used for compilation.
 //! Locations and edits use UTF-8 byte ranges; `text::LineIndex` converts UTF-16.
 mod actions;
+mod annotations;
+mod colors;
 mod config;
 mod fields;
-mod highlighting;
+pub(crate) mod highlighting;
 mod hints;
 mod hooks;
 mod index;
 mod queries;
 
 use crate::diagnostics::Applicability;
+use crate::pointer::PointerSet;
 use crate::project::SourceId;
 use crate::sources::Scope;
 use crate::types::Type;
@@ -95,6 +98,26 @@ pub struct InlayHint {
     pub offset: usize,
     pub label: String,
     pub parameter: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScriptPointers {
+    pub range: Range<usize>,
+    pub required: PointerSet,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Color {
+    pub red: f64,
+    pub green: f64,
+    pub blue: f64,
+    pub alpha: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocumentColor {
+    pub range: Range<usize>,
+    pub color: Color,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -52,6 +52,12 @@ pub fn expression_types(expr: &Expr, registry: &SymbolRegistry, locals: &SymbolT
 
 pub fn command_returns(registry: &SymbolRegistry, name: &str, args: &[Expr]) -> Vec<Type> {
     let name = name.trim_start_matches('.');
+    match name {
+        "__pop_int" | "__get_array" => return vec![Type::Int],
+        "__pop_string" | "__join" => return vec![Type::String],
+        "__pop_long" => return vec![Type::Long],
+        _ => {}
+    }
     let value = |index: usize, hint: Type| {
         args.get(index).and_then(|arg| match arg {
             Expr::IntLiteral(value) => Some(*value),
@@ -92,13 +98,27 @@ pub fn command_hints(
     args: &[Expr],
     locals: &SymbolTable,
 ) -> Vec<Option<Type>> {
+    let params = command_parameters(registry, name, args, locals);
+    if registry.stack_commands.contains(name) {
+        positional_hints(registry, &params, args, locals)
+    } else {
+        (0..args.len()).map(|i| params.get(i).copied()).collect()
+    }
+}
+
+pub(crate) fn command_parameters(
+    registry: &SymbolRegistry,
+    name: &str,
+    args: &[Expr],
+    locals: &SymbolTable,
+) -> Vec<Type> {
     let mut params = registry
         .command_param_types
         .get(name)
         .cloned()
         .unwrap_or_default();
     if !registry.stack_commands.contains(name) {
-        return (0..args.len()).map(|i| params.get(i).copied()).collect();
+        return params;
     }
     // An enum's first argument names the type of its key.
     if matches!(
@@ -124,7 +144,9 @@ pub fn command_hints(
                         .first()
                         .is_some_and(|ty| stack(*ty) == 0)
                 })
-                .nth(usize::from(explicit))
+                .nth(usize::from(
+                    explicit && !registry.component_first_command(name),
+                ))
                 .and_then(|arg| match arg {
                     Expr::IntLiteral(n) => usize::try_from(*n).ok(),
                     _ => None,
@@ -134,8 +156,11 @@ pub fn command_hints(
             0
         };
         params = hook_types(signature, triggers, explicit);
+        if registry.component_first_command(name) {
+            params.rotate_right(1);
+        }
     }
-    stack_hints(registry, &params, args, locals)
+    params
 }
 
 pub fn proc_hints(
@@ -159,12 +184,28 @@ pub fn proc_hints(
         .stack_scripts
         .contains(&format!("{trigger}:{name}"))
     {
-        stack_hints(registry, param_types, args, locals)
+        positional_hints(registry, param_types, args, locals)
     } else {
         (0..args.len())
             .map(|i| param_types.get(i).copied())
             .collect()
     }
+}
+
+pub fn positional_hints(
+    registry: &SymbolRegistry,
+    params: &[Type],
+    args: &[Expr],
+    locals: &SymbolTable,
+) -> Vec<Option<Type>> {
+    let mut slot = 0;
+    args.iter()
+        .map(|arg| {
+            let hint = params.get(slot).copied();
+            slot += expression_types(arg, registry, locals).len().max(1);
+            hint
+        })
+        .collect()
 }
 
 pub fn stack_hints(

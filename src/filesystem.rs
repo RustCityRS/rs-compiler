@@ -6,7 +6,7 @@ use crate::lexer::Lexer;
 #[cfg(feature = "memprof")]
 use crate::memprof;
 use crate::parallel::{
-    parallel_chunks, parallel_chunks_capped, parallel_map, parallel_map_balanced,
+    background, parallel_chunks, parallel_chunks_capped, parallel_map, parallel_map_balanced,
 };
 use crate::parser::{Parser, ScriptFile};
 use crate::project::{Options, Project, SourceText, Target};
@@ -22,7 +22,6 @@ use std::fs;
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread;
 use tracing::{info, warn};
 
 pub type ScriptIds = BTreeMap<String, i32>;
@@ -37,6 +36,7 @@ pub fn editor_project(
     let scope = if client { Scope::Client } else { Scope::Rune };
     let dir = sources::target_dir(source, scope);
     let pack = resolve_pack_dir(&dir, pack);
+    let mut editor_roots = sources::roots(&dir);
     let mut registry = if client {
         clientscript::registry(
             &dir,
@@ -109,6 +109,7 @@ pub fn editor_project(
             dir.join("clientscript")
         };
         if client_dir.is_dir() {
+            editor_roots.push(client_dir.clone());
             let paths = sources::script_files(&client_dir, "cs2")?
                 .into_iter()
                 .filter(|path| {
@@ -121,9 +122,36 @@ pub fn editor_project(
     }
     let mut files = sources::config_files(&dir);
     if let Some(pack) = &pack {
+        editor_roots.push(pack.clone());
         symloader::collect_all_files(pack, &mut files);
         // Interfaces and defaults live beside the scripts they're for.
         if let Some(content) = pack.parent() {
+            // Other cache assets are opened on demand, without preloading their
+            // large directories or accepting every revision beside a custom pack.
+            for folder in [
+                "animations",
+                "defaults",
+                "fontmetrics",
+                "interfaces",
+                "instruments",
+                "jingles",
+                "loading_backgrounds",
+                "loading_sprites",
+                "maps",
+                "materials",
+                "models",
+                "skeletons",
+                "songs",
+                "sprites",
+                "synth",
+                "textures",
+                "worldmap",
+            ] {
+                let root = content.join(folder);
+                if root.is_dir() {
+                    editor_roots.push(root);
+                }
+            }
             for (folder, extension) in [("interfaces", "if3"), ("defaults", "defaults")] {
                 let Ok(entries) = fs::read_dir(content.join(folder)) else {
                     continue;
@@ -153,6 +181,12 @@ pub fn editor_project(
     for ((uri, config_scope, version, text), path) in configs.into_iter().zip(&files) {
         project.open_config(uri, config_scope, version, text, config_kind(path).unwrap());
     }
+    project.editor_roots = Some(
+        editor_roots
+            .iter()
+            .map(|root| file_uri(root))
+            .collect::<Result<_, _>>()?,
+    );
     Ok(project)
 }
 
@@ -173,12 +207,17 @@ fn read_sources(
 }
 
 pub(crate) fn config_kind(path: &Path) -> Option<String> {
+    if path.file_name()?.to_str()? == "floorcol.txt" {
+        return Some("floorcol".into());
+    }
     let extension = path.extension()?.to_str()?;
     if matches!(extension, "pack" | "order" | "hashes") {
         return Some(format!("pack:{}", path.file_stem()?.to_str()?));
     }
-    (matches!(extension, "constant" | "if" | "if3" | "defaults" | "anim")
-        || types::Type::from_name(extension).is_some()
+    (matches!(
+        extension,
+        "constant" | "if" | "if3" | "defaults" | "anim" | "material" | "screen" | "jm2"
+    ) || types::Type::from_name(extension).is_some()
         || extension
             .strip_prefix("config")
             .is_some_and(|number| number.parse::<u32>().is_ok()))
@@ -1356,7 +1395,7 @@ fn build_symbol_registry(scripts_dir: &Path, resolved_pack_dir: Option<&Path>) -
     // the registry built meanwhile.
     let visibility = {
         let dir = scripts_dir.to_path_buf();
-        thread::spawn(move || sources::Visibility::scan(&dir))
+        background(move || sources::Visibility::scan(&dir))
     };
     let mut registry = SymbolRegistry::new();
 

@@ -1,8 +1,9 @@
 use super::Names;
 use super::inference;
+use crate::arguments::expression_types;
 use crate::clientscript;
 use crate::parser::{BinOp, Expr, LogicOp, ScriptDeclaration, Statement, StringPart, SwitchCase};
-use crate::symbol::SymbolRegistry;
+use crate::symbol::{SymbolRegistry, SymbolTable};
 use crate::types::{BaseVarType, Type};
 use anyhow::{Result, bail};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -428,6 +429,7 @@ pub fn generate(
     returns: &HashMap<String, usize>,
     names: &dyn Names,
     registry: &SymbolRegistry,
+    canonical: bool,
 ) -> Result<String> {
     let mut file = clientscript::parse(source, Path::new("clientscript.cs2"))?;
     let script = &mut file.scripts[0];
@@ -443,7 +445,22 @@ pub fn generate(
             }
         }
     }
-    fold_branch_values(&mut script.body, returns);
+    let mut symbols = SymbolTable::new();
+    for param in &script.params {
+        symbols.define_local(param.name.clone(), param.param_type, false);
+    }
+    for statement in &script.body {
+        if let Statement::VarDeclaration { name, var_type, .. } = statement {
+            symbols.define_local(name.clone(), *var_type, false);
+        }
+    }
+    let inline = StackInlining {
+        registry,
+        symbols,
+        returns,
+        canonical,
+    };
+    fold_branch_values(&mut script.body, &inline);
     script.body = reconstruct(&script.body, &references, None);
     let mut referenced = HashMap::new();
     collect_references(&script.body, &mut referenced);
@@ -451,7 +468,7 @@ pub fn generate(
     fold_assignments(&mut script.body, returns);
     let mut arrays = BTreeMap::new();
     restore_arrays(&mut script.body, &mut arrays);
-    fold_stack(&mut script.body, returns);
+    fold_stack(&mut script.body, &inline);
     // An array read before anything defines it came in as a parameter.
     for (&id, &element) in arrays.iter().rev() {
         let name = format!("array{id}");
@@ -492,7 +509,7 @@ pub fn generate(
     {
         script.body.pop();
     }
-    inference::format_literals(script, names, registry);
+    inference::format_literals(script, names, registry, canonical);
     declare_array_params(script);
     rename_locals(script);
     let params = script
@@ -1082,30 +1099,85 @@ fn value_count(expr: &Expr, returns: &HashMap<String, usize>) -> usize {
     }
 }
 
-fn inline_values(args: &mut Vec<Expr>, values: &[Expr], count: usize) -> bool {
-    if count <= args.len() && args[..count].iter().all(pop) {
+struct StackInlining<'a> {
+    registry: &'a SymbolRegistry,
+    symbols: SymbolTable,
+    returns: &'a HashMap<String, usize>,
+    canonical: bool,
+}
+
+fn pop_kind(expr: &Expr) -> Option<BaseVarType> {
+    let Expr::CommandCall { name, args, .. } = expr else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    match name.as_str() {
+        "__pop_int" => Some(BaseVarType::Integer),
+        "__pop_string" => Some(BaseVarType::String),
+        "__pop_long" => Some(BaseVarType::Long),
+        _ => None,
+    }
+}
+
+fn inline_values(
+    args: &mut Vec<Expr>,
+    values: &[Expr],
+    count: usize,
+    context: &StackInlining,
+) -> bool {
+    let types_match = count <= args.len()
+        && args[..count].iter().all(pop)
+        && (!context.canonical
+            || values
+                .iter()
+                .flat_map(|value| expression_types(value, context.registry, &context.symbols))
+                .map(|ty| ty.base_type())
+                .eq(args[..count].iter().filter_map(pop_kind)));
+    if types_match {
         args.splice(..count, values.iter().cloned());
         true
     } else {
         args.first_mut()
-            .is_some_and(|arg| inline_prefix(arg, values, count))
+            .is_some_and(|arg| inline_prefix(arg, values, count, context))
     }
 }
 
-fn inline_prefix(expr: &mut Expr, values: &[Expr], count: usize) -> bool {
-    if count == 1 && values.len() == 1 && pop(expr) {
+fn inline_prefix(expr: &mut Expr, values: &[Expr], count: usize, context: &StackInlining) -> bool {
+    if count == 1
+        && values.len() == 1
+        && pop_kind(expr).is_some_and(|kind| {
+            !context.canonical
+                || expression_types(&values[0], context.registry, &context.symbols)
+                    .iter()
+                    .map(|ty| ty.base_type())
+                    .eq([kind])
+        })
+    {
         *expr = values[0].clone();
         return true;
     }
     match expr {
+        Expr::CommandCall { name, args, .. }
+            if context.canonical && context.registry.component_first_command(name) =>
+        {
+            if args.is_empty() {
+                return false;
+            }
+            let mut emitted = args.split_off(1);
+            let inlined = inline_values(&mut emitted, values, count, context);
+            args.extend(emitted);
+            inlined
+        }
         Expr::CommandCall { args, .. } | Expr::ProcCall { args, .. } | Expr::Tuple(args) => {
-            inline_values(args, values, count)
+            inline_values(args, values, count, context)
         }
         Expr::BinaryOp { lhs, .. } | Expr::LogicalOp { lhs, .. } => {
-            inline_prefix(lhs, values, count)
+            inline_prefix(lhs, values, count, context)
         }
         Expr::Calc(value) | Expr::ArrayAccess { index: value, .. } => {
-            inline_prefix(value, values, count)
+            inline_prefix(value, values, count, context)
         }
         _ => false,
     }
@@ -1113,7 +1185,7 @@ fn inline_prefix(expr: &mut Expr, values: &[Expr], count: usize) -> bool {
 
 /// What a branch compares can take several values at once, like a call's. In
 /// the branch by now, conditions read as the single expression they are.
-fn fold_branch_values(body: &mut Vec<Statement>, returns: &HashMap<String, usize>) {
+fn fold_branch_values(body: &mut Vec<Statement>, context: &StackInlining) {
     let mut i = 0;
     while i + 1 < body.len() {
         if let Some(values) = call(&body[i], "__push")
@@ -1124,9 +1196,12 @@ fn fold_branch_values(body: &mut Vec<Statement>, returns: &HashMap<String, usize
             && name == "__branch"
             && args.len() > 2
         {
-            let count = values.iter().map(|value| value_count(value, returns)).sum();
+            let count = values
+                .iter()
+                .map(|value| value_count(value, context.returns))
+                .sum();
             let mut compared = args.split_off(2);
-            let inlined = inline_values(&mut compared, &values, count);
+            let inlined = inline_values(&mut compared, &values, count, context);
             args.extend(compared);
             if inlined {
                 body.remove(i);
@@ -1137,24 +1212,24 @@ fn fold_branch_values(body: &mut Vec<Statement>, returns: &HashMap<String, usize
     }
 }
 
-fn fold_stack(body: &mut Vec<Statement>, returns: &HashMap<String, usize>) {
+fn fold_stack(body: &mut Vec<Statement>, context: &StackInlining) {
     for statement in body.iter_mut() {
         match statement {
             Statement::If {
                 body, else_body, ..
             } => {
-                fold_stack(body, returns);
+                fold_stack(body, context);
                 if let Some(body) = else_body {
-                    fold_stack(body, returns);
+                    fold_stack(body, context);
                 }
             }
-            Statement::While { body, .. } => fold_stack(body, returns),
+            Statement::While { body, .. } => fold_stack(body, context),
             Statement::Switch { cases, default, .. } => {
                 for case in cases {
-                    fold_stack(&mut case.body, returns);
+                    fold_stack(&mut case.body, context);
                 }
                 if let Some(body) = default {
-                    fold_stack(body, returns);
+                    fold_stack(body, context);
                 }
             }
             _ => {}
@@ -1175,7 +1250,10 @@ fn fold_stack(body: &mut Vec<Statement>, returns: &HashMap<String, usize>) {
             i += 1;
             continue;
         }
-        let count: usize = values.iter().map(|value| value_count(value, returns)).sum();
+        let count: usize = values
+            .iter()
+            .map(|value| value_count(value, context.returns))
+            .sum();
         let inlined = match &mut body[next] {
             Statement::Expression { expr, .. }
             | Statement::VarDeclaration {
@@ -1183,15 +1261,15 @@ fn fold_stack(body: &mut Vec<Statement>, returns: &HashMap<String, usize>) {
             }
             | Statement::If {
                 condition: expr, ..
-            } => inline_prefix(expr, &values, count),
+            } => inline_prefix(expr, &values, count, context),
             Statement::Assignment { target, value, .. } => {
                 if let Expr::ArrayAccess { index, .. } = target {
-                    inline_prefix(index, &values, count)
+                    inline_prefix(index, &values, count, context)
                 } else {
-                    inline_prefix(value, &values, count)
+                    inline_prefix(value, &values, count, context)
                 }
             }
-            Statement::Return { values: args, .. } => inline_values(args, &values, count),
+            Statement::Return { values: args, .. } => inline_values(args, &values, count, context),
             _ => false,
         };
         if inlined {
@@ -1210,7 +1288,7 @@ fn fold_stack(body: &mut Vec<Statement>, returns: &HashMap<String, usize>) {
                     break;
                 }
                 values.push(value.clone());
-                count += value_count(value, returns);
+                count += value_count(value, context.returns);
             }
             if let Expr::MultiAssign(multi, _) = target {
                 targets.extend(multi.iter().rev().cloned());

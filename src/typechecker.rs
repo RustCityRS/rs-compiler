@@ -1,4 +1,6 @@
-use crate::arguments::{command_hints, command_returns, proc_hints, stack_hints};
+use crate::arguments::{
+    command_hints, command_parameters, command_returns, positional_hints, proc_hints, stack_hints,
+};
 use crate::clientscript::hooks;
 use crate::compiler::Compiler;
 use crate::diagnostic_messages as msg;
@@ -6,6 +8,7 @@ use crate::diagnostics::{DiagnosticsCollector, Phase};
 use crate::parser::*;
 use crate::symbol::{SymbolKind, SymbolRegistry, SymbolTable};
 use crate::types::{BaseVarType, Type};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::slice::from_ref;
 
@@ -510,6 +513,11 @@ impl<'a> TypeChecker<'a> {
                 }
 
                 let expr_type = self.infer_expr_type(expr, locals, *line, Some(switch_ty));
+                let valid_expr = switch_ty != Type::Error
+                    && switch_ty.allow_switch()
+                    && expr_type.is_some_and(|actual| {
+                        actual != Type::Error && self.types_compatible(actual, switch_ty)
+                    });
                 if let Some(et) = expr_type
                     && switch_ty != Type::Error
                     && !self.types_compatible(et, switch_ty)
@@ -525,6 +533,15 @@ impl<'a> TypeChecker<'a> {
                 }
                 if let Some(default_stmts) = default {
                     self.check_block(default_stmts, locals, return_types);
+                } else if valid_expr {
+                    let domain = if self.registry.switch_values(switch_ty).is_some() {
+                        switch_ty
+                    } else if switch_ty == Type::Int {
+                        expr_type.unwrap_or(switch_ty)
+                    } else {
+                        switch_ty
+                    };
+                    self.check_exhaustive_switch(domain, switch_ty, cases, *line);
                 }
             }
 
@@ -537,7 +554,7 @@ impl<'a> TypeChecker<'a> {
                     }
                 };
                 if self.stack_returns {
-                    let hints = stack_hints(self.registry, script_returns, values, locals);
+                    let hints = positional_hints(self.registry, script_returns, values, locals);
                     let actual: Vec<_> = values
                         .iter()
                         .zip(hints)
@@ -689,6 +706,92 @@ impl<'a> TypeChecker<'a> {
             ),
             Expr::LogicalOp { .. } => true,
             _ => false,
+        }
+    }
+
+    fn check_exhaustive_switch(
+        &mut self,
+        ty: Type,
+        case_type: Type,
+        cases: &[SwitchCase],
+        line: usize,
+    ) {
+        let Some(domain) = self.registry.switch_values(ty) else {
+            return;
+        };
+        let mut covered = HashSet::new();
+        for value in cases.iter().flat_map(|case| &case.values) {
+            let value = match value {
+                Expr::IntLiteral(value) | Expr::CoordLiteral(value) => Some(*value),
+                Expr::BoolLiteral(value) => Some(i32::from(*value)),
+                Expr::NullLiteral => Some(-1),
+                Expr::ConstantVar(name, _) => {
+                    self.registry
+                        .lookup_constant(name)
+                        .and_then(|symbol| match symbol.kind {
+                            SymbolKind::Constant { int_value, .. } => int_value,
+                            _ => None,
+                        })
+                }
+                // Use the source switch's case hint, just as code generation does.
+                // The tested expression may supply a narrower closed domain.
+                Expr::StringLiteral(name) => self.registry.lookup_reference(name, case_type),
+                Expr::Identifier(name) => name
+                    .split_once(':')
+                    .and_then(|(interface, component)| {
+                        self.registry.lookup_component(interface, component)
+                    })
+                    .or_else(|| self.registry.lookup_reference(name, case_type))
+                    .or_else(|| {
+                        self.registry
+                            .entity_ids
+                            .get(name)
+                            .and_then(|entry| entry.primary)
+                            .map(|entity| entity.id)
+                    })
+                    .or_else(|| {
+                        self.registry
+                            .lookup_constant(name)
+                            .and_then(|symbol| match symbol.kind {
+                                SymbolKind::Constant { int_value, .. } => int_value,
+                                _ => None,
+                            })
+                    }),
+                Expr::BinaryOp {
+                    op: BinOp::Add,
+                    lhs,
+                    rhs,
+                } => match (lhs.as_ref(), rhs.as_ref()) {
+                    (Expr::Identifier(left), Expr::Identifier(right)) => self
+                        .registry
+                        .lookup_entity_id_typed(&format!("{left}+{right}"), case_type),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(value) = value else {
+                return;
+            };
+            covered.insert(value);
+        }
+        let missing = domain
+            .iter()
+            .filter(|(value, _)| !covered.contains(*value))
+            .map(|(_, name)| name.as_str())
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let listed = missing
+                .iter()
+                .take(12)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let more = if missing.len() > 12 {
+                format!(" and {} more", missing.len() - 12)
+            } else {
+                String::new()
+            };
+            self.warning(line, format!("Non-exhaustive switch on {}: missing {listed}{more}; add the cases or a default branch.", ty.name()));
         }
     }
 
@@ -952,7 +1055,7 @@ impl<'a> TypeChecker<'a> {
                     if parts.len() == 2
                         && self.registry.lookup_component(parts[0], parts[1]).is_some()
                     {
-                        Some(hint.unwrap_or(Type::Component))
+                        Some(Type::Component)
                     } else if let Some(h) = hint {
                         if h != Type::Error {
                             Some(h)
@@ -1184,65 +1287,24 @@ impl<'a> TypeChecker<'a> {
                     } = &sym.kind
                     {
                         if self.registry.stack_commands.contains(lookup_name) {
-                            let counts = |types: &[Type]| {
-                                let mut counts = [0usize; 3];
-                                for ty in types {
-                                    counts[match ty.base_type() {
-                                        BaseVarType::Integer => 0,
-                                        BaseVarType::String => 1,
-                                        BaseVarType::Long => 2,
-                                    }] += 1;
-                                }
-                                counts
-                            };
-                            let expanded = self.expand_call_types(args, &arg_types);
-                            let actual =
-                                counts(&expanded.iter().filter_map(|t| *t).collect::<Vec<_>>());
-                            let mut expected = counts(cmd_params);
-                            if let Some(&explicit) = self.registry.hook_commands.get(lookup_name) {
-                                if let Some(Expr::StringLiteral(signature)) = args
-                                    .iter()
-                                    .rev()
-                                    .find(|arg| matches!(arg, Expr::StringLiteral(_)))
-                                {
-                                    expected = [1 + usize::from(explicit), 1, 0];
-                                    for ch in signature.trim_end_matches('Y').chars() {
-                                        expected[match ch {
-                                            's' => 1,
-                                            '§' => 2,
-                                            _ => 0,
-                                        }] += 1;
-                                    }
-                                    if signature.ends_with('Y') {
-                                        let ints: Vec<_> = args
-                                            .iter()
-                                            .zip(&arg_types)
-                                            .filter_map(|(arg, ty)| {
-                                                ty.is_some_and(|ty| {
-                                                    ty.base_type() == BaseVarType::Integer
-                                                })
-                                                .then_some(arg)
-                                            })
-                                            .collect();
-                                        let index =
-                                            ints.len().checked_sub(1 + usize::from(explicit));
-                                        if let Some(Expr::IntLiteral(n)) =
-                                            index.and_then(|index| ints.get(index).copied())
-                                            && *n >= 0
-                                        {
-                                            expected[0] += *n as usize + 1;
-                                        }
-                                    }
-                                } else {
-                                    self.error(
-                                        *call_line,
-                                        "Client hook needs a constant signature".into(),
-                                    );
-                                }
+                            if self.registry.hook_commands.contains_key(lookup_name)
+                                && !args.iter().any(|arg| matches!(arg, Expr::StringLiteral(_)))
+                            {
+                                self.error(
+                                    *call_line,
+                                    "Client hook needs a constant signature".into(),
+                                );
                             }
-                            if actual != expected {
-                                self.error(*call_line, format!("{name} expects {expected:?} int/string/long arguments, got {actual:?}"));
-                            }
+                            let params =
+                                command_parameters(self.registry, lookup_name, args, locals);
+                            self.check_call_arguments(
+                                name,
+                                &params,
+                                &arg_types,
+                                args,
+                                *call_line,
+                                CallKind::Command,
+                            );
                         } else if let Some(fixed) = Compiler::command_variadic_info(lookup_name) {
                             self.check_variadic_arguments(
                                 name,
@@ -1621,31 +1683,39 @@ impl<'a> TypeChecker<'a> {
             }
         }
         if self.stack_arguments(name, kind) {
+            if matches!(kind, CallKind::Command)
+                && self.registry.component_first_command(name)
+                && let Some((arg, ty)) = args.first().zip(actual_types.first())
+                && self.expand_call_types(from_ref(arg), from_ref(ty)).len() > 1
+            {
+                self.error(
+                    line,
+                    format!("{name}: pass the component as a separate first argument"),
+                );
+            }
             let actual_types = self.expand_call_types(args, actual_types);
-            for base in [BaseVarType::Integer, BaseVarType::String, BaseVarType::Long] {
-                let expected: Vec<_> = expected_types
-                    .iter()
-                    .filter(|ty| ty.base_type() == base)
-                    .collect();
-                let actual: Vec<_> = actual_types
-                    .iter()
-                    .flatten()
-                    .filter(|ty| ty.base_type() == base)
-                    .collect();
-                if expected.len() != actual.len() {
+            let actual = actual_types.into_iter().flatten().collect::<Vec<_>>();
+            if actual.len() != expected_types.len() {
+                self.error(
+                    line,
+                    format!(
+                        "{name} expects {} values, got {}",
+                        expected_types.len(),
+                        actual.len()
+                    ),
+                );
+            }
+            for (index, (&actual, &expected)) in actual.iter().zip(expected_types).enumerate() {
+                if !Self::stack_types_compatible(actual, expected) {
                     self.error(
                         line,
                         format!(
-                            "{name} expects {} {base:?} values, got {}",
-                            expected.len(),
-                            actual.len()
+                            "{name} argument {}: expected {}, got {}",
+                            index + 1,
+                            expected.name(),
+                            actual.name()
                         ),
                     );
-                }
-                for (actual, expected) in actual.into_iter().zip(expected) {
-                    if !self.types_compatible(*actual, *expected) {
-                        self.emit_type_mismatch(line, *actual, *expected);
-                    }
                 }
             }
             return;
@@ -1789,6 +1859,23 @@ impl<'a> TypeChecker<'a> {
 
     // ──────────────────── Type compatibility ────────────────────
     // Matching TS compiler's registered TypeCheckers (ScriptCompiler.ts:129-189)
+
+    fn stack_types_compatible(actual: Type, expected: Type) -> bool {
+        actual == expected
+            || matches!(actual, Type::Any | Type::Error)
+            || matches!(expected, Type::Any | Type::Error)
+            || (actual == Type::Int && expected.base_type() == BaseVarType::Integer)
+            || (expected == Type::Int && actual.base_type() == BaseVarType::Integer)
+            || matches!(
+                (actual, expected),
+                (Type::Obj, Type::NamedObj)
+                    | (Type::NamedObj, Type::Obj)
+                    | (Type::Boolean, Type::IntBool)
+                    | (Type::IntBool, Type::Boolean)
+                    | (Type::Long, Type::ClanForumQfc)
+                    | (Type::ClanForumQfc, Type::Long)
+            )
+    }
 
     fn types_compatible(&self, actual: Type, expected: Type) -> bool {
         // Rule 1: Any accepts anything

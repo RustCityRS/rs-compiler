@@ -10,10 +10,9 @@ use crate::parser::Expr;
 use crate::symbol::{SymbolKind, SymbolRegistry};
 use crate::types::{BaseVarType, Type};
 use anyhow::{Context, Result, bail, ensure};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt::Write;
 use std::path::Path;
-use std::slice::from_ref;
 
 #[derive(Clone, Default)]
 pub struct Signature {
@@ -39,6 +38,29 @@ fn types(counts: [usize; 3], inferred: &[Type]) -> Vec<Type> {
         .collect()
 }
 
+fn parameter_types(signature: &Signature) -> Vec<Type> {
+    let types = types(signature.params, &signature.param_types);
+    let Some(order) = &signature.order else {
+        return types;
+    };
+    let mut pending: [VecDeque<Type>; 3] = Default::default();
+    for ty in types {
+        pending[stack(ty.base_type())].push_back(ty);
+    }
+    order
+        .iter()
+        .map(|&kind| pending[stack(kind)].pop_front().unwrap())
+        .collect()
+}
+
+fn stack(kind: BaseVarType) -> usize {
+    match kind {
+        BaseVarType::Integer => 0,
+        BaseVarType::String => 1,
+        BaseVarType::Long => 2,
+    }
+}
+
 pub fn infer_signatures(
     scripts: &HashMap<u32, Script>,
     component_hooks: &[Vec<HookValue>],
@@ -56,7 +78,7 @@ pub fn infer_signatures(
     let mut sorted: Vec<_> = scripts.keys().copied().collect();
     sorted.sort_unstable();
     for id in sorted {
-        let text = decompile(
+        let text = decompile_source(
             &scripts[&id],
             id,
             names,
@@ -64,6 +86,7 @@ pub fn infer_signatures(
             params,
             commands,
             registry,
+            false,
         )
         .with_context(|| format!("Inferring clientscript {id}"))?;
         let file = clientscript::parse(&text, Path::new("inference.cs2"))
@@ -107,6 +130,12 @@ pub fn infer_signatures(
         }
         file.scripts[0].return_types = signature.return_types.clone();
         clientscript::register(&file, &ids, registry)?;
+        registry.register_script(
+            file.scripts[0].name.clone(),
+            file.scripts[0].trigger.clone(),
+            parameter_types(signature),
+            signature.return_types.clone(),
+        );
     }
     Ok(signatures)
 }
@@ -244,8 +273,10 @@ struct Decompiler<'a> {
     param_types: &'a HashMap<i32, bool>,
     commands: HashMap<u16, &'a Command>,
     returns: [usize; 3],
+    return_types: Vec<Type>,
     stack: [Vec<Value>; 3],
     body: String,
+    canonical: bool,
 }
 
 pub fn decompile(
@@ -256,6 +287,29 @@ pub fn decompile(
     param_types: &HashMap<i32, bool>,
     commands: &[Command],
     registry: &SymbolRegistry,
+) -> Result<String> {
+    decompile_source(
+        script,
+        id,
+        names,
+        signatures,
+        param_types,
+        commands,
+        registry,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decompile_source(
+    script: &Script,
+    id: u32,
+    names: &dyn Names,
+    signatures: &HashMap<u32, Signature>,
+    param_types: &HashMap<i32, bool>,
+    commands: &[Command],
+    registry: &SymbolRegistry,
+    canonical: bool,
 ) -> Result<String> {
     let sig = signatures
         .get(&id)
@@ -273,8 +327,21 @@ pub fn decompile(
             .map(|command| (command.opcode, command))
             .collect(),
         returns: sig.returns,
+        return_types: if sig.return_types.is_empty() {
+            sig.return_order
+                .iter()
+                .map(|kind| match kind {
+                    BaseVarType::Integer => Type::Int,
+                    BaseVarType::String => Type::String,
+                    BaseVarType::Long => Type::Long,
+                })
+                .collect()
+        } else {
+            sig.return_types.clone()
+        },
         stack: Default::default(),
         body: String::new(),
+        canonical,
     };
     let mut labels = BTreeSet::new();
     for (pc, &opcode) in script.operations.iter().enumerate() {
@@ -306,34 +373,13 @@ pub fn decompile(
     let mut out = format!("{}(", script_key(names, id));
     let base_names = ["int", "string", "long"];
     let mut params = Vec::new();
-    let param_types = types(sig.params, &sig.param_types);
-    let mut by_stack: [Vec<Type>; 3] = Default::default();
-    for ty in &param_types {
-        by_stack[counts(from_ref(ty))
-            .iter()
-            .position(|&count| count == 1)
-            .unwrap()]
-        .push(*ty);
-    }
-    let order: Vec<usize> = match &sig.order {
-        Some(order) => order
-            .iter()
-            .map(|kind| match kind {
-                BaseVarType::Integer => 0,
-                BaseVarType::String => 1,
-                BaseVarType::Long => 2,
-            })
-            .collect(),
-        None => (0..3)
-            .flat_map(|kind| vec![kind; sig.params[kind]])
-            .collect(),
-    };
     let mut slots = [0; 3];
-    for kind in order {
+    for ty in parameter_types(sig) {
+        let kind = stack(ty.base_type());
         let slot = slots[kind];
         slots[kind] += 1;
         // An array parameter is declared by generate: here it's an int.
-        let ty = match by_stack[kind][slot] {
+        let ty = match ty {
             Type::IntArray => "int",
             ty => ty.name(),
         };
@@ -401,6 +447,7 @@ pub fn decompile(
         &returns,
         names,
         registry,
+        canonical,
     )
     .with_context(|| format!("Structuring clientscript {id}"))
 }
@@ -422,6 +469,76 @@ fn counts(types: &[Type]) -> [usize; 3] {
 }
 
 impl Decompiler<'_> {
+    fn ordered_arguments(
+        &mut self,
+        mut args: Vec<Value>,
+        types: &[Type],
+        component_first: bool,
+        pc: usize,
+    ) -> Vec<Value> {
+        if !self.canonical {
+            return args;
+        }
+        let mut pending: [VecDeque<usize>; 3] = Default::default();
+        for (index, value) in args.iter().enumerate() {
+            pending[value.kind].push_back(index);
+        }
+        let order = types
+            .iter()
+            .enumerate()
+            .map(|(slot, ty)| {
+                let values = &mut pending[stack(ty.base_type())];
+                if component_first && slot == 0 {
+                    values.pop_back().unwrap()
+                } else {
+                    values.pop_front().unwrap()
+                }
+            })
+            .collect::<Vec<_>>();
+        let emitted = if component_first {
+            order[1..]
+                .iter()
+                .chain(&order[..1])
+                .copied()
+                .collect::<Vec<_>>()
+        } else {
+            order.clone()
+        };
+        let mut positions = vec![0; args.len()];
+        for (position, &index) in emitted.iter().enumerate() {
+            positions[index] = position;
+        }
+        let mut next = usize::MAX;
+        let prefix = args
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, value)| {
+                if value.start == value.end {
+                    return None;
+                }
+                if positions[index] >= next {
+                    Some(index + 1)
+                } else {
+                    next = positions[index];
+                    None
+                }
+            })
+            .unwrap_or(0);
+        if prefix > 0 {
+            self.flush();
+            for value in &args[..prefix] {
+                if value.start != value.end {
+                    writeln!(self.body, "__push({});", value.text).unwrap();
+                }
+            }
+            for value in &mut args[..prefix] {
+                *value = Value::stack(value.kind, pc);
+            }
+        }
+        order.into_iter().map(|index| args[index].clone()).collect()
+    }
+
     fn arguments(&self, args: &mut [Value], types: &[Type], hook: bool) {
         let mut by_kind: [Vec<Type>; 3] = Default::default();
         for &ty in types {
@@ -683,6 +800,8 @@ impl Decompiler<'_> {
             }
             Opcode::Return => {
                 let args = self.args(self.returns, pc);
+                let types = self.return_types.clone();
+                let args = self.ordered_arguments(args, &types, false, pc);
                 self.expression(
                     format!(
                         "return({})",
@@ -718,11 +837,9 @@ impl Decompiler<'_> {
                     .get(&(operand as u32))
                     .context("Missing called clientscript")?;
                 let mut args = self.args(signature.params, pc);
-                self.arguments(
-                    &mut args,
-                    &types(signature.params, &signature.param_types),
-                    false,
-                );
+                let parameters = parameter_types(signature);
+                self.arguments(&mut args, &parameters, false);
+                let args = self.ordered_arguments(args, &parameters, false, pc);
                 self.expression(
                     format!(
                         "~{}({})",
@@ -778,6 +895,11 @@ impl Decompiler<'_> {
                 let mut types = command.params.clone();
                 let mut returns = counts(&command.returns);
                 let mut name = command.name.to_owned();
+                let component_first = self.registry.component_first_command(&name);
+                if component_first {
+                    let component = types.remove(0);
+                    types.push(component);
+                }
                 if matches!(command.kind, CommandKind::Hook | CommandKind::HookComponent) {
                     let explicit = command.kind == CommandKind::HookComponent;
                     let signature = self.stack[1]
@@ -817,6 +939,11 @@ impl Decompiler<'_> {
                     &types,
                     matches!(command.kind, CommandKind::Hook | CommandKind::HookComponent),
                 );
+                if component_first {
+                    let component = types.pop().unwrap();
+                    types.insert(0, component);
+                }
+                let mut args = self.ordered_arguments(args, &types, component_first, pc);
                 let type_args = match command.kind {
                     CommandKind::Enum => 2,
                     CommandKind::EnumOutput => 1,

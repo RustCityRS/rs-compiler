@@ -425,12 +425,47 @@ impl<'a> PointerChecker<'a> {
         names: &[String],
         stop: &dyn Fn() -> bool,
     ) -> DiagnosticsCollector {
+        self.validate_names_with(names, stop, |_, _| {})
+    }
+
+    pub(crate) fn validate_names_with_requirements_until(
+        &mut self,
+        names: &[String],
+        stop: &dyn Fn() -> bool,
+    ) -> (DiagnosticsCollector, HashMap<String, PointerSet>) {
+        let mut requirements = HashMap::new();
+        let diagnostics = self.validate_names_with(names, stop, |checker, name| {
+            if let Some(analysis) = checker.script_analyses.get(name) {
+                let required = PointerType::ALL
+                    .into_iter()
+                    .filter(|pointer| {
+                        let pi = pointer.index();
+                        if analysis.required[pi].is_empty() {
+                            return false;
+                        }
+                        let blocked = analysis.set_list[pi].iter().copied().collect();
+                        Self::requires_at_entry(analysis, pi, &blocked)
+                    })
+                    .collect();
+                requirements.insert(name.to_string(), required);
+            }
+        });
+        (diagnostics, requirements)
+    }
+
+    fn validate_names_with(
+        &mut self,
+        names: &[String],
+        stop: &dyn Fn() -> bool,
+        mut on_script: impl FnMut(&Self, &str),
+    ) -> DiagnosticsCollector {
         let mut diagnostics = DiagnosticsCollector::new();
         for script_name in names {
             if stop() {
                 break;
             }
             self.validate_script(script_name, &mut diagnostics);
+            on_script(self, script_name);
             // A script's CFG (and any callee CFGs built to derive summaries) is
             // only needed during its own validation; the cross-script pointer
             // summaries persist in `script_pointers`. Free the CFGs now so peak
@@ -1240,6 +1275,20 @@ impl<'a> PointerChecker<'a> {
     // Callee pointer resolution
     // -----------------------------------------------------------------------
 
+    fn requires_at_entry(
+        analysis: &ScriptAnalysis,
+        pointer: usize,
+        setters: &HashSet<usize>,
+    ) -> bool {
+        Self::find_edge_path_static(
+            &analysis.nodes,
+            &analysis.required[pointer],
+            |node_idx| node_idx == 0,
+            setters,
+        )
+        .is_some()
+    }
+
     /// Get the merged pointer requirements/effects of a called script.
     ///
     /// Uses graph reachability (matching the TS `calculatePointers`):
@@ -1294,16 +1343,8 @@ impl<'a> PointerChecker<'a> {
                 let set_blocked: HashSet<usize> = analysis.set_list[pi].iter().copied().collect();
 
                 // requiresPointerScript: BFS from required → graph[0], blocked by setters
-                if requires {
-                    let path = Self::find_edge_path_static(
-                        &analysis.nodes,
-                        &analysis.required[pi],
-                        |node_idx| node_idx == 0,
-                        &set_blocked,
-                    );
-                    if path.is_some() {
-                        holder.required.insert(ptr);
-                    }
+                if requires && Self::requires_at_entry(analysis, pi, &set_blocked) {
+                    holder.required.insert(ptr);
                 }
 
                 if has_returns {
