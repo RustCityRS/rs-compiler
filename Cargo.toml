@@ -9,7 +9,7 @@ license = "MIT"
 repository = "https://github.com/RustCityRS/rs-compiler"
 homepage = "https://github.com/RustCityRS/rs-compiler"
 readme = "README.md"
-include = ["src/**/*", "LICENSE", "README.md"]
+include = ["src/**/*", "LICENSE.md", "LICENSE.neptune", "README.md"]
 
 [lib]
 name = "runec"
