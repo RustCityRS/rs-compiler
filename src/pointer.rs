@@ -168,6 +168,29 @@ impl PointerSet {
     pub fn iter(self) -> PointerSetIter {
         PointerSetIter { bits: self.0 }
     }
+
+    fn secondary(self) -> Self {
+        use PointerType::*;
+        self.iter()
+            .map(|pointer| match pointer {
+                ActivePlayer => ActivePlayer2,
+                ActivePlayer2 => ActivePlayer,
+                PActivePlayer => PActivePlayer2,
+                PActivePlayer2 => PActivePlayer,
+                ActiveNpc => ActiveNpc2,
+                ActiveNpc2 => ActiveNpc,
+                ActiveLoc => ActiveLoc2,
+                ActiveLoc2 => ActiveLoc,
+                ActiveObj => ActiveObj2,
+                ActiveObj2 => ActiveObj,
+                ActiveController => ActiveController2,
+                ActiveController2 => ActiveController,
+                ActiveRegion => ActiveRegion2,
+                ActiveRegion2 => ActiveRegion,
+                _ => pointer,
+            })
+            .collect()
+    }
 }
 
 pub struct PointerSetIter {
@@ -205,7 +228,7 @@ impl FromIterator<PointerType> for PointerSet {
 // PointerHolder — describes a command's pointer requirements
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PointerHolder {
     pub required: PointerSet,
     pub set: PointerSet,
@@ -485,19 +508,24 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
             conditional_set: conditional,
             may_suspend: false,
         };
-        map.insert(name.to_lowercase(), holder);
-
-        // Secondary entry (dot-prefixed) if any require2/set2/corrupt2 are specified
-        if !require2.is_empty() || !set2.is_empty() || !corrupt2.is_empty() {
-            let holder2 = PointerHolder {
+        let holder2 = if require2.is_empty() && set2.is_empty() && corrupt2.is_empty() {
+            PointerHolder {
+                required: holder.required.secondary(),
+                set: holder.set.secondary(),
+                corrupted: holder.corrupted.secondary(),
+                ..holder.clone()
+            }
+        } else {
+            PointerHolder {
                 required: require2.iter().copied().collect(),
                 set: set2.iter().copied().collect(),
                 corrupted: corrupt2.iter().copied().collect(),
                 conditional_set: conditional,
                 may_suspend: false,
-            };
-            map.insert(format!(".{}", name.to_lowercase()), holder2);
-        }
+            }
+        };
+        map.insert(name.to_lowercase(), holder);
+        map.insert(format!(".{}", name.to_lowercase()), holder2);
     };
 
     // The POINTER_GROUP_FIND shorthand
@@ -876,10 +904,10 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         "huntnext",
         &[FindPlayer],
         &[ActivePlayer],
-        &[],
+        &[PActivePlayer],
         &[FindPlayer],
         &[ActivePlayer2],
-        &[],
+        &[PActivePlayer2],
         true,
     );
     add(
@@ -890,7 +918,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         &[ActiveNpc2],
         &[],
-        false,
+        true,
     );
     add("npc_huntall", &[], &[FindNpc], &[], &[], &[], &[], false);
     add(
@@ -1110,13 +1138,40 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         false,
     );
-    add("last_com", &[LastCom], &[], &[], &[], &[], &[], false);
+    add(
+        "last_com",
+        &[ActivePlayer, LastCom],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        false,
+    );
     add("last_int", &[LastInt], &[], &[], &[], &[], &[], false);
-    add("last_item", &[LastItem], &[], &[], &[], &[], &[], false);
-    add("last_slot", &[LastSlot], &[], &[], &[], &[], &[], false);
+    add(
+        "last_item",
+        &[ActivePlayer, LastItem],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        false,
+    );
+    add(
+        "last_slot",
+        &[ActivePlayer, LastSlot],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        false,
+    );
     add(
         "last_targetslot",
-        &[LastTargetslot],
+        &[ActivePlayer, LastTargetslot],
         &[],
         &[],
         &[],
@@ -1126,7 +1181,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
     );
     add(
         "last_useitem",
-        &[LastUseitem],
+        &[ActivePlayer, LastUseitem],
         &[],
         &[],
         &[],
@@ -1136,7 +1191,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
     );
     add(
         "last_useslot",
-        &[LastUseslot],
+        &[ActivePlayer, LastUseslot],
         &[],
         &[],
         &[],
@@ -1286,7 +1341,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
     );
     add(
         "p_locmerge",
-        &[PActivePlayer],
+        &[PActivePlayer, ActiveLoc],
         &[],
         &[],
         &[],
@@ -1311,7 +1366,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         &[PActivePlayer, ActiveLoc],
         &[],
         &[],
-        &[],
+        &[PActivePlayer2, ActiveLoc],
         &[],
         &[],
         false,
@@ -1341,7 +1396,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         &[PActivePlayer, ActiveObj],
         &[],
         &[],
-        &[],
+        &[PActivePlayer2, ActiveObj],
         &[],
         &[],
         false,
@@ -1656,10 +1711,10 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         "findhero",
         &[ActivePlayer],
         &[ActivePlayer2],
-        &[],
+        &[PActivePlayer2],
         &[ActivePlayer2],
         &[ActivePlayer2],
-        &[],
+        &[PActivePlayer2],
         true,
     );
     add(
@@ -1817,6 +1872,8 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         "runclientscriptvararg",
         "session_log",
         "setskincolour",
+        "sound_speech_volume",
+        "sound_speech_stop",
         "stat_total",
         "wealth_event",
     ] {
@@ -1860,7 +1917,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
     );
     add(
         "last_targetcom",
-        &[LastTargetslot],
+        &[ActivePlayer, LastTargetslot],
         &[],
         &[],
         &[],
@@ -1882,10 +1939,10 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         "player_findnext",
         &[FindPlayer],
         &[ActivePlayer],
-        &[],
+        &[PActivePlayer],
         &[FindPlayer],
         &[ActivePlayer2],
-        &[],
+        &[PActivePlayer2],
         true,
     );
 
@@ -2002,7 +2059,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
             &corrupt,
             &[ActiveNpc2],
             &[],
-            &[],
+            &corrupt,
             false,
         );
     }
@@ -2090,10 +2147,10 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         "npc_findhero",
         &[ActiveNpc],
         &[ActivePlayer],
-        &[],
+        &[PActivePlayer],
         &[ActiveNpc2],
         &[ActivePlayer2],
-        &[],
+        &[PActivePlayer2],
         true,
     );
     add(
@@ -2121,7 +2178,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         &[ActiveNpc, ActivePlayer],
         &[],
         &[],
-        &[],
+        &[ActiveNpc2, ActivePlayer, ActivePlayer2],
         &[],
         &[],
         false,
@@ -2679,7 +2736,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         &[ActiveObj2],
         &[],
-        false,
+        true,
     );
     add(
         "obj_findallzone",
@@ -3139,6 +3196,17 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         &[],
         &[],
+        false,
+    );
+
+    add(
+        "world_delay",
+        &[],
+        &[],
+        &[PActivePlayer, PActivePlayer2],
+        &[],
+        &[],
+        &[PActivePlayer, PActivePlayer2],
         false,
     );
 

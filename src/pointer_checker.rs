@@ -229,6 +229,7 @@ pub struct PointerChecker<'a> {
     script_pointers: HashMap<String, PointerHolder>,
     pending_analyses: HashSet<String>,
     pending_scripts: HashSet<String>,
+    recursive_scripts: HashSet<String>,
 }
 
 impl SharedMaps {
@@ -355,6 +356,7 @@ impl<'a> PointerChecker<'a> {
             script_pointers: HashMap::new(),
             pending_analyses: HashSet::new(),
             pending_scripts: HashSet::new(),
+            recursive_scripts: HashSet::new(),
         }
     }
 
@@ -913,7 +915,8 @@ impl<'a> PointerChecker<'a> {
             return;
         }
         if self.pending_analyses.contains(script_name) {
-            return; // cycle detection
+            self.mark_recursive_scripts();
+            return;
         }
         self.pending_analyses.insert(script_name.to_string());
 
@@ -927,7 +930,59 @@ impl<'a> PointerChecker<'a> {
 
         self.script_analyses
             .insert(script_name.to_string(), analysis);
+        if !self.recursive_scripts.is_empty() {
+            self.recursive_scripts.insert(script_name.to_string());
+        }
         self.pending_analyses.remove(script_name);
+        self.resolve_recursive_scripts();
+    }
+
+    fn mark_recursive_scripts(&mut self) {
+        self.recursive_scripts
+            .extend(self.pending_analyses.iter().cloned());
+        self.recursive_scripts
+            .extend(self.pending_scripts.iter().cloned());
+    }
+
+    fn resolve_recursive_scripts(&mut self) {
+        if self.recursive_scripts.is_empty()
+            || !self.pending_analyses.is_empty()
+            || !self.pending_scripts.is_empty()
+        {
+            return;
+        }
+        let mut names: Vec<_> = self.recursive_scripts.drain().collect();
+        names.sort();
+        // Requirements and possible corruption grow from empty; guaranteed
+        // setters shrink from all pointers until recursive summaries agree.
+        for name in &names {
+            self.script_pointers.insert(
+                name.clone(),
+                PointerHolder {
+                    set: PointerSet::all(),
+                    ..PointerHolder::default()
+                },
+            );
+        }
+        loop {
+            let mut updates = Vec::with_capacity(names.len());
+            for name in &names {
+                let idx = self.shared.script_name_to_index[name];
+                let mut analysis = self.build_cfg(idx);
+                self.categorize_nodes(idx, &mut analysis);
+                let holder = Self::analyzed_pointers(&analysis);
+                updates.push((name.clone(), analysis, holder));
+            }
+            let mut changed = false;
+            for (name, analysis, holder) in updates {
+                changed |= self.script_pointers[&name] != holder;
+                self.script_analyses.insert(name.clone(), analysis);
+                self.script_pointers.insert(name, holder);
+            }
+            if !changed {
+                break;
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1058,10 +1113,8 @@ impl<'a> PointerChecker<'a> {
         let script_ref = self.scripts.get(script_idx);
         let instructions = &script_ref.instructions;
 
-        // Look for the pattern: [Command with conditional_set] ... [PushConstantInt(0 or 1)] [BranchEquals]
-        // The Command may not be immediately before PushConstantInt because argument
-        // pushes sit between them. So we scan backwards from PushConstantInt+BranchEquals
-        // to find the nearest Command.
+        // The branch must consume the find result itself. Earlier commands may
+        // have had their result discarded or stored before an unrelated condition.
         for window_end in 1..node_order.len() {
             let branch_instr_idx = node_order[window_end];
             let branch_instr = &instructions[branch_instr_idx];
@@ -1085,40 +1138,14 @@ impl<'a> PointerChecker<'a> {
                 _ => continue,
             };
 
-            // Scan backwards to find the nearest Command instruction
-            let mut cmd_instr_idx = None;
-            for scan in (0..scan_end).rev() {
-                let idx = node_order[scan];
-                if instructions[idx].opcode == Opcode::Command {
-                    cmd_instr_idx = Some(idx);
-                    break;
-                }
-                // Stop scanning if we hit a branch/return/switch (control flow boundary)
-                if matches!(
-                    instructions[idx].opcode,
-                    Opcode::Branch
-                        | Opcode::Return
-                        | Opcode::Switch
-                        | Opcode::BranchEquals
-                        | Opcode::BranchNot
-                        | Opcode::BranchLessThan
-                        | Opcode::BranchGreaterThan
-                        | Opcode::BranchLessThanOrEquals
-                        | Opcode::BranchGreaterThanOrEquals
-                        | Opcode::BranchIfTrue
-                        | Opcode::BranchIfFalse
-                ) {
-                    break;
-                }
-            }
-            let cmd_instr_idx = match cmd_instr_idx {
-                Some(idx) => idx,
-                None => continue,
+            let Some(&cmd_instr_idx) = scan_end.checked_sub(1).and_then(|idx| node_order.get(idx))
+            else {
+                continue;
             };
-            if self.shared.client && (scan_end == 0 || node_order[scan_end - 1] != cmd_instr_idx) {
+            let cmd_instr = &instructions[cmd_instr_idx];
+            if cmd_instr.opcode != Opcode::Command {
                 continue;
             }
-            let cmd_instr = &instructions[cmd_instr_idx];
 
             // Look up command pointer info
             let cmd_name = self.resolve_command_name(cmd_instr, &script_ref.strings);
@@ -1381,6 +1408,7 @@ impl<'a> PointerChecker<'a> {
 
         // Cycle detection
         if self.pending_scripts.contains(&script_name) {
+            self.mark_recursive_scripts();
             return PointerHolder::default();
         }
         self.pending_scripts.insert(script_name.clone());
@@ -1388,65 +1416,68 @@ impl<'a> PointerChecker<'a> {
         // Ensure analysis exists
         self.ensure_analysis(&script_name);
 
+        let holder = self
+            .script_analyses
+            .get(&script_name)
+            .map_or_else(PointerHolder::default, Self::analyzed_pointers);
+        self.pending_scripts.remove(&script_name);
+        self.script_pointers.insert(script_name.clone(), holder);
+        self.resolve_recursive_scripts();
+        self.script_pointers[&script_name].clone()
+    }
+
+    fn analyzed_pointers(analysis: &ScriptAnalysis) -> PointerHolder {
         let mut holder = PointerHolder::default();
+        for &ptr in &PointerType::ALL {
+            let pi = ptr.index();
 
-        if let Some(analysis) = self.script_analyses.get(&script_name) {
-            for &ptr in &PointerType::ALL {
-                let pi = ptr.index();
+            // Both BFS walks below treat setter nodes as blocking. The CFG
+            // stores only the compact `set_list`/`corrupted_list` Vecs, so
+            // build the O(1) lookup sets on demand here (transient, freed at
+            // the end of this iteration) instead of caching a duplicate
+            // HashSet per pointer type in every memoized CFG.
+            let requires = !analysis.required[pi].is_empty();
+            let has_returns = !analysis.returns.is_empty();
+            if !requires && !has_returns {
+                continue;
+            }
+            let set_blocked: HashSet<usize> = analysis.set_list[pi].iter().copied().collect();
 
-                // Both BFS walks below treat setter nodes as blocking. The CFG
-                // stores only the compact `set_list`/`corrupted_list` Vecs, so
-                // build the O(1) lookup sets on demand here (transient, freed at
-                // the end of this iteration) instead of caching a duplicate
-                // HashSet per pointer type in every memoized CFG.
-                let requires = !analysis.required[pi].is_empty();
-                let has_returns = !analysis.returns.is_empty();
-                if !requires && !has_returns {
-                    continue;
+            // requiresPointerScript: BFS from required → graph[0], blocked by setters
+            if requires && Self::requires_at_entry(analysis, pi, &set_blocked) {
+                holder.required.insert(ptr);
+            }
+
+            if has_returns {
+                let corrupted_nodes: HashSet<usize> =
+                    analysis.corrupted_list[pi].iter().copied().collect();
+
+                // setsPointerScript: BFS from returns → (graph[0] OR corruptor),
+                // blocked by setters. If NO path found, the script guarantees set.
+                let path = Self::find_edge_path_static(
+                    &analysis.nodes,
+                    &analysis.returns,
+                    |node_idx| node_idx == 0 || corrupted_nodes.contains(&node_idx),
+                    &set_blocked,
+                );
+                if path.is_none() {
+                    holder.set.insert(ptr);
                 }
-                let set_blocked: HashSet<usize> = analysis.set_list[pi].iter().copied().collect();
 
-                // requiresPointerScript: BFS from required → graph[0], blocked by setters
-                if requires && Self::requires_at_entry(analysis, pi, &set_blocked) {
-                    holder.required.insert(ptr);
-                }
-
-                if has_returns {
-                    let corrupted_nodes: HashSet<usize> =
-                        analysis.corrupted_list[pi].iter().copied().collect();
-
-                    // setsPointerScript: BFS from returns → (graph[0] OR corruptor),
-                    // blocked by setters. If NO path found, the script guarantees set.
+                // corruptsPointerScript: BFS from returns → corruptor, blocked by setters
+                if !corrupted_nodes.is_empty() {
                     let path = Self::find_edge_path_static(
                         &analysis.nodes,
                         &analysis.returns,
-                        |node_idx| node_idx == 0 || corrupted_nodes.contains(&node_idx),
+                        |node_idx| corrupted_nodes.contains(&node_idx),
                         &set_blocked,
                     );
-                    if path.is_none() {
-                        holder.set.insert(ptr);
-                    }
-
-                    // corruptsPointerScript: BFS from returns → corruptor, blocked by setters
-                    if !corrupted_nodes.is_empty() {
-                        let path = Self::find_edge_path_static(
-                            &analysis.nodes,
-                            &analysis.returns,
-                            |node_idx| corrupted_nodes.contains(&node_idx),
-                            &set_blocked,
-                        );
-                        if path.is_some() {
-                            holder.corrupted.insert(ptr);
-                        }
+                    if path.is_some() {
+                        holder.corrupted.insert(ptr);
                     }
                 }
             }
         }
-
-        self.pending_scripts.remove(&script_name);
-
-        self.script_pointers
-            .insert(script_name.clone(), holder.clone());
         holder
     }
 

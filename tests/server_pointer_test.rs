@@ -10,6 +10,7 @@ fn project(check_pointers: bool) -> Project {
     let commands = [
         ("last_useslot", vec![], vec![Int]),
         ("last_int", vec![], vec![Int]),
+        ("last_com", vec![], vec![Component]),
         ("mes", vec![String], vec![]),
         ("inv_getobj", vec![Inv, Int], vec![Obj]),
         ("inv_total", vec![Inv, Obj], vec![Int]),
@@ -22,6 +23,18 @@ fn project(check_pointers: bool) -> Project {
         ("p_delay", vec![Int], vec![]),
         ("db_listall", vec![DbTable], vec![]),
         ("db_findnext", vec![], vec![DbRow]),
+        ("allowdesign", vec![], vec![]),
+        ("sound_speech_volume", vec![Int], vec![]),
+        ("sound_speech_stop", vec![], vec![]),
+        ("p_finduid", vec![Int], vec![Boolean]),
+        ("finduid", vec![Int], vec![Boolean]),
+        ("p_stopaction", vec![], vec![]),
+        ("npc_finduid", vec![Int], vec![Boolean]),
+        ("npc_name", vec![], vec![String]),
+        ("obj_find", vec![Coord, Obj], vec![Boolean]),
+        ("obj_name", vec![], vec![String]),
+        ("npc_delay", vec![Int], vec![]),
+        ("world_delay", vec![Int], vec![]),
     ];
     for (opcode, (name, params, returns)) in commands.into_iter().enumerate() {
         registry.register_command(name.into(), 1000 + opcode as i32, params, returns);
@@ -80,6 +93,177 @@ fn implicit(compilation: &Compilation) -> Vec<&Diagnostic> {
                 && diagnostic.message.starts_with("Implicit caller context")
         })
         .collect()
+}
+
+fn pointer_warnings(text: &str) -> Vec<String> {
+    compile(text, true)
+        .analysis
+        .diagnostics
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.phase == Phase::PointerCheck && diagnostic.severity == Severity::Warning
+        })
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect()
+}
+
+#[test]
+fn entity_commands_require_the_selected_player() {
+    for command in [
+        "allowdesign",
+        "sound_speech_volume(1)",
+        "sound_speech_stop",
+        "last_com",
+    ] {
+        for dot in ["", "."] {
+            let text = format!("[ai_timer,_]\n{dot}{command};\n");
+            let warnings = pointer_warnings(&text);
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains(&format!("{dot}active_player"))),
+                "{text}: {warnings:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn only_the_find_result_can_establish_a_pointer() {
+    for body in [
+        "def_boolean $found = p_finduid(1); if ($flag = true) { p_stopaction; }",
+        "def_boolean $found = p_finduid(1); if ($flag ! false) { p_stopaction; }",
+        "def_boolean $found = p_finduid(1); if (~unrelated = true) { p_stopaction; }",
+    ] {
+        let text = format!(
+            "[ai_timer,_](boolean $flag)\n{body}\n[proc,unrelated]()(boolean)\nreturn(true);\n"
+        );
+        let warnings = pointer_warnings(&text);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("p_active_player")),
+            "{text}: {warnings:?}"
+        );
+    }
+    for body in [
+        "if (p_finduid(1) = true) { p_stopaction; }",
+        "if (p_finduid(1) = false) { return; } p_stopaction;",
+        "if (p_finduid(1) ! false) { p_stopaction; }",
+    ] {
+        let text = format!("[ai_timer,_]\n{body}\n");
+        assert!(pointer_warnings(&text).is_empty(), "{text}");
+    }
+}
+
+#[test]
+fn object_find_requires_a_successful_branch() {
+    for dot in ["", "."] {
+        for body in [
+            format!("{dot}obj_find(0_0_0_0_0, weapon); mes({dot}obj_name);"),
+            format!("if ({dot}obj_find(0_0_0_0_0, weapon) = false) {{ mes({dot}obj_name); }}"),
+        ] {
+            let text = format!("[debugproc,find]\n{body}\n");
+            let warnings = pointer_warnings(&text);
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains(&format!("{dot}active_obj"))),
+                "{text}: {warnings:?}"
+            );
+        }
+        let text = format!(
+            "[debugproc,find]\nif ({dot}obj_find(0_0_0_0_0, weapon) = true) {{ mes({dot}obj_name); }}\n"
+        );
+        assert!(pointer_warnings(&text).is_empty(), "{text}");
+    }
+}
+
+#[test]
+fn calls_propagate_entity_requirements_and_rebinding_corrupts_protection() {
+    let text =
+        "[debugproc,caller]\n~wrapper;\n[proc,wrapper]\n~read;\n[proc,read]\nmes(npc_name);\n";
+    assert!(
+        pointer_warnings(text)
+            .iter()
+            .any(|warning| warning.contains("active_npc"))
+    );
+    let text = "[debugproc,caller]\nif (npc_finduid(1) = true) { ~wrapper; }\n[proc,wrapper]\n~read;\n[proc,read]\nmes(npc_name);\n";
+    assert!(pointer_warnings(text).is_empty());
+    for dot in ["", "."] {
+        let text = format!(
+            "[debugproc,caller]\nif ({dot}p_finduid(1) = true) {{ ~rebind; {dot}p_stopaction; }}\n[proc,rebind]\n{dot}finduid(2);\n"
+        );
+        let warnings = pointer_warnings(&text);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains(&format!("{dot}p_active_player"))),
+            "{text}: {warnings:?}"
+        );
+    }
+}
+
+#[test]
+fn suspension_releases_protected_player_access() {
+    for delay in ["world_delay(1)", ".npc_delay(1)"] {
+        let text = format!(
+            "[debugproc,delay]\nif (p_finduid(1) = true & .npc_finduid(2) = true) {{ {delay}; p_stopaction; }}\n"
+        );
+        let warnings = pointer_warnings(&text);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("p_active_player")),
+            "{text}: {warnings:?}"
+        );
+    }
+}
+
+#[test]
+fn label_jumps_propagate_entity_requirements() {
+    let text =
+        "[debugproc,caller]\n@wrapper;\n[label,wrapper]\n@read;\n[label,read]\nmes(npc_name);\n";
+    let warnings = pointer_warnings(text);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("active_npc")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn recursive_calls_keep_transitive_entity_requirements() {
+    let first =
+        "[proc,first](boolean $again)\nif ($again = true) { ~second(false); }\nmes(npc_name);\n";
+    let second = "[proc,second](boolean $again)\nif ($again = true) { ~first(false); }\n";
+    let caller = "[debugproc,caller]\n~second(true);\n";
+    for text in [
+        format!("{first}{second}{caller}"),
+        format!("{caller}{second}{first}"),
+    ] {
+        let warnings = pointer_warnings(&text);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("active_npc")),
+            "{text}: {warnings:?}"
+        );
+    }
+    let caller = "[debugproc,caller]\nif (npc_finduid(1) = true) { ~second(true); }\n";
+    assert!(pointer_warnings(&format!("{first}{second}{caller}")).is_empty());
+    let first =
+        "[proc,first](boolean $again)\nif ($again = true) { ~second(false); }\nfinduid(2);\n";
+    let caller = "[debugproc,caller]\nif (p_finduid(1) = true) { ~second(true); p_stopaction; }\n";
+    let warnings = pointer_warnings(&format!("{first}{second}{caller}"));
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("p_active_player")),
+        "{warnings:?}"
+    );
 }
 
 #[test]
