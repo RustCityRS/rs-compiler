@@ -128,6 +128,7 @@ pub const POINTER_REQUIRED_LOC: &str = "%s required here.";
 // compile and run; the warning surfaces code that is brittle to reorder.
 pub const POINTER_STALE: &str = "Possibly stale `%s` reference — value may not reflect the caller's intent after an intervening delay or subroutine.";
 pub const POINTER_STALE_UNINIT: &str = "`%s` is not available in this trigger context; the engine gates this read on the entry trigger and will reject it at runtime.";
+pub const POINTER_IMPLICIT_CONTEXT: &str = "Implicit caller context `%s` in %s; pass the value as an explicit argument or establish the context locally.";
 pub const POINTER_READ_HERE: &str = "`%s` is read here.";
 pub const POINTER_SUPERSEDED_HERE: &str = "`%s` may be superseded on this path (e.g. by `p_delay` or a subroutine that delays); the runtime still returns the original value, but relying on it is brittle.";
 

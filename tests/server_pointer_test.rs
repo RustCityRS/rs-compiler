@@ -1,0 +1,265 @@
+use runec::diagnostics::{Diagnostic, Phase, Severity};
+use runec::project::{Compilation, Options, Project, Target};
+use runec::sources::{Scope, Visibility};
+use runec::symbol::{ReturnType, SymbolRegistry};
+use runec::types::Type;
+
+fn project(check_pointers: bool) -> Project {
+    use Type::*;
+    let mut registry = SymbolRegistry::new();
+    let commands = [
+        ("last_useslot", vec![], vec![Int]),
+        ("last_int", vec![], vec![Int]),
+        ("mes", vec![String], vec![]),
+        ("inv_getobj", vec![Inv, Int], vec![Obj]),
+        ("inv_total", vec![Inv, Obj], vec![Int]),
+        ("inv_del", vec![Inv, Obj, Int], vec![]),
+        ("inv_add", vec![Inv, Obj, Int], vec![]),
+        ("inv_setslot", vec![Inv, Int, Obj, Int], vec![]),
+        ("oc_param", vec![Obj, Param], vec![Any]),
+        ("oc_stackable", vec![Obj], vec![Boolean]),
+        ("p_countdialog", vec![], vec![]),
+        ("p_delay", vec![Int], vec![]),
+        ("db_listall", vec![DbTable], vec![]),
+        ("db_findnext", vec![], vec![DbRow]),
+    ];
+    for (opcode, (name, params, returns)) in commands.into_iter().enumerate() {
+        registry.register_command(name.into(), 1000 + opcode as i32, params, returns);
+    }
+    registry.set_command_behavior("oc_param", false, None, Some(ReturnType::ParamArgument(1)));
+    let mut visibility = Visibility::new();
+    for (name, ty, id) in [
+        ("inv", Inv, 0),
+        ("weapon", Obj, 1),
+        ("records", DbTable, 2),
+        ("poison_severity", Param, 3),
+        ("next_obj_stage", Param, 4),
+        ("tbwt_weapon_poison_clear", Param, 5),
+    ] {
+        registry.register_entity_id(name.into(), ty, id);
+        visibility.declare(ty.name(), name, Scope::Global);
+    }
+    registry.register_param_type(3, Int);
+    registry.register_param_type(4, Obj);
+    registry.register_param_type(5, String);
+    registry.register_constant("dm_default".into(), Int, Some(0), None);
+    visibility.declare("constant", "dm_default", Scope::Global);
+    registry.set_visibility(visibility);
+    Project::new(
+        Target::Rune,
+        registry,
+        Options {
+            check_pointers,
+            ..Options::default()
+        },
+    )
+}
+
+fn compile(text: &str, check_pointers: bool) -> Compilation {
+    let mut project = project(check_pointers);
+    project.open("pointer.rs2", Scope::Rune, 1, text);
+    let compilation = project.compile();
+    assert!(
+        !compilation.analysis.diagnostics.has_errors(),
+        "{:?}",
+        compilation.analysis.diagnostics
+    );
+    assert!(!compilation.artifacts.is_empty());
+    compilation
+}
+
+fn implicit(compilation: &Compilation) -> Vec<&Diagnostic> {
+    compilation
+        .analysis
+        .diagnostics
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.phase == Phase::PointerCheck
+                && diagnostic.severity == Severity::Warning
+                && diagnostic.message.starts_with("Implicit caller context")
+        })
+        .collect()
+}
+
+#[test]
+fn weapon_cleaning_reports_both_implicit_slot_reads_without_changing_bytecode() {
+    let text = r#"[label,clean_weapon_poison](int $weapon_slot)
+def_obj $weapon = inv_getobj(inv, $weapon_slot);
+def_int $count = inv_total(inv, $weapon);
+
+def_string $clean_str;
+if(oc_param($weapon, poison_severity) > 0) {
+    if(oc_param($weapon, next_obj_stage) ! null) {
+        $clean_str = oc_param($weapon, tbwt_weapon_poison_clear);
+        if (oc_stackable($weapon) = true) {
+            mes("<$clean_str>.");
+            if(inv_total(inv, $weapon) > 0) {
+                inv_del(inv, $weapon, $count);
+                inv_add(inv, oc_param($weapon, next_obj_stage), $count);
+            } else {
+                inv_setslot(inv, last_useslot, oc_param($weapon, next_obj_stage), $count);
+            }
+        } else {
+            mes("<$clean_str>.");
+            inv_setslot(inv, last_useslot, oc_param($weapon, next_obj_stage), 1);
+        }
+        return;
+    }
+
+}
+~displaymessage(^dm_default);
+
+[proc,displaymessage](int $message)
+mes("Nothing happens.");
+"#;
+    let checked = compile(text, true);
+    let warnings = implicit(&checked);
+    let expected = text
+        .lines()
+        .enumerate()
+        .filter_map(|(line, text)| text.contains("last_useslot").then_some(line + 1))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        warnings
+            .iter()
+            .map(|warning| warning.line)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| warning.message.contains("last_useslot")
+                && warning.message.contains("explicit argument"))
+    );
+    assert!(
+        !checked
+            .analysis
+            .diagnostics
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.phase == Phase::PointerCheck
+                && diagnostic.message.contains("stale"))
+    );
+    let unchecked = compile(text, false);
+    assert!(implicit(&unchecked).is_empty());
+    let artifacts = |compilation: Compilation| {
+        compilation
+            .artifacts
+            .into_iter()
+            .map(|artifact| (artifact.id, artifact.name, artifact.bytes))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(artifacts(checked), artifacts(unchecked));
+}
+
+#[test]
+fn reusable_scripts_report_direct_event_and_iterator_reads_only() {
+    for trigger in ["proc", "label"] {
+        let text = format!(
+            "[{trigger},read]\ndef_int $slot = last_useslot;\ndef_dbrow $row = db_findnext;\n"
+        );
+        let compilation = compile(&text, true);
+        let warnings = implicit(&compilation);
+        assert_eq!(warnings.len(), 2, "{trigger}: {warnings:?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.message.contains("last_useslot"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.message.contains("find_db"))
+        );
+    }
+    let entry = compile("[opheldu,weapon]\ndef_int $slot = last_useslot;\n", true);
+    assert!(implicit(&entry).is_empty());
+    assert!(
+        !entry
+            .analysis
+            .diagnostics
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.phase == Phase::PointerCheck)
+    );
+    let transitive = compile(
+        "[proc,read]\ndef_int $slot = last_useslot;\n[proc,wrapper]\n~read;\n",
+        true,
+    );
+    let warnings = implicit(&transitive);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].line, 2);
+    let explicit = compile(
+        "[label,read](int $slot)\ninv_setslot(inv, $slot, weapon, 1);\n",
+        true,
+    );
+    assert!(implicit(&explicit).is_empty());
+}
+
+#[test]
+fn local_setters_suppress_implicit_context_only_on_paths_they_cover() {
+    let local = compile(
+        "[proc,read](boolean $flag)\np_countdialog;\ndef_int $count = last_int;\nif ($flag = true) {\n    db_listall(records);\n    def_dbrow $row = db_findnext;\n}\n",
+        true,
+    );
+    assert!(implicit(&local).is_empty());
+    let partial = compile(
+        "[proc,read](boolean $flag)\nif ($flag = true) { db_listall(records); }\ndef_dbrow $row = db_findnext;\n",
+        true,
+    );
+    let warnings = implicit(&partial);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].message.contains("find_db"));
+    let inherited = compile(
+        "[proc,read]\np_countdialog;\ndef_int $count = last_int;\ndef_int $slot = last_useslot;\n",
+        true,
+    );
+    assert!(
+        implicit(&inherited)
+            .iter()
+            .all(|warning| !warning.message.contains("last_int"))
+    );
+    let callee_setter = compile(
+        "[proc,select]\ndb_listall(records);\n[proc,read]\n~select;\ndef_dbrow $row = db_findnext;\n",
+        true,
+    );
+    assert!(implicit(&callee_setter).is_empty());
+}
+
+#[test]
+fn missing_caller_context_and_delay_keep_the_existing_pointer_warnings() {
+    let missing = compile(
+        "[opheld1,weapon]\n@read;\n[label,read]\ndef_int $slot = last_useslot;\n",
+        true,
+    );
+    assert!(
+        missing
+            .analysis
+            .diagnostics
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.phase == Phase::PointerCheck
+                && diagnostic.severity == Severity::Warning
+                && diagnostic.line == 2
+                && diagnostic.message.contains("not available")
+                && diagnostic.message.contains("last_useslot"))
+    );
+    let delayed = compile(
+        "[opheldu,weapon]\np_delay(1);\ndef_int $slot = last_useslot;\n",
+        true,
+    );
+    assert!(
+        delayed
+            .analysis
+            .diagnostics
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.phase == Phase::PointerCheck
+                && diagnostic.severity == Severity::Warning
+                && diagnostic.line == 3
+                && diagnostic.message.contains("stale")
+                && diagnostic.message.contains("last_useslot"))
+    );
+}

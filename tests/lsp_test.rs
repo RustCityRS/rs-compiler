@@ -233,6 +233,64 @@ fn pull_diagnostics_refresh_edited_and_dependent_files_without_a_push_cache() {
 }
 
 #[test]
+fn pull_diagnostics_include_each_implicit_event_context_read_as_a_warning() {
+    let uri = "file:///game/weapon.rs2";
+    let text = "[label,clean_weapon_poison](boolean $stackable)\nif ($stackable = true) {\n    mes(\"Cleaned.\");\n    def_int $first_slot = last_useslot;\n} else {\n    mes(\"Cleaned.\");\n    def_int $second_slot = last_useslot;\n}\n";
+    let mut project = runec::lsp::project_from_json(&json!({
+        "commands":[
+            {"name":"last_useslot","opcode":1000,"returns":["int"]},
+            {"name":"mes","opcode":1001,"params":["string"]}
+        ]
+    }))
+    .unwrap();
+    project.open(uri, runec::sources::Scope::Rune, 1, text);
+    let checked = project.check();
+    assert!(
+        !checked.diagnostics.has_errors(),
+        "{:?}",
+        checked.diagnostics
+    );
+    let messages = exchange_with_project(
+        vec![
+            json!({"id":1,"method":"initialize","params":{
+                "capabilities":{
+                    "textDocument":{"diagnostic":{}},
+                    "workspace":{"diagnostics":{"refreshSupport":true}}
+                },
+                "initializationOptions":{"performance":{"analysisPaused":true}}
+            }}),
+            json!({"method":"initialized"}),
+            json!({"id":2,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":uri}}}),
+            json!({"id":3,"method":"shutdown"}),
+            json!({"method":"exit"}),
+        ],
+        Some(project),
+    );
+    let response = messages.iter().find(|message| message["id"] == 2).unwrap();
+    let warnings = response["result"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("Implicit caller context"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 2, "{response}");
+    for (warning, line) in warnings.iter().zip([3, 6]) {
+        assert_eq!(warning["severity"], 2);
+        assert_eq!(warning["range"]["start"]["line"], line);
+        assert!(
+            warning["message"]
+                .as_str()
+                .unwrap()
+                .contains("last_useslot")
+        );
+    }
+}
+
+#[test]
 fn clients_without_diagnostic_refresh_use_push_updates() {
     for capabilities in [json!({}), json!({"textDocument":{"diagnostic":{}}})] {
         let result = exchange(vec![
@@ -309,6 +367,95 @@ fn exchange_with_loader(
         messages.push(serde_json::from_slice(&bytes).unwrap());
     }
     messages
+}
+
+#[test]
+fn typed_switch_navigation_and_command_highlighting_share_the_correct_symbols() {
+    let text = "[opheldu,_weapon_stab]
+switch_obj(last_useitem) {
+    case weapon_poison : @make_weapon_poisoned(last_slot, last_useslot);
+    case tbwt_cleaning_cloth : @clean_weapon_poison(last_slot);
+    case default : ~displaymessage(^dm_default);
+}
+";
+    let result = exchange(vec![
+        json!({"id":1,"method":"initialize","params":{"initializationOptions":{
+            "commands":[
+                {"name":"last_useitem","opcode":1,"returns":["obj"]},
+                {"name":"last_slot","opcode":2,"returns":["int"]},
+                {"name":"last_useslot","opcode":3,"returns":["int"]}
+            ],
+            "entities":[
+                {"name":"weapon_poison","type":"struct","id":1,"scope":"global"},
+                {"name":"weapon_poison","type":"obj","id":2,"scope":"global"}
+            ],
+            "sources":[
+                {"uri":"file:///game/all.struct","config":"struct","text":"[weapon_poison]\n"},
+                {"uri":"file:///game/all.obj","config":"obj","text":"[weapon_poison]\n"},
+                {"uri":"file:///game/command.pack","config":"pack:command","text":"1=last_useitem\n2=last_slot\n3=last_useslot\n"},
+                {"uri":"file:///game/engine.rs2","languageId":"rs2","text":"[command,last_useitem]()(obj)\n[command,last_slot]()(int)\n[command,last_useslot]()(int)\n"},
+                {"uri":"file:///game/helpers.rs2","languageId":"rs2","text":"[label,make_weapon_poisoned](int $weapon_slot, int $poison_slot)\n[label,clean_weapon_poison](int $slot)\n[proc,displaymessage](int $message)\n"}
+            ]
+        }}}),
+        json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///game/weapon.rs2","languageId":"rs2","version":1,"text":text}}}),
+        json!({"id":2,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///game/weapon.rs2"},"position":{"line":2,"character":10}}}),
+        json!({"id":3,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":"file:///game/weapon.rs2"}}}),
+        json!({"id":4,"method":"shutdown"}),
+        json!({"method":"exit"}),
+    ]);
+    let response = |id| &result.iter().find(|message| message["id"] == id).unwrap()["result"];
+    assert_eq!(
+        response(2),
+        &json!({
+            "uri":"file:///game/all.obj",
+            "range":{"start":{"line":0,"character":1},"end":{"line":0,"character":14}}
+        })
+    );
+    let legend = &response(1)["capabilities"]["semanticTokensProvider"]["legend"];
+    let function = legend["tokenTypes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|kind| kind == "function")
+        .unwrap() as u64;
+    let default_library = 1
+        << legend["tokenModifiers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|modifier| modifier == "defaultLibrary")
+            .unwrap();
+    let mut line = 0;
+    let mut character = 0;
+    let tokens = response(3)["data"]
+        .as_array()
+        .unwrap()
+        .as_chunks::<5>()
+        .0
+        .iter()
+        .map(|row| {
+            let [delta_line, delta_character, length, kind, modifiers] =
+                row.each_ref().map(|value| value.as_u64().unwrap());
+            if delta_line != 0 {
+                character = 0;
+            }
+            line += delta_line;
+            character += delta_character;
+            [line, character, length, kind, modifiers]
+        })
+        .collect::<Vec<_>>();
+    for (line, text) in text.lines().enumerate() {
+        for name in ["last_useitem", "last_slot", "last_useslot"] {
+            for (character, _) in text.match_indices(name) {
+                let token = tokens
+                    .iter()
+                    .find(|token| token[..3] == [line as u64, character as u64, name.len() as u64])
+                    .unwrap();
+                assert_eq!(token[3], function, "{name} on line {line}");
+                assert_ne!(token[4] & default_library, 0, "{name} on line {line}");
+            }
+        }
+    }
 }
 
 #[test]

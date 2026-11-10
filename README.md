@@ -133,6 +133,11 @@ This reports compiler errors, pointer warnings, unused locals and unreachable
 code without writing bytecode output. Client diagnostics are available during
 `compile-client` and through the ClientScript language server.
 
+Server procs and labels also warn when a direct command reads inherited `last_*`
+or `find_*` context. Pass event values as arguments, or initialize iterator state
+locally before using it. A local setter or successful guard covers only paths
+where it establishes that context. These warnings do not change emitted bytecode.
+
 Use `--help` for all available options:
 
 ```bash

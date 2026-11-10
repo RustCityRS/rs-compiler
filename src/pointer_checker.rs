@@ -506,6 +506,10 @@ impl<'a> PointerChecker<'a> {
         // Ensure analysis exists
         self.ensure_analysis(script_name);
 
+        if !self.shared.client && matches!(trigger.as_str(), "proc" | "label") {
+            self.warn_implicit_context(script_idx, diagnostics);
+        }
+
         for &ptr in &PointerType::ALL {
             let ptr_idx = ptr.index();
 
@@ -714,6 +718,66 @@ impl<'a> PointerChecker<'a> {
                         diag.help.push(h);
                     }
                     diagnostics.add(diag);
+                }
+            }
+        }
+    }
+
+    fn warn_implicit_context(&self, script_idx: usize, diagnostics: &mut DiagnosticsCollector) {
+        let script = self.scripts.get(script_idx);
+        let Some(analysis) = self.script_analyses.get(&script.name) else {
+            return;
+        };
+        for ptr in PointerType::ALL
+            .into_iter()
+            .filter(|ptr| is_static_only_pointer(*ptr))
+        {
+            let pi = ptr.index();
+            if !analysis.required[pi].iter().any(|&node| {
+                analysis.nodes[node]
+                    .instruction_index
+                    .is_some_and(|instruction| {
+                        script.instructions[instruction].opcode == Opcode::Command
+                    })
+            }) {
+                continue;
+            }
+            let blocked = analysis.set_list[pi]
+                .iter()
+                .chain(&analysis.corrupted_list[pi])
+                .copied()
+                .collect::<HashSet<_>>();
+            let mut inherited = vec![false; analysis.nodes.len()];
+            let mut pending = vec![0];
+            while let Some(node) = pending.pop() {
+                if inherited[node] {
+                    continue;
+                }
+                inherited[node] = true;
+                if !blocked.contains(&node) {
+                    pending.extend(&analysis.nodes[node].next);
+                }
+            }
+            let mut reported = HashSet::new();
+            for &node in &analysis.required[pi] {
+                let Some(instruction) = analysis.nodes[node].instruction_index else {
+                    continue;
+                };
+                if !inherited[node] || script.instructions[instruction].opcode != Opcode::Command {
+                    continue;
+                }
+                let line = resolve_line(&script.instructions, instruction);
+                if reported.insert(line) {
+                    diagnostics.warning(
+                        PathBuf::from(&script.source_path),
+                        line,
+                        0,
+                        msg::fmt(
+                            msg::POINTER_IMPLICIT_CONTEXT,
+                            &[ptr.representation(), &script.name],
+                        ),
+                        Phase::PointerCheck,
+                    );
                 }
             }
         }

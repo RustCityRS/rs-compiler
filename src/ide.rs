@@ -4,6 +4,7 @@ mod actions;
 mod annotations;
 mod colors;
 mod config;
+mod context;
 mod fields;
 pub(crate) mod highlighting;
 mod hints;

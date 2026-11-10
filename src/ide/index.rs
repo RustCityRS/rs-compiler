@@ -1,5 +1,5 @@
 use super::{
-    Configs, Index, Location, Reference, Symbol, SymbolKind, annotations, config, fields,
+    Configs, Index, Location, Reference, Symbol, SymbolKind, annotations, config, context, fields,
     highlighting, hooks,
 };
 use crate::lexer::Lexer;
@@ -740,7 +740,7 @@ impl Index {
             .map(|(i, symbol)| (symbol.key.as_str(), i))
             .collect::<HashMap<_, _>>();
         let mut references = Vec::new();
-        let mut definitions = HashSet::new();
+        let mut definitions = HashMap::new();
         let mut locals: HashMap<SourceId, HashMap<&str, Vec<usize>>> = HashMap::new();
         for (i, symbol) in symbols.iter().enumerate() {
             if let Some((source, _)) = symbol.container {
@@ -752,7 +752,10 @@ impl Index {
                     .push(i);
             }
             if let Some(location) = &symbol.definition {
-                definitions.insert((location.source, location.range.start, location.range.end));
+                definitions.insert(
+                    (location.source, location.range.start, location.range.end),
+                    i,
+                );
                 references.push(Reference {
                     location: location.clone(),
                     symbol: i,
@@ -794,6 +797,61 @@ impl Index {
                     )
                 })
                 .collect::<Vec<_>>();
+            let local = |name: &str, offset| {
+                locals
+                    .get(&document.id)
+                    .and_then(|locals| locals.get(name))
+                    .and_then(|ids| {
+                        ids.iter()
+                            .copied()
+                            .filter(|&id| visible(&symbols[id], document, offset))
+                            .max_by_key(|&id| {
+                                (
+                                    symbols[id].container,
+                                    symbols[id]
+                                        .definition
+                                        .as_ref()
+                                        .map(|location| location.range.start),
+                                )
+                            })
+                    })
+            };
+            let bindings = significant
+                .iter()
+                .enumerate()
+                .map(|(i, (token, range))| {
+                    if !matches!(token.kind, Kind::Identifier | Kind::Trigger | Kind::Command) {
+                        return None;
+                    }
+                    let declaration = definitions
+                        .get(&(document.id, range.start, range.end))
+                        .copied();
+                    let id = declaration.or_else(|| {
+                        let previous = i.checked_sub(1).map(|j| significant[j].0.kind);
+                        match previous {
+                            Some(Kind::LocalVar) => local(&token.value, range.start),
+                            Some(Kind::GameVar) => lookup(&format!("gamevar:{}", token.value)),
+                            Some(Kind::ConstantVar) => lookup(&format!("constant:{}", token.value)),
+                            Some(Kind::ScriptCall | Kind::JumpCall) => {
+                                let trigger = if previous == Some(Kind::ScriptCall) {
+                                    "proc"
+                                } else {
+                                    "label"
+                                };
+                                lookup(&key(Scope::Global, trigger, &token.value))
+                                    .or_else(|| lookup(&key(document.scope, trigger, &token.value)))
+                            }
+                            _ => lookup(&format!("command:{}", token.value)),
+                        }
+                    })?;
+                    Some(if id & CONFIG != 0 {
+                        &configs.symbols[id ^ CONFIG]
+                    } else {
+                        &symbols[id]
+                    })
+                })
+                .collect::<Vec<_>>();
+            let contextual = context::expected_types(&significant, &bindings);
             let mut calls: Vec<(Option<usize>, usize)> = Vec::new();
             let mut previous_symbol = None;
             for (i, (token, range)) in significant.iter().enumerate() {
@@ -828,7 +886,7 @@ impl Index {
                 if !matches!(token.kind, Kind::Identifier | Kind::Trigger | Kind::Command) {
                     continue;
                 }
-                if definitions.contains(&(document.id, range.start, range.end)) {
+                if definitions.contains_key(&(document.id, range.start, range.end)) {
                     continue;
                 }
                 let previous = i.checked_sub(1).map(|j| significant[j].0.kind);
@@ -851,9 +909,12 @@ impl Index {
                 } else if transmit_kind.is_some() {
                     None
                 } else {
-                    calls.last().and_then(|(symbol, argument)| {
-                        symbol
-                            .and_then(|symbol| parameters(symbol).get(*argument).map(|(_, ty)| *ty))
+                    contextual[i].or_else(|| {
+                        calls.last().and_then(|(symbol, argument)| {
+                            symbol.and_then(|symbol| {
+                                parameters(symbol).get(*argument).map(|(_, ty)| *ty)
+                            })
+                        })
                     })
                 };
                 // A config a script names first comes later, so a miss may still find one.
@@ -866,23 +927,7 @@ impl Index {
                     found
                 };
                 let mut resolved = match previous {
-                    Some(Kind::LocalVar) => locals
-                        .get(&document.id)
-                        .and_then(|locals| locals.get(token.value.as_ref()))
-                        .and_then(|ids| {
-                            ids.iter()
-                                .copied()
-                                .filter(|&id| visible(&symbols[id], document, range.start))
-                                .max_by_key(|&id| {
-                                    (
-                                        symbols[id].container,
-                                        symbols[id]
-                                            .definition
-                                            .as_ref()
-                                            .map(|location| location.range.start),
-                                    )
-                                })
-                        }),
+                    Some(Kind::LocalVar) => local(&token.value, range.start),
                     Some(Kind::ScriptCall) => script("proc"),
                     Some(Kind::JumpCall) => script("label"),
                     Some(Kind::ConstantVar) => find(format!("constant:{}", token.value)),
@@ -910,9 +955,17 @@ impl Index {
                                     .and_then(|ty| find(config::entity_key(ty, &token.value)))
                             }
                         }
-                        _ => find(format!("command:{}", token.value)).or_else(|| {
-                            expected.and_then(|ty| find(config::entity_key(ty, &token.value)))
-                        }),
+                        _ => {
+                            let call = significant
+                                .get(i + 1)
+                                .is_some_and(|(token, _)| token.kind == Kind::LParen);
+                            let entity = if call {
+                                None
+                            } else {
+                                expected.and_then(|ty| find(config::entity_key(ty, &token.value)))
+                            };
+                            entity.or_else(|| find(format!("command:{}", token.value)))
+                        }
                     },
                 };
                 if resolved.is_none() && token.value.contains(',') {
@@ -937,20 +990,26 @@ impl Index {
                     )
                     && let Some(entry) = registry.entity_ids.get(token.value.as_ref())
                 {
-                    let ty = expected
-                        .filter(|expected| {
-                            entry.variants.iter().any(|(ty, _)| {
-                                ty == expected || (*ty == Type::Obj && *expected == Type::NamedObj)
+                    let ty = match expected {
+                        Some(expected)
+                            if !matches!(expected, Type::Any | Type::Int | Type::Error) =>
+                        {
+                            entry.variants.iter().find_map(|(ty, _)| {
+                                (*ty == expected
+                                    || (*ty == Type::Obj && expected == Type::NamedObj))
+                                    .then_some(*ty)
                             })
-                        })
-                        .or_else(|| entry.variants.first().map(|(ty, _)| *ty));
-                    let key = ty.map_or_else(
-                        || format!("config:{}", token.value),
-                        |ty| config::entity_key(ty, &token.value),
-                    );
+                        }
+                        _ => entry.primary.map(|entity| entity.const_type),
+                    };
+                    let Some(ty) = ty else {
+                        previous_symbol = None;
+                        continue;
+                    };
+                    let key = config::entity_key(ty, &token.value);
                     resolved = lookup(&key);
                     if resolved.is_none() {
-                        entity = Some((token.value.to_string(), key, ty));
+                        entity = Some((token.value.to_string(), key, Some(ty)));
                     }
                 }
                 previous_symbol = resolved.or(entity.as_ref().map(|_| ENTITY));
