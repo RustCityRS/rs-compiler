@@ -357,4 +357,4 @@ environment through `initializationOptions`. See
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE.md).
