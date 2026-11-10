@@ -1033,13 +1033,14 @@ impl Server {
             })
             .ok_or("Select a script header hint.")?;
         let script = format!("[{},{}]", declaration.trigger, declaration.name);
-        let effects = self
-            .project
-            .effects_ready()
-            .then(|| self.project.script_effects(source))
-            .unwrap_or_default()
-            .into_iter()
-            .find(|hint| hint.range.start == start);
+        let effects = if self.project.effects_ready() {
+            self.project
+                .script_effects(source)
+                .into_iter()
+                .find(|hint| hint.range.start == start)
+        } else {
+            None
+        };
         let required = self
             .project
             .script_pointers(source)

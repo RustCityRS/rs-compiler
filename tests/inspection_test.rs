@@ -1,6 +1,7 @@
 use runec::inspection::{call_range, inspect_call, inspect_code};
 use runec::symbol::SymbolRegistry;
 use runec::types::Type;
+use std::ops::Range;
 use std::path::Path;
 
 fn registry(params: Vec<Type>) -> SymbolRegistry {
@@ -77,8 +78,9 @@ fn broad_inspection_rejects_cross_script_and_invalid_ranges_clearly() {
             .unwrap_err()
             .contains("crosses script declarations")
     );
+    let reversed = Range { start: 9, end: 4 };
     assert!(
-        inspect_code(source, path, 9..4, &registry, false)
+        inspect_code(source, path, reversed, &registry, false)
             .unwrap_err()
             .contains("Invalid source selection")
     );

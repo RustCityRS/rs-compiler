@@ -898,12 +898,12 @@ pub(super) fn field(kind: &str, key: &str) -> Option<&'static [Value]> {
     if matches!(kind, "fm" | "fms") && key.starts_with("tile") {
         return Some(TILE);
     }
-    if key.starts_with("recol") {
+    if let Some(suffix) = key.strip_prefix("recol") {
         if matches!(kind, "idk" | "loc" | "npc" | "obj" | "spotanim") {
-            let (suffix, values) = if let Some(suffix) = key.strip_prefix("recolhsl") {
+            let (suffix, values) = if let Some(suffix) = suffix.strip_prefix("hsl") {
                 (suffix, HSL)
             } else {
-                (&key[5..], RGB15)
+                (suffix, RGB15)
             };
             if let Some(index) = suffix
                 .strip_suffix('s')

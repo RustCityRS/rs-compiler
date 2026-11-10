@@ -225,8 +225,8 @@ fn inspect_script(
             .copied()
             .unwrap_or_else(|| instruction_effect(instruction, registry));
         if let (Some(total), Some(effect)) = (&mut net, effect) {
-            for i in 0..3 {
-                total[i] += effect.pushes[i] as i64 - effect.pops[i] as i64;
+            for (i, total) in total.iter_mut().enumerate() {
+                *total += effect.pushes[i] as i64 - effect.pops[i] as i64;
             }
         } else {
             net = None;
@@ -610,10 +610,10 @@ fn visit_statements<'a>(statements: &'a [Statement], visit: &mut impl FnMut(&'a 
             } => {
                 visit_expr(expr, visit);
                 for i in 0..=cases.len() {
-                    if i == *default_index {
-                        if let Some(body) = default {
-                            visit_statements(body, visit);
-                        }
+                    if i == *default_index
+                        && let Some(body) = default
+                    {
+                        visit_statements(body, visit);
                     }
                     if let Some(case) = cases.get(i) {
                         for value in &case.values {
@@ -812,20 +812,20 @@ fn display_instruction(
             (encoded as i32).to_string(),
         );
     }
-    if instruction.opcode == Opcode::Command {
-        if let Some((name, _)) = command_symbol(instruction, registry) {
-            let Operand::Int(encoded) = instruction.operand else {
-                unreachable!()
-            };
-            return (
-                name.to_owned(),
-                format!(
-                    "opcode {}, operand {}",
-                    encoded & 0xffff,
-                    (encoded >> 16) & 255
-                ),
-            );
-        }
+    if instruction.opcode == Opcode::Command
+        && let Some((name, _)) = command_symbol(instruction, registry)
+    {
+        let Operand::Int(encoded) = instruction.operand else {
+            unreachable!()
+        };
+        return (
+            name.to_owned(),
+            format!(
+                "opcode {}, operand {}",
+                encoded & 0xffff,
+                (encoded >> 16) & 255
+            ),
+        );
     }
     let operand = match &instruction.operand {
         Operand::None => String::new(),

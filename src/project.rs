@@ -121,6 +121,8 @@ pub struct Compilation {
     pub artifacts: Vec<Artifact>,
 }
 
+type PointerRequirements = HashMap<SourceId, HashMap<String, PointerSet>>;
+
 /// Retains parsed documents between edits and reuses the supplied config and
 /// command registry. Source names are opaque: URI, database key, or filename.
 pub struct Project {
@@ -138,7 +140,7 @@ pub struct Project {
     analyzed_generation: Option<u64>,
     cached_diagnostics: DiagnosticsCollector,
     checked_full: Option<(u64, DiagnosticsCollector)>,
-    pub(crate) pointer_requirements: Option<(u64, HashMap<SourceId, HashMap<String, PointerSet>>)>,
+    pub(crate) pointer_requirements: Option<(u64, PointerRequirements)>,
     pub(crate) effects: Mutex<Option<Arc<crate::effects::Effects>>>,
     deep: Option<(HashMap<PathBuf, i64>, Vec<Diagnostic>)>,
     pub(crate) index: OnceLock<Index>,

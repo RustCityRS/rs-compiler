@@ -442,11 +442,10 @@ impl Effects {
             }
         }
         let mut callers = vec![Vec::new(); nodes.len()];
-        for index in 0..nodes.len() {
+        for (index, node) in nodes.iter_mut().enumerate() {
             if project.analysis_cancelled() {
                 return None;
             }
-            let node = &nodes[index];
             let mut incomplete =
                 definitions[&(node.scope, node.trigger.clone(), node.name.clone())].len() != 1;
             let mut callees = HashSet::new();
@@ -477,7 +476,7 @@ impl Effects {
                 incomplete |= found.len() != 1;
                 callees.extend(found);
             }
-            nodes[index].summary.incomplete |= incomplete;
+            node.summary.incomplete |= incomplete;
             for callee in callees {
                 callers[callee].push(index);
             }

@@ -56,46 +56,6 @@ pub(crate) fn background<R: Send + 'static>(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scoped_worker_limits_bound_nested_work_and_restore_cli_defaults() {
-        let before = workers();
-        assert_eq!(WORKER_LIMIT.get(), None);
-        with_worker_limit(2, || {
-            assert!(workers() <= 2);
-            with_worker_limit(1, || assert_eq!(workers(), 1));
-            assert_eq!(WORKER_LIMIT.get(), Some(2));
-            let items = [1, 2, 3, 4];
-            let nested = parallel_map_balanced(&items, |value| {
-                let threads = parallel_map(&items, |_| workers());
-                (*value, threads)
-            });
-            for (index, (value, threads)) in nested.iter().enumerate() {
-                assert_eq!(*value, items[index]);
-                assert!(threads.iter().all(|threads| *threads == 1));
-            }
-            assert!(
-                parallel_chunks(&items, |_| workers())
-                    .iter()
-                    .all(|n| *n == 1)
-            );
-            assert_eq!(background(|| WORKER_LIMIT.get()).join().unwrap(), Some(2));
-            with_worker_limit(1, || {
-                let caller = std::thread::current().id();
-                assert_eq!(
-                    background(|| std::thread::current().id()).join().unwrap(),
-                    caller
-                );
-            });
-        });
-        assert_eq!(WORKER_LIMIT.get(), None);
-        assert_eq!(workers(), before);
-    }
-}
-
 /// Map `f` over `items` across worker threads, returning results in the SAME
 /// order as the input. Dependency-free (uses `std::thread::scope`); each item
 /// is processed independently, so callers must keep the work pure (no shared
@@ -217,4 +177,44 @@ where
         }
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_worker_limits_bound_nested_work_and_restore_cli_defaults() {
+        let before = workers();
+        assert_eq!(WORKER_LIMIT.get(), None);
+        with_worker_limit(2, || {
+            assert!(workers() <= 2);
+            with_worker_limit(1, || assert_eq!(workers(), 1));
+            assert_eq!(WORKER_LIMIT.get(), Some(2));
+            let items = [1, 2, 3, 4];
+            let nested = parallel_map_balanced(&items, |value| {
+                let threads = parallel_map(&items, |_| workers());
+                (*value, threads)
+            });
+            for (index, (value, threads)) in nested.iter().enumerate() {
+                assert_eq!(*value, items[index]);
+                assert!(threads.iter().all(|threads| *threads == 1));
+            }
+            assert!(
+                parallel_chunks(&items, |_| workers())
+                    .iter()
+                    .all(|n| *n == 1)
+            );
+            assert_eq!(background(|| WORKER_LIMIT.get()).join().unwrap(), Some(2));
+            with_worker_limit(1, || {
+                let caller = std::thread::current().id();
+                assert_eq!(
+                    background(|| std::thread::current().id()).join().unwrap(),
+                    caller
+                );
+            });
+        });
+        assert_eq!(WORKER_LIMIT.get(), None);
+        assert_eq!(workers(), before);
+    }
 }
