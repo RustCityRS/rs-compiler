@@ -121,11 +121,11 @@ fn transmit_lists_keep_outer_and_callback_hints_separate() {
             {"trigger":"clientscript","name":"callback","id":1466}
         ],
         "sources":[{"uri":"mem:callbacks","languageId":"cs2","text":
-            "[proc,clientscript_1465]\n[clientscript,callback](int $count)\n"}]
+            "[proc,clientscript_1465]\n[clientscript,callback](int $count, int $limit)\n"}]
     })).unwrap();
     for empty in ["()", ""] {
         let text = format!(
-            "[proc,caller]\nif_setonvarctransmit(\"clientscript_1465{empty}{{varc_192, varc_1038, varc_1324}}\", 762:95);\nif_setonvarctransmit(\"callback(7){{varc_192, varc_1038}}\", 762:95);\n"
+            "[proc,caller]\nif_setonvarctransmit(\"clientscript_1465{empty}{{varc_192, varc_1038, varc_1324}}\", 762:95);\nif_setonvarctransmit(\"callback(7, 8){{varc_192, varc_1038}}\", 762:95);\n"
         );
         let doc = project.open(
             format!("mem:caller:{empty}"),
@@ -133,22 +133,18 @@ fn transmit_lists_keep_outer_and_callback_hints_separate() {
             1,
             text.clone(),
         );
-        let hints = project.inlay_hints(doc, 0..text.len());
-        let components = hints
-            .iter()
-            .filter(|hint| hint.label == "component:")
-            .map(|hint| hint.offset)
+        let hints = project
+            .inlay_hints(doc, 0..text.len())
+            .into_iter()
+            .map(|hint| (hint.offset, hint.label))
             .collect::<Vec<_>>();
+        let callback = text.find("(7, 8)").unwrap();
         assert_eq!(
-            components,
-            text.match_indices("762:95")
-                .map(|(offset, _)| offset)
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            hints
-                .iter()
-                .any(|hint| hint.label == "count:" && hint.offset == text.find("(7)").unwrap() + 1)
+            hints,
+            vec![
+                (callback + 1, "count:".to_string()),
+                (callback + 4, "limit:".to_string())
+            ]
         );
         assert_eq!(
             project
@@ -775,16 +771,90 @@ fn string_interpolation_resolves_commands_locals_and_mesanim_configs() {
 }
 
 #[test]
-fn parameter_return_and_constant_hints_and_typed_completion_match_call_context() {
+fn parameter_hints_skip_names_the_type_call_or_numbering_already_give() {
+    let mut project = project_from_json(&json!({
+        "target":"rune",
+        "commands":[
+            {"name":"if_settext","opcode":1,"params":["component","string"]},
+            {"name":"cam_moveto","opcode":2,"params":["coord","int","int","int"]},
+            {"name":"append","opcode":3,"params":["string","string"],"returns":["string"]},
+            {"name":"setbit","opcode":4,"params":["int","int"],"returns":["int"]},
+            {"name":"npc_damage","opcode":5,"params":["int","int"]}
+        ],
+        "sources":[
+            {"uri":"mem:engine","languageId":"gs2","text":"[command,if_settext](component $component, string $text)\n[command,cam_moveto](coord $coord0, int $height, int $rate, int $rate2)\n[command,append](string $text1, string $text2)(string)\n[command,setbit](int $int0, int $bit)(int)\n[command,npc_damage](int $type, int $amount)\n"}
+        ]
+    }))
+    .unwrap();
+    let text = "[proc,test](component $com)\nif_settext($com, \"Hello\");\ncam_moveto(0_50_50_0_0, 350, 232, 100);\ndef_string $s = append(\"a\", \"b\");\ndef_int $v = setbit(0, 3);\n~flag(2, true);\nnpc_damage(1, 10);\n[proc,flag](int $slot, boolean $enabled)\n";
+    let doc = project.open("mem:test", Scope::Global, 1, text);
+    let hints = project
+        .inlay_hints(doc, 0..text.len())
+        .into_iter()
+        .map(|hint| (hint.offset, hint.label))
+        .collect::<Vec<_>>();
+    let damage = text.find("(1, 10)").unwrap();
+    assert_eq!(
+        hints,
+        vec![
+            (text.find("350").unwrap(), "height:".to_string()),
+            (text.find("232").unwrap(), "rate:".to_string()),
+            (text.find("100").unwrap(), "rate2:".to_string()),
+            (text.find("2, true").unwrap(), "slot:".to_string()),
+            (text.find("true").unwrap(), "enabled:".to_string()),
+            (damage + 1, "type:".to_string()),
+            (damage + 4, "amount:".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn unclosed_hook_callbacks_keep_their_hints_inside_the_string() {
+    let mut project = project_from_json(&json!({
+        "target":"client",
+        "opcodes":"0=PushConstantInt\n3=PushConstantString\n21=Return\n2407=if_setonvarctransmit\n",
+        "commands":[
+            {"name":"if_setonvarctransmit","opcode":2407,"params":["clientscript","string","component"],"kind":"hook_component"}
+        ],
+        "scriptIds":[{"trigger":"clientscript","name":"callback","id":1466}],
+        "sources":[{"uri":"mem:callbacks","languageId":"cs2","text":
+            "[clientscript,callback](int $count, int $limit)\n"}]
+    }))
+    .unwrap();
+    let text = "[proc,caller]\nif_setonvarctransmit(\"callback(\", 762:95);\nif_setonvarctransmit(\"callback(7, \", 762:96);\n";
+    let doc = project.open("mem:caller", Scope::Client, 1, text);
+    let hints = project
+        .inlay_hints(doc, 0..text.len())
+        .into_iter()
+        .map(|hint| (hint.offset, hint.label))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hints,
+        vec![(text.find("(7, ").unwrap() + 1, "count:".to_string())]
+    );
+}
+
+#[test]
+fn literal_parameter_and_constant_hints_and_typed_completion_match_call_context() {
     let mut project = project();
-    let text = "[proc,test]\ninv_add(bank, shared, ^limit);\nuid;\nmes(\"inv_add(bank, shared, 1) ^limit\");\n";
+    let text = "[proc,test](int $amount)\ninv_add(bank, shared, ^limit);\ninv_add(bank, shared, $amount);\ninv_add(bank, null, -1);\ninv_add(bank, shared, calc($amount + 1));\nmes(\"hello\");\nuid;\nmes(\"inv_add(bank, shared, 1) ^limit\");\n";
     let doc = project.open("mem:test", Scope::Global, 1, text);
     let hints = project.inlay_hints(doc, 0..text.len());
-    assert!(hints.iter().any(|hint| hint.label == "inventory:"));
-    assert!(hints.iter().any(|hint| hint.label == "item:"));
-    assert!(hints.iter().any(|hint| hint.label == "count:"));
+    let parameters = hints
+        .iter()
+        .filter(|hint| hint.parameter)
+        .map(|hint| (hint.offset, hint.label.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        parameters,
+        vec![
+            (text.find("null").unwrap(), "item:"),
+            (text.find("-1").unwrap(), "count:"),
+            (text.find("calc(").unwrap(), "count:"),
+        ]
+    );
     assert_eq!(hints.iter().filter(|hint| hint.label == ": int").count(), 1);
-    assert!(hints.iter().any(|hint| hint.label == "-> playeruid"));
+    assert!(!hints.iter().any(|hint| hint.label.starts_with("->")));
     for (text, expected) in [
         ("[proc,test]\ninv_add(", "bank"),
         ("[proc,test]\ninv_add(bank, ", "shared"),

@@ -313,7 +313,7 @@ fn exchange_with_loader(
 
 #[test]
 fn standard_lsp_hints_config_navigation_rename_and_extract_apply_edits() {
-    let text = "[proc,calculate](int $value)(int)\n$value = calc($value + 1);\nreturn($value);\n[proc,use]\n~calculate(^limit);\n";
+    let text = "[proc,calculate](int $value, int $step)(int)\n$value = calc($value + 1);\nreturn($value);\n[proc,use]\n~calculate(^limit, 1);\n";
     let result = exchange(vec![
         json!({"id":1,"method":"initialize","params":{"capabilities":{"workspace":{"applyEdit":true}},"initializationOptions":{
             "constants":[{"name":"limit","type":"int","value":99,"scope":"global"}],
@@ -329,13 +329,12 @@ fn standard_lsp_hints_config_navigation_rename_and_extract_apply_edits() {
     ]);
     let response = |id| result.iter().find(|message| message["id"] == id).unwrap();
     assert!(response(1)["result"]["capabilities"]["inlayHintProvider"] == true);
-    assert!(
-        response(2)["result"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|hint| hint["label"] == "value:")
-    );
+    let hints = response(2)["result"].as_array().unwrap();
+    assert!(hints.iter().any(|hint| hint["label"] == "step:"
+        && hint["kind"] == 2
+        && hint["position"] == json!({"line":4,"character":19})));
+    assert!(hints.iter().any(|hint| hint["label"] == ": int"));
+    assert!(!hints.iter().any(|hint| hint["label"] == "value:"));
     assert_eq!(response(3)["result"]["uri"], "file:///game/limits.constant");
     assert_eq!(
         response(4)["result"]["changes"].as_object().unwrap().len(),
@@ -593,7 +592,7 @@ fn directory_servers_ignore_other_revisions_but_accept_new_project_files() {
         ("647/interfaces/base.if3", "[main]\ntype=layer\n"),
         ("647/defaults/base.defaults", ""),
         ("225/scripts/runescript/foreign.rs2", script),
-        ("647/scripts/runescript-other/foreign.rs2", script),
+        ("647/scripts-other/foreign.rs2", script),
     ] {
         let path = fixture.0.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -614,7 +613,7 @@ fn directory_servers_ignore_other_revisions_but_accept_new_project_files() {
     };
     let active = uri("647/scripts/runescript/original.rs2");
     let foreign = uri("225/scripts/runescript/foreign.rs2");
-    let boundary = uri("647/scripts/runescript-other/foreign.rs2");
+    let boundary = uri("647/scripts-other/foreign.rs2");
     let global = uri("647/scripts/globalscript/new.gs2");
     let texture = uri("647/textures/paint.texture");
     let material = uri("647/materials/new.material");

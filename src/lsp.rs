@@ -24,6 +24,9 @@ use std::time::{Duration, Instant};
 
 #[cfg(test)]
 mod tests;
+mod workspace;
+
+pub use workspace::serve_workspace_with_loaders;
 
 type Snapshot = (Scope, Arc<str>, Option<String>);
 type ProjectLoader = Box<dyn Fn() -> Result<Project, String>>;
@@ -129,6 +132,19 @@ fn open_source(
     } else {
         project.open(uri, scope, version, text)
     }
+}
+
+/// An unfinished scope comment must not reject an incremental text update:
+/// retain its previous scope until the annotation is valid again. Filesystem
+/// loading still reports invalid declarations when the file is saved.
+fn edited_scope(path: &Path, text: &str, config: bool, previous: Scope) -> Scope {
+    Scope::from_path(path).unwrap_or_else(|| {
+        if config {
+            Scope::for_file(path, text).unwrap_or(previous)
+        } else {
+            previous
+        }
+    })
 }
 
 const TOKEN_TYPES: &[&str] = &[
@@ -544,6 +560,52 @@ pub fn serve_with_loader(
     project: Option<Project>,
     loader: Option<ProjectLoader>,
 ) -> io::Result<()> {
+    serve_host(Server::new(project, loader))
+}
+
+/// Both the standalone target and a multi-target workspace share the same
+/// bounded input queue, cancellation, debounce, and sequential background loop.
+trait Host {
+    fn idle_delay(&self) -> Duration;
+    fn set_cancellation(&mut self, token: CancellationToken);
+    fn idle(&mut self, output: &mut impl Write) -> io::Result<()>;
+    fn process(
+        &mut self,
+        message: Value,
+        token: CancellationToken,
+        output: &mut impl Write,
+    ) -> io::Result<bool>;
+    fn settle(&mut self, output: &mut impl Write) -> io::Result<()>;
+}
+
+impl Host for Server {
+    fn idle_delay(&self) -> Duration {
+        Server::idle_delay(self)
+    }
+
+    fn set_cancellation(&mut self, token: CancellationToken) {
+        self.project.set_cancellation(token);
+    }
+
+    fn idle(&mut self, output: &mut impl Write) -> io::Result<()> {
+        Server::idle(self, output)
+    }
+
+    fn process(
+        &mut self,
+        message: Value,
+        token: CancellationToken,
+        output: &mut impl Write,
+    ) -> io::Result<bool> {
+        Server::process(self, message, token, output)
+    }
+
+    fn settle(&mut self, output: &mut impl Write) -> io::Result<()> {
+        Server::settle(self, output)
+    }
+}
+
+fn serve_host(mut server: impl Host) -> io::Result<()> {
     let (send, receive) = mpsc::sync_channel(8);
     let pending: Arc<Mutex<PendingRequests>> = Arc::default();
     let requests = pending.clone();
@@ -591,7 +653,6 @@ pub fn serve_with_loader(
             }
         }
     });
-    let mut server = Server::new(project, loader);
     let mut output = io::stdout().lock();
     let mut next = None;
     loop {
@@ -602,7 +663,7 @@ pub fn serve_with_loader(
                 Err(RecvTimeoutError::Timeout) => {
                     let token = CancellationToken::default();
                     *background.lock().unwrap() = token.clone();
-                    server.project.set_cancellation(token);
+                    server.set_cancellation(token);
                     if let Ok(message) = receive.try_recv() {
                         next = Some(message);
                         continue;
@@ -982,6 +1043,50 @@ impl Server {
             .ok_or_else(|| format!("Document '{uri}' is not open"))
     }
 
+    fn buffer_scope(&self, path: &Path, text: &str, config: bool, previous: Scope) -> Scope {
+        if self.loader.is_some() {
+            edited_scope(path, text, config, previous)
+        } else {
+            // Embedded hosts supply ownership explicitly in their environment;
+            // their labels need not be filesystem paths or match language IDs.
+            previous
+        }
+    }
+
+    fn update_source(
+        &mut self,
+        source: SourceId,
+        version: i64,
+        text: String,
+    ) -> Result<(), String> {
+        let document = self.project.document(source).ok_or("Unknown source ID")?;
+        if version <= document.version {
+            return Err("Document version must increase".into());
+        }
+        let scope = self.buffer_scope(
+            &document.label,
+            &text,
+            document.config.is_some(),
+            document.scope,
+        );
+        if scope == document.scope {
+            return self
+                .project
+                .update(source, version, text)
+                .map_err(str::to_string);
+        }
+        let uri = document.label.to_string_lossy().into_owned();
+        let config = document.config.clone();
+        let open = self.open_documents.remove(&source);
+        self.project.close(source);
+        let source = open_source(&mut self.project, &uri, scope, version, text.into(), config);
+        if open {
+            self.open_documents.insert(source);
+        }
+        self.index_uris();
+        Ok(())
+    }
+
     fn range(&self, source: SourceId, range: Range<usize>) -> Value {
         let document = self.project.document(source).unwrap();
         let start = document
@@ -1234,16 +1339,20 @@ impl Server {
                             .to_string()
                     })
                 });
-                let scope = if config.is_some() {
+                let text = field(doc, "text")?;
+                let path = uri_path(uri).unwrap_or_else(|| PathBuf::from(uri));
+                let previous = if config.is_some() {
                     self.source(params)
                         .ok()
                         .and_then(|id| self.project.document(id))
                         .map_or(Scope::Global, |doc| doc.scope)
+                } else if self.loader.is_some() {
+                    Scope::from_path(&path).map_or_else(|| scope(field(doc, "languageId")?), Ok)?
                 } else {
                     scope(field(doc, "languageId")?)?
                 };
+                let scope = self.buffer_scope(&path, text, config.is_some(), previous);
                 let version = doc["version"].as_i64().ok_or("Expected document version")?;
-                let text = field(doc, "text")?;
                 if let Ok(source) = self.source(params) {
                     self.project.close(source);
                     self.open_documents.remove(&source);
@@ -1321,7 +1430,7 @@ impl Server {
                         text = replacement.into();
                     }
                 }
-                self.project.update(
+                self.update_source(
                     source,
                     params["textDocument"]["version"]
                         .as_i64()
@@ -1836,8 +1945,14 @@ impl Server {
                             if *document.text != *text {
                                 let version = document.version + 1;
                                 let label = document.label.to_string_lossy().into_owned();
-                                let snapshot = (document.scope, Arc::from(text.as_str()), None);
-                                let _ = self.project.update(source, version, text);
+                                let scope = self.buffer_scope(
+                                    &document.label,
+                                    &text,
+                                    false,
+                                    document.scope,
+                                );
+                                let snapshot = (scope, Arc::from(text.as_str()), None);
+                                let _ = self.update_source(source, version, text);
                                 self.baseline.retain(|uri, _| !same_uri(uri, &label));
                                 self.baseline.insert(label, snapshot);
                             }

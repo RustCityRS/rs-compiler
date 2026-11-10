@@ -73,7 +73,7 @@ fn nested_sources_load_engine_and_constants_from_the_source_directory() {
     let pack = root.join("registries");
     let files = [
         ("sources/engine.cs2", "[command,print](int $value)\n"),
-        ("sources/cs2.constant", "^answer = 42\n"),
+        ("sources/engine.constant", "^answer = 42\n"),
         (
             "sources/math/proc/[proc,math_answer].cs2",
             "[proc,math_answer]()(int) return(^answer);",
@@ -104,7 +104,7 @@ fn nested_sources_load_engine_and_constants_from_the_source_directory() {
     assert_eq!(sources.len(), 3);
     let original = clientscript::compile_directory(&source, &pack).unwrap();
     assert_eq!(original.keys().copied().collect::<Vec<_>>(), [7, 8, 12]);
-    fs::write(source.join("cs2.constant"), "^answer = 84\n").unwrap();
+    fs::write(source.join("engine.constant"), "^answer = 84\n").unwrap();
     let edited = clientscript::compile_directory(&source, &pack).unwrap();
     assert_ne!(original[&7], edited[&7]);
     assert_eq!(original[&8], edited[&8]);

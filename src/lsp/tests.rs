@@ -27,6 +27,122 @@ fn lens_labels(lenses: &Value) -> Value {
 }
 
 #[test]
+fn source_extensions_and_live_config_scope_override_editor_language_and_folders() {
+    let mut server = Server::new(None, Some(Box::new(|| project_from_json(&json!({})))));
+    server.handle("initialize", &json!({})).unwrap();
+    for (uri, language, expected) in [
+        (
+            "file:///game/scripts/runescript/ui.cs2",
+            "rs2",
+            Scope::Client,
+        ),
+        (
+            "file:///game/scripts/clientscript/shared.gs2",
+            "cs2",
+            Scope::Global,
+        ),
+        ("file:///game/scripts/bank/bank.rs2", "cs2", Scope::Rune),
+        ("untitled:shared", "gs2", Scope::Global),
+    ] {
+        server
+            .request(
+                "textDocument/didOpen",
+                &json!({"textDocument":{
+                    "uri":uri,"languageId":language,"version":1,"text":"[proc,entry]\nreturn;\n"
+                }}),
+            )
+            .unwrap();
+        let id = server.find(uri).unwrap();
+        assert_eq!(server.project.document(id).unwrap().scope, expected);
+    }
+    let uri = "file:///game/scripts/clientscript/settings.constant";
+    server.request("textDocument/didOpen", &json!({"textDocument":{
+        "uri":uri,"languageId":"rs2config","version":1,"text":"// @scope(server)\n^limit=1\n"
+    }})).unwrap();
+    let initial = server.find(uri).unwrap();
+    assert_eq!(server.project.document(initial).unwrap().scope, Scope::Rune);
+    for (version, text, expected) in [
+        (2, "// @scope(client)\n^limit=1\n", Scope::Client),
+        // An in-progress annotation must still accept the buffer/version.
+        (3, "// @scope(cli\n^limit=1\n", Scope::Client),
+        (4, "// @scope(shared)\n^limit=1\n", Scope::Global),
+    ] {
+        server.request("textDocument/didChange", &json!({"textDocument":{"uri":uri,"version":version},"contentChanges":[{"text":text}]})).unwrap();
+        let id = server.find(uri).unwrap();
+        let doc = server.project.document(id).unwrap();
+        assert_eq!(doc.scope, expected);
+        assert_eq!(doc.version, version);
+        assert_eq!(doc.text.as_ref(), text);
+        assert!(server.open_documents.contains(&id));
+    }
+    assert!(server.project.document(initial).is_none());
+    assert!(server.request("textDocument/didChange", &json!({"textDocument":{"uri":uri,"version":4},"contentChanges":[{"text":"// @scope(server)\n^limit=2\n"}]})).is_err());
+    assert_eq!(
+        server
+            .project
+            .document(server.find(uri).unwrap())
+            .unwrap()
+            .scope,
+        Scope::Global
+    );
+}
+
+#[test]
+fn portable_hosts_keep_explicit_config_and_script_ownership_when_buffers_change() {
+    let uri = "file:///virtual/settings.constant";
+    let project = project_from_json(&json!({"sources":[{
+        "uri":uri,"config":"constant","scope":"client","text":"^limit=1\n"
+    }]}))
+    .unwrap();
+    let mut server = Server::new(Some(project), None);
+    server.handle("initialize", &json!({})).unwrap();
+    server
+        .request(
+            "textDocument/didOpen",
+            &json!({"textDocument":{
+                "uri":uri,"languageId":"rs2config","version":1,"text":"^limit=1\n"
+            }}),
+        )
+        .unwrap();
+    assert_eq!(
+        server
+            .project
+            .document(server.find(uri).unwrap())
+            .unwrap()
+            .scope,
+        Scope::Client
+    );
+    server
+        .request(
+            "textDocument/didChange",
+            &json!({"textDocument":{"uri":uri,"version":2},"contentChanges":[{
+                "text":"// @scope(server)\n^limit=2\n"
+            }]}),
+        )
+        .unwrap();
+    let doc = server.project.document(server.find(uri).unwrap()).unwrap();
+    assert_eq!(doc.scope, Scope::Client);
+    assert_eq!(doc.version, 2);
+    let script = "file:///virtual/script.cs2";
+    server
+        .request(
+            "textDocument/didOpen",
+            &json!({"textDocument":{
+                "uri":script,"languageId":"rs2","version":1,"text":"[proc,host_owned]\nreturn;\n"
+            }}),
+        )
+        .unwrap();
+    assert_eq!(
+        server
+            .project
+            .document(server.find(script).unwrap())
+            .unwrap()
+            .scope,
+        Scope::Rune
+    );
+}
+
+#[test]
 fn script_header_clicks_show_full_effects_and_requirements_while_paused() {
     let mut variables = (b'a'..=b'f').enumerate().map(|(id, name)| {
         json!({"name":(name as char).to_string(),"type":"int","id":id,"category":"vars","scope":"rs2"})

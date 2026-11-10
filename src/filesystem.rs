@@ -26,7 +26,7 @@ use tracing::{info, warn};
 
 pub type ScriptIds = BTreeMap<String, i32>;
 
-/// Build an editor project using the legacy directory conventions. No ID file
+/// Build an editor project from every matching source in the scripts tree. No ID file
 /// is generated or modified; all further editing happens in memory.
 pub fn editor_project(
     source: &Path,
@@ -44,7 +44,7 @@ pub fn editor_project(
                 .ok_or("Client opcode definitions require --pack")?,
         )?
     } else {
-        build_symbol_registry(&dir, pack.as_deref())
+        build_symbol_registry(&dir, pack.as_deref())?
     };
     let target = if client {
         registry.preloaded_script_ids.clear();
@@ -68,20 +68,14 @@ pub fn editor_project(
         Options {
             include_tests: true,
             skip_shared_lints: client
-                && dir
-                    .parent()
-                    .is_some_and(|parent| parent.join("runescript").is_dir()),
+                && sources::script_files(&dir, "rs2")?
+                    .iter()
+                    .any(|path| path.extension().is_some_and(|ext| ext == "rs2")),
             ..Options::default()
         },
     );
     let paths = sources::script_files(&dir, if client { "cs2" } else { "rs2" })?;
-    let files = read_sources(&paths, |path| {
-        if path.extension().is_some_and(|ext| ext == "gs2") {
-            Scope::Global
-        } else {
-            scope
-        }
-    })?;
+    let files = read_sources(&paths)?;
     for id in project.open_all(files) {
         if client {
             let ids = project
@@ -103,22 +97,14 @@ pub fn editor_project(
         }
     }
     if !client {
-        let client_dir = if dir.file_name().is_some_and(|name| name == "runescript") {
-            dir.with_file_name("clientscript")
-        } else {
-            dir.join("clientscript")
-        };
-        if client_dir.is_dir() {
-            editor_roots.push(client_dir.clone());
-            let paths = sources::script_files(&client_dir, "cs2")?
-                .into_iter()
-                .filter(|path| {
-                    path.extension().is_some_and(|ext| ext == "cs2")
-                        && path.file_name().is_some_and(|name| name != "engine.cs2")
-                })
-                .collect::<Vec<_>>();
-            project.open_all(read_sources(&paths, |_| Scope::Client)?);
-        }
+        let paths = sources::script_files(&dir, "cs2")?
+            .into_iter()
+            .filter(|path| {
+                path.extension().is_some_and(|ext| ext == "cs2")
+                    && path.file_name().is_some_and(|name| name != "engine.cs2")
+            })
+            .collect::<Vec<_>>();
+        project.open_all(read_sources(&paths)?);
     }
     let mut files = sources::config_files(&dir);
     if let Some(pack) = &pack {
@@ -168,16 +154,7 @@ pub fn editor_project(
     files.sort();
     files.dedup();
     files.retain(|path| config_kind(path).is_some());
-    let configs = read_sources(&files, |path| {
-        if path
-            .components()
-            .any(|part| part.as_os_str() == "globalscript")
-        {
-            Scope::Global
-        } else {
-            scope
-        }
-    })?;
+    let configs = read_sources(&files)?;
     for ((uri, config_scope, version, text), path) in configs.into_iter().zip(&files) {
         project.open_config(uri, config_scope, version, text, config_kind(path).unwrap());
     }
@@ -192,14 +169,12 @@ pub fn editor_project(
 
 /// Read files and name them by URI, in parallel, failing on the first error in
 /// input order.
-fn read_sources(
-    paths: &[PathBuf],
-    scope: impl Fn(&Path) -> Scope + Sync,
-) -> Result<Vec<SourceText>, Box<dyn Error>> {
+fn read_sources(paths: &[PathBuf]) -> Result<Vec<SourceText>, Box<dyn Error>> {
     parallel_map_balanced(paths, |path| {
         let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
         let uri = file_uri(path).map_err(|error| error.to_string())?;
-        Ok((uri, scope(path), 0, text))
+        let scope = Scope::for_file(path, &text).map_err(|error| error.to_string())?;
+        Ok((uri, scope, 0, text))
     })
     .into_iter()
     .collect::<Result<Vec<_>, String>>()
@@ -828,7 +803,7 @@ fn run_pipeline(
     // Phase 2: assign IDs and register every parsed script.
     info!("Registering scripts and building the symbol registry...");
     let resolved_pack_dir = resolve_pack_dir(scripts_dir, pack_dir);
-    let mut registry = build_symbol_registry(scripts_dir, resolved_pack_dir.as_deref());
+    let mut registry = build_symbol_registry(scripts_dir, resolved_pack_dir.as_deref())?;
     register_scripts(&mut registry, ids, &mut diagnostics, &all_files);
     info!("  Registered {} scripts", registry.scripts.len());
     // Pre-assigned script ids were consumed during registration; free them
@@ -1050,7 +1025,7 @@ fn run_pipeline_streaming(
     // Registration (from signatures, not ASTs).
     info!("[stream] Registering scripts and building the symbol registry...");
     let resolved_pack_dir = resolve_pack_dir(scripts_dir, pack_dir);
-    let mut registry = build_symbol_registry(scripts_dir, resolved_pack_dir.as_deref());
+    let mut registry = build_symbol_registry(scripts_dir, resolved_pack_dir.as_deref())?;
     register_scripts_from_sigs(&mut registry, ids, &mut diagnostics, &file_sigs);
     info!("  Registered {} scripts", registry.scripts.len());
     registry.drop_registration_scratch();
@@ -1390,7 +1365,12 @@ fn resolve_pack_dir(scripts_dir: &Path, pack_dir: Option<&Path>) -> Option<PathB
 }
 
 /// Build the source-independent registry before registering parsed scripts.
-fn build_symbol_registry(scripts_dir: &Path, resolved_pack_dir: Option<&Path>) -> SymbolRegistry {
+fn build_symbol_registry(
+    scripts_dir: &Path,
+    resolved_pack_dir: Option<&Path>,
+) -> Result<SymbolRegistry, Box<dyn Error>> {
+    let config_files = sources::target_config_files(scripts_dir, Scope::Rune)?;
+    let engine_rs2 = sources::engine_file(scripts_dir, Scope::Rune)?;
     // Visibility reads every source and config, and only its indexing needs
     // the registry built meanwhile.
     let visibility = {
@@ -1414,9 +1394,6 @@ fn build_symbol_registry(scripts_dir: &Path, resolved_pack_dir: Option<&Path>) -
     // Walk the scripts tree once and let the constant/game-var/dbtable loaders
     // filter this shared list by extension, instead of each re-walking the tree
     // (previously 6 separate recursive traversals over the same directories).
-    let mut config_files: Vec<PathBuf> = Vec::new();
-    config_files.extend(sources::config_files(scripts_dir));
-
     symloader::load_constant_files(&mut registry, &config_files);
 
     info!(
@@ -1443,33 +1420,10 @@ fn build_symbol_registry(scripts_dir: &Path, resolved_pack_dir: Option<&Path>) -
         }
     }
 
-    let engine_rs2 = scripts_dir.join("engine.rs2");
-
-    if engine_rs2.exists() {
+    if let Some(engine_rs2) = engine_rs2 {
         symloader::load_engine_command_params(&mut registry, &engine_rs2);
-    } else {
-        if let Ok(entries) = std::fs::read_dir(scripts_dir) {
-            for entry in entries.flatten() {
-                let candidate = entry.path().join("engine.rs2");
-                if candidate.exists() {
-                    crate::symloader::load_engine_command_params(&mut registry, &candidate);
-                    break;
-                }
-            }
-        }
     }
-
-    let client_dir = if scripts_dir
-        .file_name()
-        .is_some_and(|name| name == "runescript")
-    {
-        scripts_dir.with_file_name("clientscript")
-    } else {
-        scripts_dir.join("clientscript")
-    };
-    if client_dir.is_dir() {
-        symloader::load_clientscript_signatures(&mut registry, &client_dir);
-    }
+    symloader::load_clientscript_signatures(&mut registry, scripts_dir);
 
     symloader::patch_command_return_types(&mut registry);
 
@@ -1479,7 +1433,7 @@ fn build_symbol_registry(scripts_dir: &Path, resolved_pack_dir: Option<&Path>) -
     visibility.index_registry(&registry);
     registry.visibility = Arc::new(visibility);
 
-    registry
+    Ok(registry)
 }
 
 /// Assign IDs and register the parsed scripts, reporting declaration errors.
@@ -1704,7 +1658,7 @@ fn recompile_to_encoded(
     // Registration.
     info!("[recompile] Registering scripts and building the symbol registry...");
     let resolved_pack_dir = resolve_pack_dir(scripts_dir, pack_dir);
-    let mut registry = build_symbol_registry(scripts_dir, resolved_pack_dir.as_deref());
+    let mut registry = build_symbol_registry(scripts_dir, resolved_pack_dir.as_deref())?;
     register_scripts_from_sigs(&mut registry, ids, &mut diagnostics, &file_sigs);
     info!("  Registered {} scripts", registry.scripts.len());
     registry.drop_registration_scratch();

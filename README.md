@@ -23,24 +23,41 @@ match your project.
 
 ## Project layout
 
-A project with server, client and shared code can use this layout:
+A revision has one scripts root. Organize its contents by feature or any other
+convention:
 
 ```text
 content/
 ├── scripts/
-│   ├── runescript/       # .rs2 files and engine.rs2
-│   ├── clientscript/     # .cs2 files and engine.cs2
-│   └── globalscript/     # shared .gs2 files
+│   ├── engine.rs2
+│   ├── engine.cs2
+│   ├── interface_bank/
+│   │   ├── scripts/bank.rs2
+│   │   ├── client/bank.cs2
+│   │   └── global/bank.gs2
+│   ├── skill_combat/
+│   └── quests/
 └── pack/                 # script IDs, command opcodes and named assets
 ```
 
-Both compilers automatically include the sibling `globalscript` directory.
-Put configs and constants alongside the scripts that own them. Server and client
-code can use their own definitions and shared definitions; shared code can only
-use shared definitions. Flat source directories are also supported.
+Discovery searches the whole scripts root recursively. File extensions select
+the target: `.rs2` runs on the server, `.cs2` on the client, and `.gs2` is compiled
+for both. Folder names have no effect. Each file can contain multiple scripts.
+Keep existing feature names and nested source/config folders when adding client
+or shared scripts to a server project.
+Existing `runescript`, `clientscript` and `globalscript` folders still work;
+passing one of those paths resolves to its ancestor `scripts` root.
+
+Configs and constants are shared by default. To restrict a file, put
+`// @scope(server)` or `// @scope(client)` in its leading comments.
+`// @scope(shared)` states the default explicitly. This ownership travels with
+the file when it moves. Shared scripts can only use shared definitions; each
+target can also use its own private definitions. Script ownership always comes
+from the extension.
 
 Your project supplies the engine commands, asset names and script IDs.
-`engine.rs2` and `engine.cs2` declare command parameters and return types.
+`engine.rs2` and `engine.cs2` declare command parameters and return types. They
+can be anywhere under the root; duplicate engine files are an error.
 Client commands follow their declared argument order. A command whose first
 `component` parameter is evaluated last uses `@stack(component_last)`:
 
@@ -76,7 +93,7 @@ flag to set.
 ## Compile server scripts
 
 ```bash
-runec compile --source content/scripts/runescript --pack content/pack --output data/server
+runec compile --source content/scripts --pack content/pack --output data/server
 ```
 
 This reads the server and shared scripts, checks them, and writes `script.dat`
@@ -95,7 +112,7 @@ If you omit `--output`, server output goes to `./data/pack/server`.
 ## Compile client scripts
 
 ```bash
-runec compile-client --source content/scripts/clientscript --pack content/pack --output data/clientscript
+runec compile-client --source content/scripts --pack content/pack --output data/clientscript
 ```
 
 This reads the client and shared scripts and writes one `<id>.dat` file per
@@ -109,7 +126,7 @@ Keep explicit ID entries when renaming scripts. For example, renaming
 ## Check server scripts
 
 ```bash
-runec lint --source content/scripts/runescript --pack content/pack
+runec lint --source content/scripts --pack content/pack
 ```
 
 This reports compiler errors, pointer warnings, unused locals and unreachable
@@ -154,7 +171,7 @@ Server scripts use the same callback syntax with `runclientscript`:
 runclientscript("playerdesign4_submit_name(0, 1, 1)");
 ```
 
-The compiler reads the sibling ClientScript sources to resolve callbacks and
+The compiler reads ClientScript sources throughout the root to resolve callbacks and
 check their arguments. `runclientscript` takes one quoted callback; the old
 `runclientscript*` and unquoted forms are errors.
 
@@ -170,43 +187,43 @@ for navigation, completion, highlighting and inlay hints.
 
 ## Editor setup
 
-Use your editor's LSP client to launch `runec` over stdio. Configure separate
-servers for RuneScript and ClientScript, with your project root as the working
-directory.
-
-RuneScript server:
+Use your editor's LSP client to launch one `runec` process over stdio for each
+revision, with your project root as the working directory:
 
 ```bash
-runec lsp --source content/scripts/runescript --pack content/pack
+runec lsp --source content/scripts --pack content/pack
 ```
 
-ClientScript server:
-
-```bash
-runec lsp --client --source content/scripts/clientscript --pack content/pack
-```
+It loads separate server and client analysis contexts from the available engine
+files. Shared scripts are checked against both. Use `--server` or `--client` to
+restrict a process to one target when needed.
 
 If the editor has separate fields for the executable and arguments, use `runec`
 as the executable and everything after it as the arguments. Leave initialization
 options blank for this directory-based setup. If the editor cannot find `runec`,
 use the full path to the installed executable.
 
-With `--source`, only that source tree, its shared scripts, packs and supported
+With `--source`, only that revision's scripts tree, packs and supported
 cache asset folders belong to the server. Files from other revisions opened by
 project-wide search are ignored, so their script names cannot create duplicates.
 
-Map files to the servers as follows:
+Map all three script extensions to this server:
 
-| Server | File pattern | Language ID |
-|---|---|---|
-| RuneScript | `*.rs2` | `rs2` |
-| RuneScript | `*.gs2` | `gs2` |
-| ClientScript | `*.cs2` | `cs2` |
-| ClientScript | `*.gs2` | `gs2` |
+| File pattern | Language ID |
+|---|---|
+| `*.rs2` | `rs2` |
+| `*.cs2` | `cs2` |
+| `*.gs2` | `gs2` |
 
 The language server provides diagnostics, completion, hover, definitions,
 references, rename, syntax highlighting, signature help, inlay hints, formatting,
 quick fixes and Extract Proc. Changes refresh diagnostics in affected open files.
+
+Inlay hints show constant types and parameter names. A parameter name appears only
+before a literal (number, string, boolean, `null`, coord) or a `calc` argument,
+in calls with more than one parameter, and only when the name says more than its
+type, the call's name or its numbered siblings: `inv_add(bank, coins, count: 5)`
+gets a hint, `if_settext(component, "Hi")` and `append("a", "b")` do not.
 
 Script headers show an `@requires active_player, active_npc` CodeLens tag with
 the pointers needed on entry, including requirements inherited from proc and

@@ -1,8 +1,80 @@
-use super::{InlayHint, ScriptPointers, SymbolKind, index};
+use super::index::Lexeme;
+use super::{InlayHint, ScriptPointers, Symbol, SymbolKind, index};
 use crate::effects::ScriptEffects;
 use crate::project::{Project, SourceId};
 use crate::token::Kind;
+use crate::types::{BaseVarType, Type};
 use std::ops::Range;
+
+/// Literals and `calc` say nothing about their role; names and calls do.
+fn unclear(argument: &[(Lexeme<'_>, Range<usize>)]) -> bool {
+    match argument.first().map(|(token, _)| token.kind) {
+        Some(
+            Kind::Number
+            | Kind::LongLiteral
+            | Kind::StringLiteral
+            | Kind::RawStringLiteral
+            | Kind::BooleanTrue
+            | Kind::BooleanFalse
+            | Kind::CharLiteral
+            | Kind::CoordLiteral
+            | Kind::Null
+            | Kind::Calc,
+        ) => true,
+        Some(Kind::BinaryOperator) => {
+            argument[0].0.value == "-"
+                && argument.get(1).is_some_and(|(token, _)| {
+                    matches!(token.kind, Kind::Number | Kind::LongLiteral)
+                })
+        }
+        _ => false,
+    }
+}
+
+/// The name without `$` or a numeric suffix, and whether it had the suffix.
+fn stem(name: &str) -> (&str, bool) {
+    let name = name.trim_start_matches('$');
+    let stem = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    (stem, stem.len() < name.len())
+}
+
+/// The type a name spells. `command` and `type` parse as `int` but are not its name.
+fn spelled_type(name: &str) -> Option<Type> {
+    Type::from_name(name).filter(|ty| *ty != Type::Int || name == "int")
+}
+
+/// Whether a parameter name tells more than its type, its numbered siblings and
+/// the call's own name. Hook parameters take callbacks, which name themselves.
+fn descriptive(name: &str, ty: Type, callee: &Symbol) -> bool {
+    if ty == Type::ClientScript {
+        return false;
+    }
+    let (stem, numbered) = stem(name);
+    let stack = match ty.base_type() {
+        BaseVarType::Integer => "int",
+        BaseVarType::String => "string",
+        BaseVarType::Long => "long",
+    };
+    if stem == ty.name()
+        || stem == ty.declared_name()
+        || stem == stack
+        || spelled_type(stem) == Some(ty)
+    {
+        return false;
+    }
+    if numbered
+        && (spelled_type(stem).is_some()
+            || callee
+                .parameters
+                .iter()
+                .filter(|(other, _)| self::stem(other) == (stem, true))
+                .count()
+                > 1)
+    {
+        return false;
+    }
+    !(stem.len() >= 3 && callee.name.contains(stem))
+}
 
 impl Project {
     /// Cached AST effects, with pointer requirements attached only when already checked.
@@ -123,75 +195,71 @@ impl Project {
                     | SymbolKind::Procedure
                     | SymbolKind::Trigger
                     | SymbolKind::ClientScript
-            ) {
+            ) || symbol.parameters.len() < 2
+            {
                 continue;
             }
             let next = tokens.partition_point(|(_, range)| range.start < span.end);
-            let mut end = span.end;
             if tokens
                 .get(next)
-                .is_some_and(|(token, _)| token.kind == Kind::LParen)
+                .is_none_or(|(token, _)| token.kind != Kind::LParen)
             {
-                let mut depth = 0;
-                let mut argument = 0;
-                let mut argument_start = true;
-                let mut literal_end = 0;
-                for (token, token_range) in &tokens[next..] {
-                    if token_range.start < literal_end {
-                        continue;
-                    }
-                    if matches!(token.kind, Kind::StringLiteral | Kind::RawStringLiteral) {
-                        literal_end = token_range.end;
-                    }
-                    if depth == 1
-                        && argument_start
-                        && !matches!(
-                            token.kind,
-                            Kind::RParen | Kind::SingleLineComment | Kind::MultiLineComment
-                        )
-                    {
-                        if let Some((name, _)) = symbol.parameters.get(argument) {
-                            hints.push(InlayHint {
-                                offset: token_range.start,
-                                label: format!("{}:", name.trim_start_matches('$')),
-                                parameter: true,
-                            });
-                        }
-                        argument_start = false;
-                    }
-                    match token.kind {
-                        Kind::LParen => depth += 1,
-                        Kind::RParen => {
-                            depth -= 1;
-                            if depth == 0 {
-                                end = token_range.end;
-                                break;
-                            }
-                        }
-                        Kind::Comma if depth == 1 => {
-                            argument += 1;
-                            argument_start = true;
-                        }
-                        _ => {}
-                    }
-                }
-            } else if !symbol.parameters.is_empty() {
                 continue;
             }
-            if !symbol.returns.is_empty() {
-                hints.push(InlayHint {
-                    offset: end,
-                    label: format!(
-                        "-> {}",
-                        symbol
-                            .returns
-                            .iter()
-                            .map(|ty| ty.name())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    parameter: false,
-                });
+            let end = hooks[..hooks.partition_point(|hook| hook.range.start <= span.start)]
+                .last()
+                .filter(|hook| hook.range.contains(&span.start))
+                .map_or(usize::MAX, |hook| hook.range.end);
+            let mut depth = 0;
+            let mut argument = 0;
+            let mut argument_start = true;
+            let mut literal_end = 0;
+            for (i, (token, token_range)) in tokens.iter().enumerate().skip(next) {
+                if token_range.start >= end {
+                    break;
+                }
+                if token_range.start < literal_end {
+                    continue;
+                }
+                if token.kind == Kind::Semicolon {
+                    break;
+                }
+                if matches!(token.kind, Kind::StringLiteral | Kind::RawStringLiteral) {
+                    literal_end = token_range.end;
+                }
+                if depth == 1
+                    && argument_start
+                    && !matches!(
+                        token.kind,
+                        Kind::RParen | Kind::SingleLineComment | Kind::MultiLineComment
+                    )
+                {
+                    if let Some((name, ty)) = symbol.parameters.get(argument)
+                        && unclear(&tokens[i..])
+                        && descriptive(name, *ty, symbol)
+                    {
+                        hints.push(InlayHint {
+                            offset: token_range.start,
+                            label: format!("{}:", name.trim_start_matches('$')),
+                            parameter: true,
+                        });
+                    }
+                    argument_start = false;
+                }
+                match token.kind {
+                    Kind::LParen => depth += 1,
+                    Kind::RParen => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    Kind::Comma if depth == 1 => {
+                        argument += 1;
+                        argument_start = true;
+                    }
+                    _ => {}
+                }
             }
         }
         hints.sort_by_key(|hint| hint.offset);

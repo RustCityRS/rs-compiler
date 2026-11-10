@@ -1,5 +1,6 @@
 use clap::{Parser as ClapParser, Subcommand};
 use runec::clientscript;
+use runec::sources::{self, Scope};
 use std::error::Error;
 use std::fs;
 use std::panic::resume_unwind;
@@ -21,12 +22,17 @@ struct Cli {
 enum Commands {
     /// Serve compiler diagnostics and editor features over stdio LSP
     Lsp {
+        /// Revision scripts root, searched recursively for all script languages
         #[arg(long)]
         source: Option<PathBuf>,
         #[arg(long)]
         pack: Option<PathBuf>,
-        #[arg(long)]
+        /// Restrict the language server to ClientScript and GlobalScript
+        #[arg(long, conflicts_with = "server", requires = "source")]
         client: bool,
+        /// Restrict the language server to RuneScript and GlobalScript
+        #[arg(long, requires = "source")]
+        server: bool,
     },
     /// Compile .cs2 sources to individual cache script files
     CompileClient {
@@ -95,14 +101,49 @@ fn run() -> Result<(), Box<dyn Error>> {
             source,
             pack,
             client,
+            server,
         } => {
             if let Some(source) = source {
-                runec::lsp::serve_with_loader(
-                    None,
-                    Some(Box::new(move || {
-                        runec::filesystem::editor_project(&source, pack.as_deref(), client)
-                            .map_err(|error| error.to_string())
-                    })),
+                let source = sources::source_root(&source);
+                let files = sources::config_files(&source);
+                let has_client = files
+                    .iter()
+                    .any(|path| Scope::from_path(path) == Some(Scope::Client));
+                let has_server = files
+                    .iter()
+                    .any(|path| Scope::from_path(path) == Some(Scope::Rune));
+                let targets = if client {
+                    vec![Scope::Client]
+                } else if server {
+                    vec![Scope::Rune]
+                } else {
+                    let mut targets = Vec::new();
+                    if has_server || !has_client {
+                        targets.push(Scope::Rune);
+                    }
+                    if has_client {
+                        targets.push(Scope::Client);
+                    }
+                    targets
+                };
+                runec::lsp::serve_workspace_with_loaders(
+                    targets
+                        .into_iter()
+                        .map(|scope| {
+                            let source = source.clone();
+                            let pack = pack.clone();
+                            let loader: Box<dyn Fn() -> Result<runec::project::Project, String>> =
+                                Box::new(move || {
+                                    runec::filesystem::editor_project(
+                                        &source,
+                                        pack.as_deref(),
+                                        scope == Scope::Client,
+                                    )
+                                    .map_err(|error| error.to_string())
+                                });
+                            (scope, loader)
+                        })
+                        .collect(),
                 )?;
             } else {
                 runec::lsp::serve(None)?;

@@ -1,4 +1,4 @@
-//! Source discovery and visibility for the three script namespaces.
+//! Source discovery and visibility independent of developer-chosen folders.
 use crate::parallel::parallel_map;
 use crate::parser::Expr;
 use crate::symbol::{SymbolKind, SymbolRegistry};
@@ -26,7 +26,7 @@ impl Scope {
         }
     }
 
-    fn extension(self) -> &'static str {
+    pub fn extension(self) -> &'static str {
         match self {
             Self::Rune => "rs2",
             Self::Client => "cs2",
@@ -34,53 +34,78 @@ impl Scope {
         }
     }
 
-    fn at(path: &Path) -> Option<Self> {
-        match path.file_name()?.to_str()? {
-            "runescript" => Some(Self::Rune),
-            "clientscript" => Some(Self::Client),
-            "globalscript" => Some(Self::Global),
+    pub fn from_path(path: &Path) -> Option<Self> {
+        match path.extension()?.to_str()? {
+            "rs2" => Some(Self::Rune),
+            "cs2" => Some(Self::Client),
+            "gs2" => Some(Self::Global),
             _ => None,
         }
     }
-}
 
-fn namespace(path: &Path) -> Option<(&Path, Scope)> {
-    let candidates = || {
-        path.ancestors()
-            .filter_map(|path| Scope::at(path).map(|scope| (path, scope)))
-    };
-    candidates()
-        .find(|(path, _)| {
-            path.parent()
-                .and_then(Path::file_name)
-                .is_some_and(|name| name == "scripts")
-        })
-        .or_else(|| candidates().next())
-}
-
-/// Accept the scripts parent as well as a target's own source directory.
-pub(crate) fn target_dir(dir: &Path, scope: Scope) -> PathBuf {
-    let target = dir.join(scope.folder());
-    if Scope::at(dir).is_none() && target.is_dir() {
-        target
-    } else {
-        dir.to_path_buf()
-    }
-}
-
-/// The target's sources plus its sibling globalscript directory, when present.
-pub fn roots(dir: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![dir.to_path_buf()];
-    if let Some((root, scope)) = namespace(dir)
-        && scope != Scope::Global
-        && let Some(parent) = root.parent()
-    {
-        let global = parent.join(Scope::Global.folder());
-        if global.is_dir() {
-            roots.insert(0, global);
+    /// Scripts use their extension. Configs and constants default to shared;
+    /// a leading `// @scope(server|client|shared)` comment can restrict them.
+    pub fn for_file(path: &Path, text: &str) -> io::Result<Self> {
+        if let Some(scope) = Self::from_path(path) {
+            return Ok(scope);
         }
+        let mut scope = None;
+        for line in text.lines() {
+            let line = line.trim().trim_start_matches('\u{feff}');
+            if line.is_empty() {
+                continue;
+            }
+            let Some(comment) = line.strip_prefix("//") else {
+                break;
+            };
+            let Some(value) = comment.trim().strip_prefix("@scope") else {
+                continue;
+            };
+            let value = value
+                .trim()
+                .strip_prefix('(')
+                .and_then(|v| v.strip_suffix(')'));
+            let declared = match value.map(str::trim) {
+                Some("server") => Self::Rune,
+                Some("client") => Self::Client,
+                Some("shared") => Self::Global,
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{}: expected // @scope(server|client|shared)",
+                            path.display()
+                        ),
+                    ));
+                }
+            };
+            if scope.replace(declared).is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: duplicate @scope declaration", path.display()),
+                ));
+            }
+        }
+        Ok(scope.unwrap_or(Self::Global))
     }
-    roots
+}
+
+/// A revision's scripts tree, including when a caller supplies an old target
+/// subdirectory. Standalone projects can use any explicitly supplied root.
+pub fn source_root(dir: &Path) -> PathBuf {
+    dir.ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == "scripts"))
+        .unwrap_or(dir)
+        .to_path_buf()
+}
+
+pub(crate) fn target_dir(dir: &Path, _scope: Scope) -> PathBuf {
+    source_root(dir)
+}
+
+/// All targets share the same root; extensions select their script sources.
+pub fn roots(dir: &Path) -> Vec<PathBuf> {
+    vec![source_root(dir)]
 }
 
 pub fn config_files(dir: &Path) -> Vec<PathBuf> {
@@ -88,52 +113,74 @@ pub fn config_files(dir: &Path) -> Vec<PathBuf> {
     for root in roots(dir) {
         collect_all_files(&root, &mut files);
     }
+    files.sort();
     files
 }
 
-pub fn script_files(dir: &Path, extension: &str) -> io::Result<Vec<PathBuf>> {
-    let dir = target_dir(
-        dir,
-        if extension == "cs2" {
-            Scope::Client
-        } else {
-            Scope::Rune
-        },
-    );
+fn file_scope(path: &Path) -> io::Result<Scope> {
+    if let Some(scope) = Scope::from_path(path) {
+        return Ok(scope);
+    }
+    let mut header = String::new();
+    for line in io::BufReader::new(fs::File::open(path)?).lines() {
+        let line = line?;
+        let trimmed = line.trim().trim_start_matches('\u{feff}');
+        if !trimmed.is_empty() && !trimmed.starts_with("//") {
+            break;
+        }
+        header.push_str(&line);
+        header.push('\n');
+    }
+    Scope::for_file(path, &header)
+}
+
+/// Read only the configs a target can use. Ownership indexing still sees all
+/// declarations, so opposite-target references receive visibility errors.
+pub fn target_config_files(dir: &Path, target: Scope) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    for root in roots(&dir) {
-        // Report a missing source root instead of silently compiling nothing.
-        fs::read_dir(&root)?;
-        let mut candidates = Vec::new();
-        collect_all_files(&root, &mut candidates);
-        for path in candidates {
-            let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
-                continue;
-            };
-            if !matches!(ext, "rs2" | "cs2" | "gs2") {
-                continue;
-            }
-            if let Some((_, scope)) = namespace(&path)
-                && ext != scope.extension()
-            {
-                return Err(io::Error::other(format!(
-                    "{}: .{ext} source belongs in scripts/{}, not scripts/{}",
-                    path.display(),
-                    match ext {
-                        "rs2" => "runescript",
-                        "cs2" => "clientscript",
-                        _ => "globalscript",
-                    },
-                    scope.folder(),
-                )));
-            }
-            if ext == extension || ext == "gs2" {
-                files.push(path);
-            }
+    for path in config_files(dir) {
+        if crate::filesystem::config_kind(&path).is_none() {
+            continue;
+        }
+        let scope = file_scope(&path)?;
+        if scope == Scope::Global || scope == target {
+            files.push(path);
         }
     }
-    files.sort();
     Ok(files)
+}
+
+pub fn script_files(dir: &Path, extension: &str) -> io::Result<Vec<PathBuf>> {
+    let root = source_root(dir);
+    // Report a missing source root instead of silently compiling nothing.
+    fs::read_dir(&root)?;
+    let mut files = config_files(&root);
+    files.retain(|path| {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext == extension || ext == "gs2")
+    });
+    Ok(files)
+}
+
+/// Locate an engine declaration by its filename, wherever it is organized.
+pub fn engine_file(dir: &Path, scope: Scope) -> io::Result<Option<PathBuf>> {
+    let name = format!("engine.{}", scope.extension());
+    let mut matches = config_files(dir)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|file| file == name.as_str()));
+    let first = matches.next();
+    if let Some(second) = matches.next() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Multiple {name} files: {} and {}",
+                first.as_ref().unwrap().display(),
+                second.display(),
+            ),
+        ));
+    }
+    Ok(first)
 }
 
 /// Pack registries assign IDs; source declarations grant visibility. Keeping
@@ -280,7 +327,7 @@ impl Visibility {
         self.documents
             .get(label)
             .copied()
-            .or_else(|| namespace(label).map(|(_, scope)| scope))
+            .or_else(|| Scope::from_path(label))
     }
 
     pub(crate) fn undeclare(&mut self, kind: &str, name: &str, scope: Scope) {
@@ -304,24 +351,24 @@ impl Visibility {
     /// [`index_registry`](Self::index_registry). The files are read in
     /// parallel and declared in their order.
     pub(crate) fn scan(dir: &Path) -> Self {
-        let Some((root, _)) = namespace(dir) else {
-            return Self::default();
-        };
-        let Some(parent) = root.parent() else {
-            return Self::default();
-        };
-        let mut files = Vec::new();
-        for scope in [Scope::Global, Scope::Rune, Scope::Client] {
-            let mut found = Vec::new();
-            collect_all_files(&parent.join(scope.folder()), &mut found);
-            files.extend(found.into_iter().map(|file| (file, scope)));
-        }
+        let files: Vec<_> = config_files(dir)
+            .into_iter()
+            .filter(|path| {
+                Scope::from_path(path).is_some() || crate::filesystem::config_kind(path).is_some()
+            })
+            .collect();
         let mut result = Self {
             active: true,
             ..Self::default()
         };
-        for (scope, declared) in parallel_map(&files, |(file, scope)| (*scope, declarations(file)))
-        {
+        for (file, scope, declared) in parallel_map(&files, |file| {
+            (
+                file.clone(),
+                file_scope(file).unwrap_or(Scope::Global),
+                declarations(file),
+            )
+        }) {
+            result.bind(file, scope);
             for (kind, name) in declared {
                 result.declare(&kind, &name, scope);
             }
@@ -439,7 +486,7 @@ impl Visibility {
             && owners & (Scope::Rune as u8 | Scope::Client as u8) != 0
         {
             return Some(format!(
-                "{kind} '{name}' is declared in both globalscript and a private namespace; keep the shared declaration in globalscript"
+                "{kind} '{name}' is declared in both shared and private scopes; keep one shared declaration"
             ));
         }
         if owners == 0 && !required {
@@ -449,9 +496,12 @@ impl Visibility {
             return None;
         }
         let allowed = if scope == Scope::Global {
-            "scripts/globalscript".to_owned()
+            "a .gs2 source or shared config".to_owned()
         } else {
-            format!("scripts/{} or scripts/globalscript", scope.folder())
+            format!(
+                "a .{} or .gs2 source, or a visible config",
+                scope.extension()
+            )
         };
         Some(format!(
             "{kind} '{name}' is not visible to {}; define it in {allowed}",

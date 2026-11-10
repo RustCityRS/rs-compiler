@@ -241,9 +241,6 @@ pub fn load_sources(dir: &Path) -> Result<Vec<Source>> {
         if path
             .file_name()
             .is_some_and(|name| name != "engine.cs2" && name != "engine.gs2")
-            && !path
-                .components()
-                .any(|part| part.as_os_str().to_string_lossy().starts_with('_'))
         {
             sources.push(Source::parse(&fs::read_to_string(&path)?, &path)?);
         }
@@ -342,7 +339,13 @@ pub fn registry(source_dir: &Path, pack: &Path) -> Result<SymbolRegistry> {
             if matches!(category.as_str(), "varp" | "varpbit")
         )
     });
-    let engine_path = source_dir.join("engine.cs2");
+    let engine_path = crate::sources::engine_file(source_dir, crate::sources::Scope::Client)?
+        .ok_or_else(|| {
+            invalid(format!(
+                "No engine.cs2 found under {}",
+                source_dir.display()
+            ))
+        })?;
     for command in load_commands(&pack.join("cs2_command.pack"), &engine_path)? {
         registry.register_command(
             command.name.to_owned(),
@@ -399,11 +402,12 @@ pub fn registry(source_dir: &Path, pack: &Path) -> Result<SymbolRegistry> {
             }
         }
     }
+    let configs = crate::sources::target_config_files(source_dir, crate::sources::Scope::Client)?;
     {
-        let mut files = crate::sources::config_files(source_dir);
-        files.retain(|path| path.extension().is_some_and(|ext| ext == "param"));
-        files.sort();
-        for file in files {
+        for file in configs
+            .iter()
+            .filter(|path| path.extension().is_some_and(|ext| ext == "param"))
+        {
             let text = fs::read_to_string(file)?;
             let mut id = None;
             for line in text.lines().map(str::trim) {
@@ -431,7 +435,6 @@ pub fn registry(source_dir: &Path, pack: &Path) -> Result<SymbolRegistry> {
             }
         }
     }
-    let configs = crate::sources::config_files(source_dir);
     load_constant_files(&mut registry, &configs);
     load_game_var_types(&mut registry, &configs);
     load_varc_types(&mut registry, &configs)?;

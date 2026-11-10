@@ -1,6 +1,7 @@
 use runec::bytecode::Opcode;
 use runec::clientscript::{self, decode::Script, format::Format};
 use runec::error::CompilerError;
+use runec::sources::{self, Scope};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -34,14 +35,32 @@ impl Project {
                 "0=PushConstantInt\n1=PushVarp\n21=Return\n40=GosubWithParams\n",
             ),
             ("scripts/globalscript/items.obj", "[shared_obj]\n"),
-            ("scripts/runescript/items.obj", "[rune_obj]\n"),
-            ("scripts/clientscript/items.obj", "[client_obj]\n"),
+            (
+                "scripts/runescript/items.obj",
+                "// @scope(server)\n[rune_obj]\n",
+            ),
+            (
+                "scripts/clientscript/items.obj",
+                "// @scope(client)\n[client_obj]\n",
+            ),
             ("scripts/globalscript/vars.varp", "[shared_var]\ntype=int\n"),
-            ("scripts/runescript/vars.varp", "[rune_var]\ntype=int\n"),
-            ("scripts/clientscript/vars.varp", "[client_var]\ntype=int\n"),
+            (
+                "scripts/runescript/vars.varp",
+                "// @scope(server)\n[rune_var]\ntype=int\n",
+            ),
+            (
+                "scripts/clientscript/vars.varp",
+                "// @scope(client)\n[client_var]\ntype=int\n",
+            ),
             ("scripts/globalscript/values.constant", "^shared = 42\n"),
-            ("scripts/runescript/values.constant", "^rune = 21\n"),
-            ("scripts/clientscript/values.constant", "^client = 84\n"),
+            (
+                "scripts/runescript/values.constant",
+                "// @scope(server)\n^rune = 21\n",
+            ),
+            (
+                "scripts/clientscript/values.constant",
+                "// @scope(client)\n^client = 84\n",
+            ),
             (
                 "scripts/globalscript/shared.gs2",
                 "[proc,shared]()(int) return(^shared);\n",
@@ -227,7 +246,7 @@ fn config_constants_vars_and_procs_cannot_cross_private_namespaces() {
 }
 
 #[test]
-fn moving_a_config_to_globalscript_grants_both_targets_access() {
+fn config_scope_is_explicit_and_does_not_change_when_moved() {
     let project = Project::new();
     for (folder, ext, entry) in [
         ("runescript", "rs2", "rune_entry"),
@@ -246,19 +265,25 @@ fn moving_a_config_to_globalscript_grants_both_targets_access() {
     )
     .unwrap();
     assert!(project.rune(false));
-    assert!(project.client());
-    project.write("scripts/globalscript/wrong.cs2", "[proc,wrong]()\n");
-    assert!(!project.rune(false));
     assert!(!project.client());
+    project.write("scripts/globalscript/moved.obj", "[rune_obj]\n");
+    assert!(project.rune(false));
+    assert!(project.client());
 }
 
 #[test]
 fn shared_constants_and_procs_cannot_be_shadowed_by_private_definitions() {
     let project = Project::new();
-    project.write("scripts/runescript/values.constant", "^shared = 21\n");
+    project.write(
+        "scripts/runescript/values.constant",
+        "// @scope(server)\n^shared = 21\n",
+    );
     assert!(!project.rune(false));
     assert!(!project.client());
-    project.write("scripts/runescript/values.constant", "^rune = 21\n");
+    project.write(
+        "scripts/runescript/values.constant",
+        "// @scope(server)\n^rune = 21\n",
+    );
     project.write(
         "scripts/runescript/duplicate.rs2",
         "[proc,shared]()(int) return(21);\n",
@@ -361,10 +386,13 @@ fn stat_and_type_names_do_not_resolve_as_private_configs() {
     );
     project.write("pack/stat.pack", "13=smithing\n");
     project.write("pack/param.pack", "0=namedobj\n");
-    project.write("scripts/runescript/collisions.obj", "[smithing]\n");
+    project.write(
+        "scripts/runescript/collisions.obj",
+        "// @scope(server)\n[smithing]\n",
+    );
     project.write(
         "scripts/runescript/collisions.param",
-        "[namedobj]\ntype=int\n",
+        "// @scope(server)\n[namedobj]\ntype=int\n",
     );
     for (ty, value, expected) in [
         ("stat", "smithing", 13),
@@ -393,4 +421,124 @@ fn stat_and_type_names_do_not_resolve_as_private_configs() {
         assert_eq!(shared.operations[0], Opcode::PushConstantInt);
         assert_eq!(shared.int_operands[0], expected);
     }
+}
+
+#[test]
+fn feature_folders_and_legacy_folder_names_do_not_select_the_target() {
+    let project = Project::new();
+    let scripts = project.0.join("scripts");
+    let pack = project.0.join("pack");
+    let original_client = clientscript::compile_directory(&scripts, &pack).unwrap();
+    for (from, to) in [
+        ("runescript/main.rs2", "bank/clientscript/main.rs2"),
+        ("clientscript/main.cs2", "bank/runescript/main.cs2"),
+        ("globalscript/shared.gs2", "bank/_shared/shared.gs2"),
+        ("clientscript/engine.cs2", "system/commands/engine.cs2"),
+        ("runescript/values.constant", "bank/server.constant"),
+        ("clientscript/values.constant", "bank/client.constant"),
+        ("globalscript/values.constant", "bank/shared.constant"),
+    ] {
+        let destination = scripts.join(to);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::rename(scripts.join(from), destination).unwrap();
+    }
+    project.write("scripts/system/commands/engine.rs2", "");
+    let normal = runec::compile_memory(&scripts, Some(&pack), false).unwrap();
+    let nested = scripts.join("bank/runescript");
+    assert_eq!(
+        normal,
+        runec::compile_memory(&nested, Some(&pack), false).unwrap()
+    );
+    assert_eq!(
+        normal,
+        runec::compile_memory_with_options(&scripts, Some(&pack), false, false, true).unwrap()
+    );
+    assert_eq!(
+        original_client,
+        clientscript::compile_directory(&nested, &pack).unwrap()
+    );
+    assert_eq!(
+        sources::script_files(&nested, "gs2").unwrap(),
+        vec![scripts.join("bank/_shared/shared.gs2")]
+    );
+    for client in [false, true] {
+        let mut editor = runec::filesystem::editor_project(&nested, Some(&pack), client).unwrap();
+        assert!(!editor.check().diagnostics.has_errors());
+    }
+}
+
+#[test]
+fn private_constants_with_the_same_name_keep_their_target_values() {
+    let project = Project::new();
+    project.write(
+        "scripts/runescript/values.constant",
+        "// @scope(server)\n^target = 21\n",
+    );
+    project.write(
+        "scripts/clientscript/values.constant",
+        "// @scope(client)\n^target = 84\n",
+    );
+    project.write(
+        "scripts/runescript/main.rs2",
+        "[proc,rune_entry]()(int) return(^target);\n",
+    );
+    project.write(
+        "scripts/clientscript/main.cs2",
+        "[proc,client_entry]()(int) return(^target);\n",
+    );
+    let pack = project.0.join("pack");
+    let source = project.0.join("scripts");
+    let server = runec::filesystem::editor_project(&source, Some(&pack), false).unwrap();
+    let client = runec::filesystem::editor_project(&source, Some(&pack), true).unwrap();
+    for (editor, expected) in [(server, 21), (client, 84)] {
+        assert!(matches!(
+            editor.registry().lookup_constant("target").map(|symbol| &symbol.kind),
+            Some(runec::symbol::SymbolKind::Constant { int_value: Some(value), .. }) if *value == expected
+        ));
+    }
+    assert!(project.rune(false));
+    assert!(project.client());
+    project.write(
+        "scripts/globalscript/shared.gs2",
+        "[proc,shared]()(int) return(^target);\n",
+    );
+    assert!(!project.rune(false));
+    assert!(!project.client());
+}
+
+#[test]
+fn duplicate_engine_files_and_invalid_config_scope_are_errors() {
+    let project = Project::new();
+    project.write("scripts/commands/engine.cs2", "");
+    let source = project.0.join("scripts");
+    let error = sources::engine_file(&source, Scope::Client)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Multiple engine.cs2 files"));
+    assert!(!project.client());
+    project.write("scripts/commands/engine.rs2", "");
+    project.write("scripts/bank/engine.rs2", "");
+    assert!(!project.rune(false));
+    assert!(!project.rune(true));
+    project.write(
+        "scripts/bank/invalid.constant",
+        "// @scope(clinet)\n^bad = 1\n",
+    );
+    assert!(
+        sources::target_config_files(&source, Scope::Rune)
+            .unwrap_err()
+            .to_string()
+            .contains("expected // @scope")
+    );
+    assert_eq!(
+        Scope::for_file(Path::new("bank/runescript/view.cs2"), "// @scope(server)\n").unwrap(),
+        Scope::Client
+    );
+    assert!(
+        Scope::for_file(
+            Path::new("items.obj"),
+            "// @scope(server)\n// @scope(client)\n"
+        )
+        .is_err()
+    );
 }
