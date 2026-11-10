@@ -554,17 +554,17 @@ impl Host for Workspace {
             )?;
             return Ok(true);
         }
-        if method == "textDocument/didOpen" {
-            if let Some(uri) = message["params"]["textDocument"]["uri"].as_str() {
-                let language = extension_scope(uri).or_else(|| {
-                    message["params"]["textDocument"]["languageId"]
-                        .as_str()
-                        .and_then(|value| scope(value).ok())
-                });
-                if let Some(scope) = language {
-                    self.languages.insert(uri_key(uri), scope);
-                    message["params"]["textDocument"]["languageId"] = json!(target_name(scope));
-                }
+        if method == "textDocument/didOpen"
+            && let Some(uri) = message["params"]["textDocument"]["uri"].as_str()
+        {
+            let language = extension_scope(uri).or_else(|| {
+                message["params"]["textDocument"]["languageId"]
+                    .as_str()
+                    .and_then(|value| scope(value).ok())
+            });
+            if let Some(scope) = language {
+                self.languages.insert(uri_key(uri), scope);
+                message["params"]["textDocument"]["languageId"] = json!(target_name(scope));
             }
         }
         let uri = message["params"]["textDocument"]["uri"]
