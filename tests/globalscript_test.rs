@@ -1,4 +1,5 @@
-use runec::clientscript;
+use runec::bytecode::Opcode;
+use runec::clientscript::{self, decode::Script, format::Format};
 use runec::error::CompilerError;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -365,7 +366,10 @@ fn stat_and_type_names_do_not_resolve_as_private_configs() {
         "scripts/runescript/collisions.param",
         "[namedobj]\ntype=int\n",
     );
-    for (ty, value) in [("stat", "smithing"), ("char", "namedobj")] {
+    for (ty, value, expected) in [
+        ("stat", "smithing", 13),
+        ("char", "namedobj", i32::from(b'O')),
+    ] {
         project.write(
             "scripts/globalscript/shared.gs2",
             &format!("[proc,shared]()({ty}) return({value});\n"),
@@ -379,6 +383,14 @@ fn stat_and_type_names_do_not_resolve_as_private_configs() {
             &format!("[proc,client_entry]()({ty}) return(~shared);\n"),
         );
         assert!(project.rune(false), "runescript rejected {ty} {value}");
-        assert!(project.client(), "clientscript rejected {ty} {value}");
+        let client = clientscript::compile_directory(
+            &project.0.join("scripts/clientscript"),
+            &project.0.join("pack"),
+        )
+        .unwrap_or_else(|error| panic!("clientscript rejected {ty} {value}: {error}"));
+        let format = Format::load(&project.0.join("pack/cs2_command.pack")).unwrap();
+        let shared = Script::decode(&client[&1], &format).unwrap();
+        assert_eq!(shared.operations[0], Opcode::PushConstantInt);
+        assert_eq!(shared.int_operands[0], expected);
     }
 }

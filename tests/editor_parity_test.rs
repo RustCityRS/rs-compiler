@@ -622,7 +622,7 @@ fn hovering_a_config_key_shows_what_it_holds() {
     };
     assert_eq!(hover("readyanim").as_deref(), Some("readyanim: seq"));
     assert_eq!(hover("param").as_deref(), Some("param: param, param value"));
-    assert_eq!(hover("recol1s").as_deref(), Some("recol1s: int"));
+    assert_eq!(hover("recol1s").as_deref(), Some("recol1s: rgb15"));
     assert_eq!(hover("unknownkey"), None);
 }
 

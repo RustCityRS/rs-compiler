@@ -364,7 +364,7 @@ fn hook_descriptors_restore_callback_parameter_types() {
     let params = vec![Type::ClientScript, Type::String];
     registry.register_command("set_hook".into(), 1407, params.clone(), vec![]);
     registry.set_command_behavior("set_hook", true, Some(false), None);
-    let source = Source::parse("[proc,value]\nset_hook(callback, 1, 2, 3, 4, 5, \"zfÂ«ke\");\n[clientscript,callback](int $a, int $b, int $c, int $d, int $e)\n", Path::new("hooks.cs2")).unwrap();
+    let source = Source::parse("[proc,value]\nset_hook(callback, 1, 2, 3, 4, 5, \"zf\u{00ab}ke\");\n[clientscript,callback](int $a, int $b, int $c, int $d, int $e)\n", Path::new("hooks.cs2")).unwrap();
     clientscript::register(
         &source.file,
         &HashMap::from([

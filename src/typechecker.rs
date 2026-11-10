@@ -1020,10 +1020,12 @@ impl<'a> TypeChecker<'a> {
                 // Fallback: constants → entity IDs → commands → type chars.
                 // Entity ids are ints, so a string or long slot takes a
                 // same-named command (`name`, not a component called name).
-                let entity = self
-                    .registry
-                    .lookup_entity_id(name)
-                    .filter(|_| !self.registry.command_fills(name, hint));
+                let entity = self.registry.lookup_entity_id(name).filter(|entity| {
+                    !self.registry.command_fills(name, hint)
+                        && !(entity.const_type == Type::Param
+                            && hint != Some(Type::Param)
+                            && self.registry.type_chars.contains_key(name))
+                });
                 if let Some(sym) = self.registry.lookup_constant(name) {
                     match &sym.kind {
                         SymbolKind::Constant { const_type, .. } => Some(*const_type),
