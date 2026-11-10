@@ -879,6 +879,17 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         false,
     );
+    // 647: hint_npc into one of the eight hint arrow slots.
+    add(
+        "hint_npc_slot",
+        &[ActivePlayer, ActiveNpc],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        false,
+    );
     add(
         "hint_pl",
         &[ActivePlayer, ActivePlayer2],
