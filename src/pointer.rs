@@ -2404,6 +2404,17 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         false,
     );
+    // 647: the npc's twin of p_run (walks two tiles a tick while on).
+    add(
+        "npc_run",
+        &[ActiveNpc],
+        &[],
+        &[],
+        &[ActiveNpc2],
+        &[],
+        &[],
+        false,
+    );
     add(
         "npc_attackrange",
         &[ActiveNpc],
