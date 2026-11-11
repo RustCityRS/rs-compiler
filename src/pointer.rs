@@ -37,10 +37,11 @@ pub enum PointerType {
     ActiveController2 = 25,
     ActiveRegion = 26,
     ActiveRegion2 = 27,
+    LastString = 28,
 }
 
 impl PointerType {
-    pub const COUNT: usize = 28;
+    pub const COUNT: usize = 29;
 
     pub const ALL: [PointerType; Self::COUNT] = [
         PointerType::ActivePlayer,
@@ -71,6 +72,7 @@ impl PointerType {
         PointerType::ActiveController2,
         PointerType::ActiveRegion,
         PointerType::ActiveRegion2,
+        PointerType::LastString,
     ];
 
     /// The representation string used in diagnostics, matching the TS reference.
@@ -104,6 +106,7 @@ impl PointerType {
             PointerType::ActiveController2 => ".active_controller",
             PointerType::ActiveRegion => "active_region",
             PointerType::ActiveRegion2 => ".active_region",
+            PointerType::LastString => "last_string",
         }
     }
 
@@ -542,6 +545,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
             LastTargetslot,
             LastUseitem,
             LastUseslot,
+            LastString,
         ]);
         v
     };
@@ -1160,6 +1164,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         false,
     );
     add("last_int", &[LastInt], &[], &[], &[], &[], &[], false);
+    add("last_string", &[LastString], &[], &[], &[], &[], &[], false);
     add(
         "last_item",
         &[ActivePlayer, LastItem],
@@ -1327,10 +1332,35 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         false,
     );
+    {
+        // p_stringdialog: sets last_string, as p_countdialog sets last_int
+        let mut corrupt = delay_corrupt.clone();
+        corrupt.retain(|p| *p != LastString);
+        add(
+            "p_stringdialog",
+            &[PActivePlayer],
+            &[LastString],
+            &corrupt,
+            &[],
+            &[],
+            &[],
+            false,
+        );
+        // p_setdisplayname: sets last_int (the outcome) and last_string (the name)
+        corrupt.retain(|p| *p != LastInt);
+        add(
+            "p_setdisplayname",
+            &[PActivePlayer],
+            &[LastInt, LastString],
+            &corrupt,
+            &[],
+            &[],
+            &[],
+            false,
+        );
+    }
     for name in [
         "p_namedialog",
-        "p_stringdialog",
-        "p_setdisplayname",
         "p_get_suggestion",
         "p_next_suggestions",
         "p_prev_suggestions",
@@ -2062,6 +2092,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
             LastTargetslot,
             LastUseitem,
             LastUseslot,
+            LastString,
         ]);
         add(
             "npc_delay",
@@ -2437,6 +2468,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
             LastTargetslot,
             LastUseitem,
             LastUseslot,
+            LastString,
         ]);
         add(
             "npc_arrivedelay",

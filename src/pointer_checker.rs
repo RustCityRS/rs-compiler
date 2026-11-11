@@ -1770,6 +1770,7 @@ fn is_static_only_pointer(ptr: PointerType) -> bool {
             | LastTargetslot
             | LastUseitem
             | LastUseslot
+            | LastString
     )
 }
 
@@ -1836,6 +1837,7 @@ fn pointer_param_type(ptr: PointerType) -> &'static str {
     match ptr {
         LastUseitem | LastItem => "obj",
         LastCom => "component",
+        LastString => "string",
         _ => "int",
     }
 }

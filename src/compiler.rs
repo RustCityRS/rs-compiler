@@ -388,10 +388,15 @@ impl<'a> Compiler<'a> {
                             .local_table
                             .push_local(name.clone(), *element_type, true);
                         match array_name(name) {
-                            Some((_, number)) if self.client => number,
+                            Some((_, number)) => number,
                             _ => slot,
                         }
                     });
+                if !(0..5).contains(&slot) {
+                    self.errors.push(format!(
+                        "Array '${name}' uses slot {slot}; only array slots 0 through 4 are available."
+                    ));
+                }
                 locals.define(
                     name.clone(),
                     SymbolKind::LocalVar {

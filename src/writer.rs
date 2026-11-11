@@ -270,7 +270,7 @@ pub fn encode_script(script: &CompiledScript) -> Vec<u8> {
                 }
             }
             Operand::ArrayDef(var_id, type_char) => {
-                let packed = (*var_id << 8) | (*type_char as i32);
+                let packed = (*var_id << 16) | (*type_char as i32);
                 if is_large_operand(eff_opcode) {
                     ResolvedOp::Large(packed)
                 } else {

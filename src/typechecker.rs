@@ -326,7 +326,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn type_allows_array(t: Type) -> bool {
-        !matches!(t, Type::Void | Type::Error | Type::Any | Type::Long)
+        Self::type_allows_declaration(t) && t.base_type() == BaseVarType::Integer
     }
 
     fn type_allows_parameter(t: Type) -> bool {
