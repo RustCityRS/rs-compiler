@@ -3,6 +3,7 @@ use super::{
     SymbolKind, TextEdit, annotations, config, highlighting, index,
 };
 use crate::clientscript::hooks::transmit_id;
+use crate::clientscript::triggers;
 use crate::diagnostics::{Diagnostic, DiagnosticsCollector, Phase};
 use crate::project::{Project, SourceId};
 use crate::sources::Scope;
@@ -310,7 +311,16 @@ impl Project {
         let header = line.strip_prefix('[').filter(|line| !line.contains(']'));
         if header.is_some_and(|header| !header.contains(',')) {
             let names = self.registry.profile.as_ref().map_or_else(
-                || trigger_table::names().collect::<Vec<_>>(),
+                || {
+                    if self.target_scope() == Scope::Client {
+                        triggers::TRIGGERS
+                            .iter()
+                            .map(|trigger| trigger.name)
+                            .collect::<Vec<_>>()
+                    } else {
+                        trigger_table::names().collect()
+                    }
+                },
                 |profile| profile.triggers.keys().map(String::as_str).collect(),
             );
             return names
@@ -329,8 +339,15 @@ impl Project {
             .and_then(|header| header.split_once(','))
             .map(|(trigger, _)| trigger.trim());
         let expected = trigger
-            .and_then(|trigger| self.registry.trigger(trigger))
-            .and_then(|trigger| trigger.subject_type)
+            .and_then(|trigger| {
+                if self.target_scope() == Scope::Client {
+                    triggers::lookup(trigger).and_then(|trigger| trigger.subject_type)
+                } else {
+                    self.registry
+                        .trigger(trigger)
+                        .and_then(|trigger| trigger.subject_type)
+                }
+            })
             .or_else(|| {
                 self.signature_help(source, offset).and_then(|help| {
                     help.parameters

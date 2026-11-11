@@ -450,7 +450,7 @@ impl Project {
                     continue;
                 }
                 if matches!(self.target, Target::Client(_))
-                    && !matches!(script.trigger.as_str(), "proc" | "clientscript")
+                    && clientscript::triggers::lookup(&script.trigger).is_none()
                 {
                     diagnostics.error(
                         document.label.clone(),

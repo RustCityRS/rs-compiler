@@ -17,6 +17,7 @@ pub mod decode;
 pub mod decompile;
 pub mod format;
 pub(crate) mod hooks;
+pub(crate) mod triggers;
 use format::{Format, Width};
 pub use hooks::{HookValue, component_hook};
 
@@ -546,19 +547,7 @@ pub fn register(
         for statement in &script.body {
             register_variables(statement, registry);
         }
-        if !matches!(
-            script.trigger.as_str(),
-            "proc"
-                | "clientscript"
-                | "opworldmapelement1"
-                | "opworldmapelement2"
-                | "opworldmapelement3"
-                | "opworldmapelement4"
-                | "opworldmapelement5"
-                | "worldmapelementmouseover"
-                | "worldmapelementmouseleave"
-                | "worldmapelementmouserepeat"
-        ) {
+        if triggers::lookup(&script.trigger).is_none() {
             return Err(invalid(format!(
                 "Invalid client trigger {}",
                 script.trigger

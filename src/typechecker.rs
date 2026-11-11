@@ -1,7 +1,7 @@
 use crate::arguments::{
     command_hints, command_parameters, command_returns, positional_hints, proc_hints, stack_hints,
 };
-use crate::clientscript::hooks;
+use crate::clientscript::{hooks, triggers};
 use crate::compiler::Compiler;
 use crate::diagnostic_messages as msg;
 use crate::diagnostics::{DiagnosticsCollector, Phase};
@@ -155,6 +155,32 @@ impl<'a> TypeChecker<'a> {
     fn check_trigger_constraints(&mut self, script: &ScriptDeclaration) {
         let trigger = script.trigger.as_str();
 
+        if self.stack_returns
+            && let Some(info) = triggers::lookup(trigger)
+        {
+            if info.params.is_some() && !script.return_types.is_empty() {
+                self.error(
+                    script.line,
+                    msg::fmt(msg::SCRIPT_TRIGGER_NO_RETURNS, &[trigger]),
+                );
+            }
+            if let Some((subject, ty)) = info.subject(&script.name) {
+                if self.registry.lookup_reference(subject, ty).is_none() {
+                    self.error(
+                        script.line,
+                        format!("Unknown {} trigger subject '{subject}'", ty.name()),
+                    );
+                } else if let Some(message) = self.registry.visibility.reference(
+                    &self.file_path,
+                    &Expr::Identifier(subject.to_owned()),
+                    Some(ty),
+                    self.registry,
+                ) {
+                    self.error(script.line, message);
+                }
+            }
+        }
+
         // Triggers that don't allow parameters.
         // Most AP/OP/event triggers don't allow parameters (default in TS).
         // PROC, LABEL, DEBUGPROC, QUEUE, SOFTTIMER, TIMER all allow parameters.
@@ -172,7 +198,7 @@ impl<'a> TypeChecker<'a> {
         if let Some(expected_params) = self.trigger_expected_params(trigger) {
             let actual: Vec<&str> = script.params.iter().map(|p| p.param_type.name()).collect();
             let expected: Vec<&str> = expected_params.iter().map(|t| t.name()).collect();
-            if actual != expected && !expected.is_empty() {
+            if actual != expected {
                 self.error(
                     script.line,
                     msg::fmt(
@@ -283,8 +309,12 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn trigger_expected_params(&self, _trigger: &str) -> Option<Vec<Type>> {
-        None
+    fn trigger_expected_params(&self, trigger: &str) -> Option<&'static [Type]> {
+        if self.stack_returns {
+            triggers::lookup(trigger).and_then(|trigger| trigger.params)
+        } else {
+            None
+        }
     }
 
     fn trigger_expected_returns(&self, _trigger: &str) -> Option<Vec<Type>> {

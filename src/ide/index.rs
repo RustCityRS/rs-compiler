@@ -2,6 +2,7 @@ use super::{
     Configs, Index, Location, Reference, Symbol, SymbolKind, annotations, config, context, fields,
     highlighting, hooks,
 };
+use crate::clientscript::triggers;
 use crate::lexer::Lexer;
 use crate::parallel_map_balanced;
 use crate::parser::Statement;
@@ -1100,13 +1101,18 @@ impl Index {
             let Some(trigger) = symbol.key.split(':').nth(1) else {
                 continue;
             };
-            let Some(ty) = registry
-                .trigger(trigger)
-                .and_then(|trigger| trigger.subject_type)
-            else {
+            let subject = if symbol.scope == Some(Scope::Client) {
+                triggers::lookup(trigger).and_then(|trigger| trigger.subject(&symbol.name))
+            } else {
+                registry
+                    .trigger(trigger)
+                    .and_then(|trigger| trigger.subject_type)
+                    .map(|ty| (symbol.name.as_str(), ty))
+            };
+            let Some((name, ty)) = subject else {
                 continue;
             };
-            let key = config::entity_key(ty, &symbol.name);
+            let key = config::entity_key(ty, name);
             if let Some(entity) = configs
                 .keys
                 .get(&key)
