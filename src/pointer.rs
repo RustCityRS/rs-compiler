@@ -38,10 +38,11 @@ pub enum PointerType {
     ActiveRegion = 26,
     ActiveRegion2 = 27,
     LastString = 28,
+    LastCoord = 29,
 }
 
 impl PointerType {
-    pub const COUNT: usize = 29;
+    pub const COUNT: usize = 30;
 
     pub const ALL: [PointerType; Self::COUNT] = [
         PointerType::ActivePlayer,
@@ -73,6 +74,7 @@ impl PointerType {
         PointerType::ActiveRegion,
         PointerType::ActiveRegion2,
         PointerType::LastString,
+        PointerType::LastCoord,
     ];
 
     /// The representation string used in diagnostics, matching the TS reference.
@@ -107,6 +109,7 @@ impl PointerType {
             PointerType::ActiveRegion => "active_region",
             PointerType::ActiveRegion2 => ".active_region",
             PointerType::LastString => "last_string",
+            PointerType::LastCoord => "last_coord",
         }
     }
 
@@ -365,6 +368,8 @@ pub fn trigger_pointers(trigger: &str) -> PointerSet {
             ActivePlayer2,
         ],
         "applayert" => &[ActivePlayer, PActivePlayer, ActivePlayer2],
+        // Player-coord: a component aimed at a tile, which last_coord gives.
+        "apcoordt" => &[ActivePlayer, PActivePlayer, LastCoord],
         "opplayer1" | "opplayer2" | "opplayer3" | "opplayer4" | "opplayer5" | "opplayer6"
         | "opplayer7" | "opplayer8" | "opplayer9" | "opplayer10" => {
             &[ActivePlayer, PActivePlayer, ActivePlayer2]
@@ -548,6 +553,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
             LastUseitem,
             LastUseslot,
             LastString,
+            LastCoord,
         ]);
         v
     };
@@ -1167,6 +1173,16 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
     );
     add("last_int", &[LastInt], &[], &[], &[], &[], &[], false);
     add("last_string", &[LastString], &[], &[], &[], &[], &[], false);
+    add(
+        "last_coord",
+        &[ActivePlayer, LastCoord],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        false,
+    );
     add(
         "last_item",
         &[ActivePlayer, LastItem],
@@ -2102,6 +2118,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
             LastUseitem,
             LastUseslot,
             LastString,
+            LastCoord,
         ]);
         add(
             "npc_delay",
@@ -2478,6 +2495,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
             LastUseitem,
             LastUseslot,
             LastString,
+            LastCoord,
         ]);
         add(
             "npc_arrivedelay",

@@ -1771,6 +1771,7 @@ fn is_static_only_pointer(ptr: PointerType) -> bool {
             | LastUseitem
             | LastUseslot
             | LastString
+            | LastCoord
     )
 }
 
@@ -1838,6 +1839,7 @@ fn pointer_param_type(ptr: PointerType) -> &'static str {
         LastUseitem | LastItem => "obj",
         LastCom => "component",
         LastString => "string",
+        LastCoord => "coord",
         _ => "int",
     }
 }

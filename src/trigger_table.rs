@@ -149,6 +149,11 @@ const TRIGGERS: &[TriggerInfo] = &[
     flat("opplayer8", 191),
     flat("opplayer9", 192),
     flat("opplayer10", 193),
+    // Rev-647 ground targeting (APCOORDT): a component aimed at a tile,
+    // approached only and keyed by the component. Byte 194 must match the
+    // engine's ServerTriggerType ApCoordT, and 201, 7 past it, stays unused:
+    // the engine looks an op trigger up there.
+    flat("apcoordt", 194),
     // An npc's AI triggers name the npc (or `_category`) whatever its target:
     // the engine keys them by the acting npc's type, and RuneScriptTS gives them
     // SubjectMode.Type(NPC).
@@ -597,6 +602,15 @@ mod tests {
             assert_eq!(byte(&format!("opplayer{op}")), Some(183 + op));
         }
         assert!(!is_valid_trigger("opplayer11"));
+    }
+
+    #[test]
+    fn ground_target_trigger() {
+        // Byte 194 must stay in sync with the engine's ServerTriggerType
+        // ApCoordT; a tile is only approached, so there is no opcoordt.
+        assert_eq!(byte("apcoordt"), Some(194));
+        assert!(TRIGGERS.iter().all(|t| t.byte != 201));
+        assert!(!is_valid_trigger("opcoordt"));
     }
 
     #[test]

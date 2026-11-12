@@ -43,6 +43,7 @@ fn project(check_pointers: bool) -> Project {
         ("p_clanforumqfcdialog", vec![], vec![]),
         ("p_objdialog", vec![], vec![]),
         ("p_hsldialog", vec![], vec![]),
+        ("last_coord", vec![], vec![Coord]),
     ];
     for (opcode, (name, params, returns)) in commands.into_iter().enumerate() {
         registry.register_command(name.into(), 1000 + opcode as i32, params, returns);
@@ -468,6 +469,30 @@ fn string_dialogs_establish_last_string_until_the_next_suspension() {
         stale
             .iter()
             .any(|warning| warning.contains("stale") && warning.contains("last_string")),
+        "{stale:?}"
+    );
+}
+
+#[test]
+fn a_ground_target_gives_last_coord_until_the_next_suspension() {
+    let coord = |text: &str| -> Vec<String> {
+        pointer_warnings(text)
+            .into_iter()
+            .filter(|warning| warning.contains("last_coord"))
+            .collect()
+    };
+    let aimed = coord("[apcoordt,_]\ndef_coord $tile = last_coord;\n");
+    assert!(aimed.is_empty(), "{aimed:?}");
+    let elsewhere = coord("[opheld1,weapon]\ndef_coord $tile = last_coord;\n");
+    assert!(
+        elsewhere
+            .iter()
+            .any(|warning| warning.contains("not available")),
+        "{elsewhere:?}"
+    );
+    let stale = coord("[apcoordt,_]\np_delay(1);\ndef_coord $tile = last_coord;\n");
+    assert!(
+        stale.iter().any(|warning| warning.contains("stale")),
         "{stale:?}"
     );
 }
