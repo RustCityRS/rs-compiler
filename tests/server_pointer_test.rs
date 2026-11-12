@@ -35,6 +35,9 @@ fn project(check_pointers: bool) -> Project {
         ("obj_name", vec![], vec![String]),
         ("npc_delay", vec![Int], vec![]),
         ("world_delay", vec![Int], vec![]),
+        ("last_string", vec![], vec![String]),
+        ("p_stringdialog", vec![], vec![]),
+        ("p_setdisplayname", vec![String], vec![]),
     ];
     for (opcode, (name, params, returns)) in commands.into_iter().enumerate() {
         registry.register_command(name.into(), 1000 + opcode as i32, params, returns);
@@ -410,6 +413,37 @@ fn local_setters_suppress_implicit_context_only_on_paths_they_cover() {
         true,
     );
     assert!(implicit(&callee_setter).is_empty());
+}
+
+#[test]
+fn string_dialogs_establish_last_string_until_the_next_suspension() {
+    let inputs = |text: &str| -> Vec<String> {
+        pointer_warnings(text)
+            .into_iter()
+            .filter(|warning| warning.contains("last_string") || warning.contains("last_int"))
+            .collect()
+    };
+    let dialog = inputs("[opheld1,weapon]\np_stringdialog;\ndef_string $name = last_string;\n");
+    assert!(dialog.is_empty(), "{dialog:?}");
+    let named = inputs(
+        "[opheld1,weapon]\np_setdisplayname(\"name\");\ndef_int $result = last_int;\ndef_string $name = last_string;\n",
+    );
+    assert!(named.is_empty(), "{named:?}");
+    let missing = inputs("[opheld1,weapon]\ndef_string $name = last_string;\n");
+    assert!(
+        missing
+            .iter()
+            .any(|warning| warning.contains("not available") && warning.contains("last_string")),
+        "{missing:?}"
+    );
+    let stale =
+        inputs("[opheld1,weapon]\np_stringdialog;\np_delay(1);\ndef_string $name = last_string;\n");
+    assert!(
+        stale
+            .iter()
+            .any(|warning| warning.contains("stale") && warning.contains("last_string")),
+        "{stale:?}"
+    );
 }
 
 #[test]

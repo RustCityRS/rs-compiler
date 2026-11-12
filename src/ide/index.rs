@@ -785,6 +785,8 @@ impl Index {
                 return out;
             }
             let document_hooks = hooks.get(&document.id).map_or(&[][..], Vec::as_slice);
+            let hook_callback =
+                |range: &Range<usize>| document_hooks.iter().any(|hook| hook.callback == *range);
             let all = tokens(document, &compound, document_hooks);
             let significant = all
                 .iter()
@@ -828,6 +830,10 @@ impl Index {
                         .get(&(document.id, range.start, range.end))
                         .copied();
                     let id = declaration.or_else(|| {
+                        if hook_callback(range) {
+                            return lookup(&key(Scope::Client, "clientscript", &token.value))
+                                .or_else(|| lookup(&key(Scope::Client, "proc", &token.value)));
+                        }
                         let previous = i.checked_sub(1).map(|j| significant[j].0.kind);
                         match previous {
                             Some(Kind::LocalVar) => local(&token.value, range.start),
@@ -842,7 +848,17 @@ impl Index {
                                 lookup(&key(Scope::Global, trigger, &token.value))
                                     .or_else(|| lookup(&key(document.scope, trigger, &token.value)))
                             }
-                            _ => lookup(&format!("command:{}", token.value)),
+                            _ => {
+                                let call = significant
+                                    .get(i + 1)
+                                    .is_some_and(|(token, _)| token.kind == Kind::LParen);
+                                let constant = if call {
+                                    None
+                                } else {
+                                    lookup(&format!("constant:{}", token.value))
+                                };
+                                constant.or_else(|| lookup(&format!("command:{}", token.value)))
+                            }
                         }
                     })?;
                     Some(if id & CONFIG != 0 {
@@ -891,7 +907,7 @@ impl Index {
                     continue;
                 }
                 let previous = i.checked_sub(1).map(|j| significant[j].0.kind);
-                let callback = document_hooks.iter().any(|hook| hook.callback == *range);
+                let callback = hook_callback(range);
                 let transmit_kind = document_hooks
                     .iter()
                     .find_map(|hook| hook.transmit_at(range.start));
@@ -965,7 +981,15 @@ impl Index {
                             } else {
                                 expected.and_then(|ty| find(config::entity_key(ty, &token.value)))
                             };
-                            entity.or_else(|| find(format!("command:{}", token.value)))
+                            entity
+                                .or_else(|| {
+                                    if call {
+                                        None
+                                    } else {
+                                        find(format!("constant:{}", token.value))
+                                    }
+                                })
+                                .or_else(|| find(format!("command:{}", token.value)))
                         }
                     },
                 };

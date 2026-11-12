@@ -67,6 +67,68 @@ fn scripts_keep_reference_categories_and_complete_sigils() {
 }
 
 #[test]
+fn quoted_hook_arguments_resolve_commands_and_constants() {
+    for quote in ["\"", "r\""] {
+        let mut project = project_from_json(&json!({
+            "target":"client",
+            "opcodes":"0=PushConstantInt\n21=Return\n",
+            "commands":[
+                {"name":"if_setontimer","opcode":2408,"params":["component","clientscript","string"],"kind":"hook_component","stack":"component_last"},
+                {"name":"if_setonop","opcode":2409,"params":["component","clientscript","string"],"kind":"hook_component","stack":"component_last"},
+                {"name":"if_setop","opcode":2300,"params":["component","int","string"]},
+                {"name":"clientclock","opcode":3300,"returns":["int"]}
+            ],
+            "constants":[{"name":"event_op","type":"int","value":-2147483644,"scope":"global"}]
+        }))
+        .unwrap();
+        let engine_text = "[command,clientclock]()(int)\n";
+        let engine = project.open("engine.cs2", Scope::Client, 1, engine_text);
+        let constant_text = "^event_op = 0x80000004\n";
+        let constants = project.open_config(
+            "engine.constant",
+            Scope::Global,
+            1,
+            constant_text,
+            "constant",
+        );
+        let text = format!(
+            "[clientscript,tzhaar_fightcave_init](component $component0, component $component1, component $component2)\n\
+             if_setontimer($component0, {quote}tzhaar_fightcave_slide($component0, $component1, $component2, clientclock)\");\n\
+             if_setop($component1, 1, \"Dismiss\");\n\
+             if_setonop($component1, {quote}tzhaar_fightcave_op(event_op, $component0, $component1, $component2)\");\n\
+             [clientscript,tzhaar_fightcave_slide](component $component0, component $component1, component $component2, int $clock)\n\
+             [clientscript,tzhaar_fightcave_op](int $op, component $component0, component $component1, component $component2)\n"
+        );
+        let source = project.open("hooks.cs2", Scope::Client, 1, text.clone());
+        let tokens = project.semantic_tokens(source);
+        ordered(&text, &tokens);
+        let clock = at(&text, &tokens, "clientclock");
+        let event = at(&text, &tokens, "event_op");
+        assert_eq!(
+            (
+                clock.kind,
+                clock.default_library,
+                event.readonly,
+                event.static_
+            ),
+            (TokenKind::Function, true, true, true),
+            "hook arguments: {clock:?}, {event:?}"
+        );
+        assert_eq!(at(&text, &tokens, "\"Dismiss\"").kind, TokenKind::String);
+        for (name, target, definition_text) in [
+            ("clientclock", engine, engine_text),
+            ("event_op", constants, constant_text),
+        ] {
+            let definition = project
+                .definition(source, text.find(name).unwrap())
+                .unwrap();
+            assert_eq!(definition.source, target);
+            assert_eq!(&definition_text[definition.range], name);
+        }
+    }
+}
+
+#[test]
 fn compiler_annotations_have_highlighting_and_hover_without_label_references() {
     let mut project = project();
     let text = "[label,stack](int $value)\n\

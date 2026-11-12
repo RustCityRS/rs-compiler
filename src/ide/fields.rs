@@ -144,6 +144,7 @@ const BAS: &[Field] = &[
     ("crawlturn_r", SEQ),
     ("hillrotate", NUMBER),
     ("hillrotatelimit", NUMBER),
+    ("overlayheight", NUMBER),
     ("unknown", NUMBER),
 ];
 
@@ -166,6 +167,7 @@ const PARTICLEEFFECTOR: &[Field] = &[
     ("falloff", NUMBER),
     ("forcedirection", NUMBER),
     ("forcetype", NUMBER),
+    ("reversedirection", FLAG),
     ("unknown", NUMBER),
 ];
 
@@ -183,6 +185,7 @@ const PARTICLEEMITTER: &[Field] = &[
     ("linkcolourchannels", FLAG),
     ("localeffectors", EFFECTORS),
     ("worldeffectors", EFFECTORS),
+    ("globaleffectors", NUMBER),
     ("material", TEXTURE),
     ("rgba", ARGB),
     ("rgbatarget", ARGB),
@@ -224,6 +227,7 @@ const FLO: &[Field] = &[
     ("mapcolour", RGB),
     ("material", TEXTURE),
     ("occlude", FLAG),
+    ("hardshadow", FLAG),
     ("priority", NUMBER),
     ("smoothedges", FLAG),
     ("texturescale", NUMBER),
@@ -373,6 +377,10 @@ const LOC: &[Field] = &[
     ("membersop", TEXT),
     ("msi", &[Config(Type::Msi)]),
     ("msirotate", FLAG),
+    ("msimirror", FLAG),
+    ("postoffsetx", NUMBER),
+    ("postoffsety", NUMBER),
+    ("postoffsetz", NUMBER),
     ("members", FLAG),
     ("bgsound", &[Sound, Number]),
     ("bgsounddropoffrange", NUMBER),
@@ -513,6 +521,7 @@ const NPC_FIELDS: &[Field] = &[
     ("overlayheight", NUMBER),
     ("reprioritiseattackop", FLAG),
     ("roughbounding", NUMBER),
+    ("picksizeshift", NUMBER),
     ("spotshadow", FLAG),
     ("spotshadowcolour", HSL),
     ("spotshadowtrans", NUMBER),
@@ -605,6 +614,7 @@ const QUEST_FIELDS: &[Field] = &[
     ("members", FLAG),
     ("icon", GRAPHIC),
     ("mainstartcoord", NUMBER),
+    ("viacoord", NUMBER),
     ("masterquestvarbit", VARBIT_RANGE),
     ("masterquestvarp", VARP_RANGE),
     ("parent", QUEST),
@@ -649,6 +659,7 @@ const SPOTANIM: &[Field] = &[
     ("resizev", NUMBER),
     ("angle", NUMBER),
     ("allowloop", FLAG),
+    ("hillchange", &[Word, Number, Number]),
     ("rotation", NUMBER),
 ];
 
