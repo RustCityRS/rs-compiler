@@ -136,6 +136,19 @@ const TRIGGERS: &[TriggerInfo] = &[
     flat("opplayer5", 98),
     flat("opplayeru", 99),
     flat("opplayert", 100),
+    // Rev-647 players have ops 6-10 (the client shows eight). Bytes 182-186 and
+    // 189-193 must match the engine's ServerTriggerType ApPlayer6-10 and
+    // OpPlayer6-10, which keeps each op 7 past its ap.
+    flat("applayer6", 182),
+    flat("applayer7", 183),
+    flat("applayer8", 184),
+    flat("applayer9", 185),
+    flat("applayer10", 186),
+    flat("opplayer6", 189),
+    flat("opplayer7", 190),
+    flat("opplayer8", 191),
+    flat("opplayer9", 192),
+    flat("opplayer10", 193),
     // An npc's AI triggers name the npc (or `_category`) whatever its target:
     // the engine keys them by the acting npc's type, and RuneScriptTS gives them
     // SubjectMode.Type(NPC).
@@ -573,6 +586,17 @@ mod tests {
         assert!(is_valid_trigger("if_button10"));
         assert_eq!(byte("if_button6"), Some(173));
         assert_eq!(byte("if_button10"), Some(177));
+    }
+
+    #[test]
+    fn player_triggers_extended_to_ten() {
+        // Bytes 182-186 and 189-193 must stay in sync with the engine's
+        // ServerTriggerType ApPlayer6-10/OpPlayer6-10.
+        for op in 6..=10u8 {
+            assert_eq!(byte(&format!("applayer{op}")), Some(176 + op));
+            assert_eq!(byte(&format!("opplayer{op}")), Some(183 + op));
+        }
+        assert!(!is_valid_trigger("opplayer11"));
     }
 
     #[test]

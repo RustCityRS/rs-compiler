@@ -353,7 +353,8 @@ pub fn trigger_pointers(trigger: &str) -> PointerSet {
         }
 
         // Player-Player approach/operate triggers
-        "applayer1" | "applayer2" | "applayer3" | "applayer4" | "applayer5" => {
+        "applayer1" | "applayer2" | "applayer3" | "applayer4" | "applayer5" | "applayer6"
+        | "applayer7" | "applayer8" | "applayer9" | "applayer10" => {
             &[ActivePlayer, PActivePlayer, ActivePlayer2]
         }
         "applayeru" => &[
@@ -364,7 +365,8 @@ pub fn trigger_pointers(trigger: &str) -> PointerSet {
             ActivePlayer2,
         ],
         "applayert" => &[ActivePlayer, PActivePlayer, ActivePlayer2],
-        "opplayer1" | "opplayer2" | "opplayer3" | "opplayer4" | "opplayer5" => {
+        "opplayer1" | "opplayer2" | "opplayer3" | "opplayer4" | "opplayer5" | "opplayer6"
+        | "opplayer7" | "opplayer8" | "opplayer9" | "opplayer10" => {
             &[ActivePlayer, PActivePlayer, ActivePlayer2]
         }
         "opplayeru" => &[
