@@ -1416,6 +1416,17 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         false,
     );
     add("p_logout", &[PActivePlayer], &[], &[], &[], &[], &[], false);
+    // 647: p_logout past the lobby, to the login screen (the client's LOGOUT_FULL).
+    add(
+        "p_logout_full",
+        &[PActivePlayer],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        false,
+    );
     add(
         "p_preventlogout",
         &[PActivePlayer],
