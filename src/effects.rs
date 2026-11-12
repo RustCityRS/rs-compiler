@@ -574,11 +574,13 @@ mod tests {
         }
         assert!(registry.command_suspends("world_delay"));
         assert!(registry.command_suspends(".p_delay"));
+        assert!(registry.command_suspends("p_loaddelay"));
         assert!(registry.command_suspends("p_stringdialog"));
         let deletion = &default_command_pointers()["controller_del"];
         assert!(!deletion.corrupted.is_empty());
         assert!(!deletion.may_suspend);
-        assert!(!registry.command_suspends("p_namedialog"));
+        assert!(registry.command_suspends("p_namedialog"));
+        assert!(!registry.command_suspends("p_get_suggestion"));
         let mut server = Project::new(Target::Rune, registry.clone(), Options::default());
         let source = server.open("delays.rs2", Scope::Rune, 1,
             "[command,p_delay](int $ticks)\n[proc,delayed]\np_delay(1);\n[proc,caller]\n~delayed;\n[proc,world]\nworld_delay(1);");

@@ -26,6 +26,7 @@ fn project(check_pointers: bool) -> Project {
         ("allowdesign", vec![], vec![]),
         ("sound_speech_volume", vec![Int], vec![]),
         ("sound_speech_stop", vec![], vec![]),
+        ("p_loaddelay", vec![], vec![]),
         ("p_finduid", vec![Int], vec![Boolean]),
         ("finduid", vec![Int], vec![Boolean]),
         ("p_stopaction", vec![], vec![]),
@@ -38,6 +39,10 @@ fn project(check_pointers: bool) -> Project {
         ("last_string", vec![], vec![String]),
         ("p_stringdialog", vec![], vec![]),
         ("p_setdisplayname", vec![String], vec![]),
+        ("p_namedialog", vec![], vec![]),
+        ("p_clanforumqfcdialog", vec![], vec![]),
+        ("p_objdialog", vec![], vec![]),
+        ("p_hsldialog", vec![], vec![]),
     ];
     for (opcode, (name, params, returns)) in commands.into_iter().enumerate() {
         registry.register_command(name.into(), 1000 + opcode as i32, params, returns);
@@ -130,6 +135,17 @@ fn entity_commands_require_the_selected_player() {
             );
         }
     }
+}
+
+#[test]
+fn load_delay_requires_protected_player_access() {
+    let warnings = pointer_warnings("[ai_timer,_]\np_loaddelay;\n");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("p_active_player")),
+        "{warnings:?}"
+    );
 }
 
 #[test]
@@ -423,8 +439,18 @@ fn string_dialogs_establish_last_string_until_the_next_suspension() {
             .filter(|warning| warning.contains("last_string") || warning.contains("last_int"))
             .collect()
     };
-    let dialog = inputs("[opheld1,weapon]\np_stringdialog;\ndef_string $name = last_string;\n");
-    assert!(dialog.is_empty(), "{dialog:?}");
+    for command in ["p_stringdialog", "p_namedialog", "p_clanforumqfcdialog"] {
+        let dialog = inputs(&format!(
+            "[opheld1,weapon]\n{command};\ndef_string $name = last_string;\n"
+        ));
+        assert!(dialog.is_empty(), "{command}: {dialog:?}");
+    }
+    for command in ["p_objdialog", "p_hsldialog"] {
+        let dialog = inputs(&format!(
+            "[opheld1,weapon]\n{command};\ndef_int $value = last_int;\n"
+        ));
+        assert!(dialog.is_empty(), "{command}: {dialog:?}");
+    }
     let named = inputs(
         "[opheld1,weapon]\np_setdisplayname(\"name\");\ndef_int $result = last_int;\ndef_string $name = last_string;\n",
     );

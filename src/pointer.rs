@@ -1289,30 +1289,35 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         &[],
         false,
     );
-    add(
-        "p_arrivedelay",
-        &[PActivePlayer],
-        &[],
-        &delay_corrupt,
-        &[],
-        &[],
-        &[],
-        false,
-    );
-    {
-        // p_countdialog: sets last_int, corrupts everything except active + last_int
-        let mut corrupt = delay_corrupt.clone();
-        corrupt.retain(|p| *p != LastInt);
+    for name in ["p_arrivedelay", "p_loaddelay"] {
         add(
-            "p_countdialog",
+            name,
             &[PActivePlayer],
-            &[LastInt],
-            &corrupt,
+            &[],
+            &delay_corrupt,
             &[],
             &[],
             &[],
             false,
         );
+    }
+    {
+        // p_countdialog: sets last_int, corrupts everything except active + last_int.
+        // 647's obj and colour (hsl) dialogs answer in last_int too.
+        let mut corrupt = delay_corrupt.clone();
+        corrupt.retain(|p| *p != LastInt);
+        for name in ["p_countdialog", "p_objdialog", "p_hsldialog"] {
+            add(
+                name,
+                &[PActivePlayer],
+                &[LastInt],
+                &corrupt,
+                &[],
+                &[],
+                &[],
+                false,
+            );
+        }
     }
     add(
         "p_delay",
@@ -1335,19 +1340,22 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         false,
     );
     {
-        // p_stringdialog: sets last_string, as p_countdialog sets last_int
+        // p_stringdialog: sets last_string, as p_countdialog sets last_int. 647's
+        // name and clan-forum quick find code dialogs answer in last_string too.
         let mut corrupt = delay_corrupt.clone();
         corrupt.retain(|p| *p != LastString);
-        add(
-            "p_stringdialog",
-            &[PActivePlayer],
-            &[LastString],
-            &corrupt,
-            &[],
-            &[],
-            &[],
-            false,
-        );
+        for name in ["p_stringdialog", "p_namedialog", "p_clanforumqfcdialog"] {
+            add(
+                name,
+                &[PActivePlayer],
+                &[LastString],
+                &corrupt,
+                &[],
+                &[],
+                &[],
+                false,
+            );
+        }
         // p_setdisplayname: sets last_int (the outcome) and last_string (the name)
         corrupt.retain(|p| *p != LastInt);
         add(
@@ -1362,7 +1370,6 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         );
     }
     for name in [
-        "p_namedialog",
         "p_get_suggestion",
         "p_next_suggestions",
         "p_prev_suggestions",
@@ -3270,8 +3277,13 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
     for name in [
         "world_delay",
         "p_arrivedelay",
+        "p_loaddelay",
         "p_countdialog",
         "p_stringdialog",
+        "p_namedialog",
+        "p_objdialog",
+        "p_hsldialog",
+        "p_clanforumqfcdialog",
         "p_setdisplayname",
         "p_delay",
         "p_pausebutton",
