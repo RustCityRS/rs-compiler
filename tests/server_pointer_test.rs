@@ -12,6 +12,7 @@ fn project(check_pointers: bool) -> Project {
         ("last_int", vec![], vec![Int]),
         ("last_com", vec![], vec![Component]),
         ("mes", vec![String], vec![]),
+        ("mes_typed", vec![Int, String], vec![]),
         ("inv_getobj", vec![Inv, Int], vec![Obj]),
         ("inv_total", vec![Inv, Obj], vec![Int]),
         ("inv_del", vec![Inv, Obj, Int], vec![]),
@@ -124,6 +125,7 @@ fn entity_commands_require_the_selected_player() {
         "sound_speech_volume(1)",
         "sound_speech_stop",
         "last_com",
+        "mes_typed(0, \"text\")",
     ] {
         for dot in ["", "."] {
             let text = format!("[ai_timer,_]\n{dot}{command};\n");

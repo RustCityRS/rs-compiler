@@ -1265,6 +1265,16 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         false,
     );
     add(
+        "mes_typed",
+        &[ActivePlayer],
+        &[],
+        &[],
+        &[ActivePlayer2],
+        &[],
+        &[],
+        false,
+    );
+    add(
         "midi_jingle",
         &[ActivePlayer],
         &[],
