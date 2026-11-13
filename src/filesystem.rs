@@ -1381,7 +1381,7 @@ fn build_symbol_registry(
 
     if let Some(pd) = resolved_pack_dir {
         info!("  Loading packs from {}", pd.display());
-        symloader::load_packs(&mut registry, pd);
+        symloader::load_packs(&mut registry, pd)?;
         info!(
             "  Loaded {} commands, {} game vars",
             registry.commands.len(),

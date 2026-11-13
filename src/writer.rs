@@ -4,24 +4,13 @@ use std::io;
 use std::path::Path;
 
 use crate::bytecode::{CompiledScript, Instruction, Opcode, Operand};
+use crate::opcodes::is_large_operand;
 use crate::types::Type;
 
 // ── CS2 Neptune binary format constants ────────────────────────────────────
 
 /// Compiler version written into the script.dat header.
 const COMPILER_VERSION: i32 = 27;
-
-/// Returns true when the operand for `opcode` is 4 bytes (large).
-/// Returns false when the operand is 1 byte (small).
-fn is_large_operand(opcode: u16) -> bool {
-    if opcode > 100 {
-        return false;
-    }
-    match opcode {
-        21 | 22 | 23 | 38 | 39 => false, // RETURN, GOSUB, JUMP, POP_INT_DISCARD, POP_STRING_DISCARD
-        _ => true,
-    }
-}
 
 /// Map a `Type` to its CS2 type-char byte (as used in ScriptVarType.ts).
 fn type_to_char(t: Type) -> u8 {

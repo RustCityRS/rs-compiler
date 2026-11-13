@@ -322,7 +322,7 @@ pub fn registry(source_dir: &Path, pack: &Path) -> Result<SymbolRegistry> {
     let root = crate::sources::target_dir(source_dir, crate::sources::Scope::Client);
     let source_dir = root.as_path();
     let mut registry = SymbolRegistry::new();
-    load_packs(&mut registry, pack);
+    load_packs(&mut registry, pack).map_err(invalid)?;
     for (key, id) in script_ids(pack)? {
         let (trigger, name) = key[1..key.len() - 1].split_once(',').unwrap();
         registry

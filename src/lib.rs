@@ -14,6 +14,7 @@ pub mod lints;
 pub mod lsp;
 #[cfg(feature = "memprof")]
 pub mod memprof;
+pub mod opcodes;
 pub mod parser;
 pub mod pointer;
 pub mod pointer_checker;

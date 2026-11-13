@@ -681,7 +681,7 @@ fn load_packs_reads_every_config_table() {
         .unwrap();
     }
     let mut registry = SymbolRegistry::new();
-    load_packs(&mut registry, &dir);
+    load_packs(&mut registry, &dir).unwrap();
     for &(extension, ty) in tables() {
         assert_eq!(
             registry.lookup_reference(&format!("{extension}_7"), ty),

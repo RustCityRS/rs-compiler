@@ -159,7 +159,7 @@ fn server_callbacks_load_named_clientscript_signatures() {
     let project = Project::new();
     project.write(
         "pack/command.pack",
-        "5000=runclientscript\n5013=runclientscriptvararg\n",
+        "2186=runclientscript\n2187=runclientscriptvararg\n",
     );
     project.write(
         "pack/clientscript.pack",

@@ -7,6 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::clientscript::{self, hooks};
+use crate::opcodes;
 use crate::parallel::parallel_map;
 use crate::symbol::{SymbolKind, SymbolRegistry, identifier_form, normalize_comp_name};
 use crate::types::Type;
@@ -132,16 +133,17 @@ pub fn patch_command_return_types(registry: &mut SymbolRegistry) {
 ///
 /// Pack files use 2004scape format: `id=name` (one per line).
 /// This matches how 2004scape's Compiler.ts loads CompilerTypeInfo from pack files.
-pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) {
+/// Fails when `command.pack` gives a command an opcode other than its own.
+pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) -> Result<(), String> {
     if !pack_dir.exists() {
-        return;
+        return Ok(());
     }
 
     // Register engine constants FIRST (baseline defaults).
     // Pack files loaded below may overwrite these with content-specific values.
     register_engine_constants(registry);
 
-    load_commands(registry, &pack_dir.join("command.pack"));
+    load_commands(registry, &pack_dir.join("command.pack"))?;
     load_clientscript_pack(registry, &pack_dir.join("clientscript.pack"));
 
     load_game_vars(registry, &pack_dir.join("varp.pack"), "varp");
@@ -243,6 +245,7 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) {
 
     // Register type-name identifiers so they resolve to their CS2 type chars.
     register_type_chars(registry);
+    Ok(())
 }
 
 /// Load clientscript.pack: `id=[clientscript,name]` — registers CS2 script IDs
@@ -311,38 +314,40 @@ pub(crate) fn load_clientscript_signatures(registry: &mut SymbolRegistry, dir: &
     hooks::register_callbacks(registry, sources.iter().flat_map(|file| &file.scripts));
 }
 
-/// Load a game var pack file: `id=name`
-/// Type defaults to Int (matching 2004scape — var types come from config definitions).
-/// Load command.pack: `opcode=name`
-/// Game commands are provided by the engine, not hardcoded in the compiler.
-/// This matches the RuneScriptTS architecture where the consuming engine
-/// passes its `ScriptOpcodeMap` as the `symbols['command']` CompilerTypeInfo.
-fn load_commands(registry: &mut SymbolRegistry, path: &Path) {
-    let text = match fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => return,
+/// Load command.pack: `opcode=name`, the commands a revision has. Each must sit
+/// at its opcode in [`opcodes`], which is the same at every revision.
+fn load_commands(registry: &mut SymbolRegistry, path: &Path) -> Result<(), String> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok(());
     };
+    let mut wrong = Vec::new();
     for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
+        let line = line.split("//").next().unwrap_or_default().trim();
+        let Some((code, name)) = line.split_once('=') else {
             continue;
-        }
-        let (id_str, name) = match line.split_once('=') {
-            Some(pair) => pair,
-            None => continue,
         };
-        let opcode: i32 = match id_str.parse() {
-            Ok(v) => v,
-            Err(_) => continue,
+        let (Ok(code), name) = (code.parse::<i32>(), name.trim()) else {
+            continue;
         };
-        let name = name.trim().to_string();
         if name.is_empty() {
             continue;
         }
-        registry.register_command(name, opcode, Vec::new(), Vec::new());
+        match opcodes::opcode(name) {
+            Some(opcode) if i32::from(opcode) == code => {}
+            Some(opcode) => wrong.push(format!("{name} at {code} (its opcode is {opcode})")),
+            None => wrong.push(format!("{name} at {code} (not a command)")),
+        }
+        registry.register_command(name.to_string(), code, Vec::new(), Vec::new());
+    }
+    if wrong.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{}: {}", path.display(), wrong.join(", ")))
     }
 }
 
+/// Load a game var pack file: `id=name`
+/// Type defaults to Int (matching 2004scape — var types come from config definitions).
 fn load_game_vars(registry: &mut SymbolRegistry, path: &Path, category: &str) {
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
@@ -1296,6 +1301,29 @@ mod tests {
         let mut f = fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path
+    }
+
+    #[test]
+    fn command_pack_names_each_command_at_its_own_opcode() {
+        let pack = write_temp_pack(
+            "command_good.pack",
+            "2062=mes\n2093=queue* // 289's name\n2060=longqueuevararg\n",
+        );
+        let mut r = SymbolRegistry::new();
+        load_commands(&mut r, &pack).unwrap();
+        assert!(r.lookup_command("mes").is_some());
+        assert!(r.lookup_command("queue*").is_some());
+
+        let pack = write_temp_pack("command_bad.pack", "2063=mes\n9999=no_such_command\n");
+        let error = load_commands(&mut SymbolRegistry::new(), &pack).unwrap_err();
+        assert!(
+            error.contains("mes at 2063 (its opcode is 2062)"),
+            "{error}"
+        );
+        assert!(
+            error.contains("no_such_command at 9999 (not a command)"),
+            "{error}"
+        );
     }
 
     // ── 647-style pack ─────────────────────────────────────────────────
