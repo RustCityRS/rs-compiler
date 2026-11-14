@@ -321,6 +321,15 @@ impl Parser {
         self.at().kind == Kind::EndOfFile
     }
 
+    /// A vararg command's `*` touches its name (`queue*(`); a spaced one multiplies.
+    fn star_suffix(&self, name: &Token) -> bool {
+        let star = self.at();
+        star.kind == Kind::BinaryOperator
+            && star.value == "*"
+            && star.line == name.line
+            && star.column == name.column + name.value.len()
+    }
+
     fn line(&self) -> usize {
         self.at().line
     }
@@ -1779,8 +1788,7 @@ impl Parser {
                         let call_line = if self.is_sub_parser { 0 } else { self.line() };
                         let name_tok = self.next();
                         let mut name = format!(".{}", name_tok.value);
-                        // Allow * suffix for vararg commands like .queue*
-                        if self.peek_kind() == Kind::BinaryOperator && self.at().value == "*" {
+                        if self.star_suffix(&name_tok) {
                             self.next();
                             name.push('*');
                         }
@@ -1809,8 +1817,7 @@ impl Parser {
                 let tok = self.next();
                 let mut name = tok.value.clone();
 
-                // Allow * suffix for vararg commands like queue*, longqueue*
-                if self.peek_kind() == Kind::BinaryOperator && self.at().value == "*" {
+                if self.star_suffix(&tok) {
                     self.next();
                     name.push('*');
                 }
@@ -1876,6 +1883,10 @@ impl Parser {
             Kind::BinaryOperator if self.at().value == "-" => {
                 // Unary negation - constant fold numeric literals
                 self.next();
+                if self.peek_kind() == Kind::Number && self.at().value == "2147483648" {
+                    self.next();
+                    return Ok(Expr::IntLiteral(i32::MIN));
+                }
                 let expr = self.parse_primary()?;
                 match expr {
                     Expr::IntLiteral(n) => Ok(Expr::IntLiteral(-n)),

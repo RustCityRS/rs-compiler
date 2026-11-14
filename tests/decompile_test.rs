@@ -869,3 +869,227 @@ fn malformed_binary_reports_errors_without_panicking_or_unbounded_allocations() 
         let _ = Script::decode(&bytes, &format);
     }
 }
+
+#[test]
+fn empty_switches_and_an_empty_last_case_roundtrip() {
+    let format =
+        Format::parse("0=PushConstantInt\n1=PushIntLocal\n2=Switch\n3=Branch\n4=Return\n").unwrap();
+    let source = Source::parse(
+        "[proc,value](int $value)(int)\n\
+         switch_int ($value) {\n}\n\
+         switch_int ($value) {\n    case 1 :\n        return(1);\n    case 2 :\n}\n\
+         return(0);\n",
+        Path::new("virtual:input"),
+    )
+    .unwrap();
+    let ids = HashMap::from([("[proc,value]".into(), 1)]);
+    let mut registry = SymbolRegistry::new();
+    clientscript::register(&source.file, &ids, &mut registry).unwrap();
+    let original = source.compile(&registry, &format).unwrap().remove(0).1;
+    let script = Script::decode(&original, &format).unwrap();
+    assert_eq!(script.operations[2], runec::bytecode::Opcode::PushIntLocal);
+    let scripts = HashMap::from([(1, script)]);
+    let signatures = decompile::signatures(&scripts);
+    let text = decompile::decompile(
+        &scripts[&1],
+        1,
+        &TestNames,
+        &signatures,
+        &HashMap::new(),
+        &[],
+        &registry,
+    )
+    .unwrap();
+    assert!(!text.contains("__"), "{text}");
+    let restored = Source::parse(&text, Path::new("virtual:restored")).unwrap();
+    assert_eq!(
+        original,
+        restored.compile(&registry, &format).unwrap().remove(0).1
+    );
+}
+
+#[test]
+fn a_quoted_component_in_a_hook_keeps_the_arguments_after_it_in_place() {
+    struct Names;
+    impl decompile::Names for Names {
+        fn name(&self, kind: &str, id: u32) -> String {
+            TestNames.name(kind, id)
+        }
+        fn component_name(&self, _: u32, component: u32) -> String {
+            format!("{component}_slot")
+        }
+    }
+    let format =
+        Format::parse("0=PushConstantInt\n3=PushConstantString\n21=Return\n33=PushIntLocal\n34=PopIntLocal\n1407=set_hook\n")
+            .unwrap();
+    let mut registry = SymbolRegistry::new();
+    let params = vec![Type::ClientScript, Type::String];
+    registry.register_command("set_hook".into(), 1407, params.clone(), vec![]);
+    registry.set_command_behavior("set_hook", true, Some(false), None);
+    registry.register_entity_id("interface_3:7_slot".into(), Type::Component, 3 << 16 | 7);
+    let source = Source::parse(
+        "[proc,value]\ndef_int $count = 5;\nset_hook(callback, 196615, $count, 9, \"Iii\");\n[clientscript,callback](int $a, int $b, int $c)\n",
+        Path::new("hooks.cs2"),
+    )
+    .unwrap();
+    clientscript::register(
+        &source.file,
+        &HashMap::from([
+            ("[proc,value]".into(), 1),
+            ("[clientscript,callback]".into(), 2),
+        ]),
+        &mut registry,
+    )
+    .unwrap();
+    let original: HashMap<_, _> = source
+        .compile(&registry, &format)
+        .unwrap()
+        .into_iter()
+        .map(|(id, bytes)| (id as u32, bytes))
+        .collect();
+    let scripts = original
+        .iter()
+        .map(|(&id, bytes)| (id, Script::decode(bytes, &format).unwrap()))
+        .collect();
+    let commands = vec![clientscript::Command {
+        opcode: 1407,
+        name: "set_hook".into(),
+        params,
+        returns: vec![],
+        component_last: false,
+        kind: clientscript::CommandKind::Hook,
+    }];
+    let signatures = decompile::infer_signatures(
+        &scripts,
+        &[],
+        &Names,
+        &HashMap::new(),
+        &commands,
+        &mut registry,
+    )
+    .unwrap();
+    assert_eq!(
+        signatures[&2].param_types,
+        vec![Type::Component, Type::Int, Type::Int]
+    );
+    let text = decompile::decompile(
+        &scripts[&1],
+        1,
+        &Names,
+        &signatures,
+        &HashMap::new(),
+        &commands,
+        &registry,
+    )
+    .unwrap();
+    assert!(text.contains("def_int $int0 = 5;"), "{text}");
+    assert_eq!(
+        Source::parse(&text, Path::new("rebuilt.cs2"))
+            .unwrap()
+            .compile(&registry, &format)
+            .unwrap()
+            .remove(0)
+            .1,
+        original[&1]
+    );
+}
+
+#[test]
+fn a_format_without_bool_branches_compares_with_the_constant() {
+    let format = Format::parse(
+        "0=PushConstantInt\n1=PushIntLocal\n2=BranchEquals\n3=Branch\n4=Return\n5=BranchNot\n",
+    )
+    .unwrap();
+    let source = Source::parse(
+        "[proc,value](int $value)(int)\n\
+         if ($value = 1) {\n    return(2);\n}\n\
+         if ($value = 0 | $value = 1) {\n    return(3);\n}\n\
+         return(0);\n",
+        Path::new("virtual:input"),
+    )
+    .unwrap();
+    let ids = HashMap::from([("[proc,value]".into(), 1)]);
+    let mut registry = SymbolRegistry::new();
+    clientscript::register(&source.file, &ids, &mut registry).unwrap();
+    let original = source.compile(&registry, &format).unwrap().remove(0).1;
+    let script = Script::decode(&original, &format).unwrap();
+    assert!(
+        !script.operations.contains(&Opcode::BranchIfTrue)
+            && !script.operations.contains(&Opcode::BranchIfFalse),
+        "{:?}",
+        script.operations
+    );
+    let scripts = HashMap::from([(1, script)]);
+    let signatures = decompile::signatures(&scripts);
+    let text = decompile::decompile(
+        &scripts[&1],
+        1,
+        &TestNames,
+        &signatures,
+        &HashMap::new(),
+        &[],
+        &registry,
+    )
+    .unwrap();
+    assert!(text.contains("if ($int0 = 1)"), "{text}");
+    let restored = Source::parse(&text, Path::new("virtual:restored")).unwrap();
+    assert_eq!(
+        original,
+        restored.compile(&registry, &format).unwrap().remove(0).1
+    );
+}
+
+fn roundtrip_inferred(source: &str) -> (Vec<Type>, String) {
+    let format = Format::parse(
+        "0=PushConstantInt\n1=PushIntLocal\n2=BranchEquals\n3=Branch\n4=Return\n5=BranchIfTrue\n6=BranchIfFalse\n7=BranchNot\n",
+    )
+    .unwrap();
+    let source = Source::parse(source, Path::new("virtual:input")).unwrap();
+    let ids = HashMap::from([("[proc,value]".into(), 1)]);
+    let mut registry = SymbolRegistry::new();
+    clientscript::register(&source.file, &ids, &mut registry).unwrap();
+    let original = source.compile(&registry, &format).unwrap().remove(0).1;
+    let scripts = HashMap::from([(1, Script::decode(&original, &format).unwrap())]);
+    let signatures = decompile::infer_signatures(
+        &scripts,
+        &[],
+        &TestNames,
+        &HashMap::new(),
+        &[],
+        &mut registry,
+    )
+    .unwrap();
+    let text = decompile::decompile(
+        &scripts[&1],
+        1,
+        &TestNames,
+        &signatures,
+        &HashMap::new(),
+        &[],
+        &registry,
+    )
+    .unwrap();
+    let restored = Source::parse(&text, Path::new("virtual:restored")).unwrap();
+    assert_eq!(
+        original,
+        restored.compile(&registry, &format).unwrap().remove(0).1,
+        "{text}"
+    );
+    (signatures[&1].return_types.clone(), text)
+}
+
+#[test]
+fn an_end_that_defaults_to_minus_one_is_not_an_int() {
+    let (returns, text) =
+        roundtrip_inferred("[proc,value](int $v)(any)\nif ($v = 1) {\n    return(5);\n}\n");
+    assert_eq!(returns, vec![Type::Any]);
+    assert!(!text.contains("return(-1)"), "{text}");
+}
+
+#[test]
+fn a_written_end_before_the_default_one_stays() {
+    let (_, text) = roundtrip_inferred(
+        "[proc,value](int $v)(int, int)\nif ($v = 1) {\n    return($v, $v);\n}\nreturn(0, -1);\nreturn(0, 0);\n",
+    );
+    assert!(text.contains("return(0, -1);"), "{text}");
+}

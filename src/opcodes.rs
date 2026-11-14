@@ -78,6 +78,13 @@ opcodes! {
     OBJ_BRANCH_NOT = 87 => "obj_branch_not";
     PUSH_VARCONBIT = 88 => "push_varconbit";
     POP_VARCONBIT = 89 => "pop_varconbit";
+    PUSH_VARCLAN_BIT = 90 => "push_varclan_bit";
+    PUSH_VARCLAN_LONG = 91 => "push_varclan_long";
+    PUSH_VARCLAN_STRING = 92 => "push_varclan_string";
+    PUSH_VARPLAYER = 93 => "push_varplayer";
+    PUSH_VARPLAYER_BIT = 94 => "push_varplayer_bit";
+    PUSH_VARNPC = 95 => "push_varnpc";
+    PUSH_VARNPC_BIT = 96 => "push_varnpc_bit";
     PUSH_CLANSETTING_INT = 112 => "push_clansetting_int";
     PUSH_CLANSETTING_VARBIT = 113 => "push_clansetting_varbit";
     PUSH_CLANSETTING_LONG = 114 => "push_clansetting_long";
@@ -113,6 +120,7 @@ opcodes! {
     PROJANIM_HALFSQ = 1026 => "projanim_halfsq";
     SOUND_VORBIS_AREA = 1027 => "sound_vorbis_area";
     TEXT_COORD = 1028 => "text_coord";
+    MAP_LOBBY = 1029 => "map_lobby";
 
     // Player
     AFK_EVENT = 2000 => "afk_event";

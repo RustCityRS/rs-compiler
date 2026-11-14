@@ -239,6 +239,10 @@ fn declarations(file: &Path) -> Vec<(String, String)> {
             if ext == "varc" {
                 declare("varc", name);
                 declare("varcstr", name);
+            } else if ext == "varclan" {
+                for kind in ["varclan", "varclan_bit", "varclan_long", "varclan_string"] {
+                    declare(kind, name);
+                }
             } else if ext == "varclansetting" {
                 for kind in [
                     "varclansetting",
@@ -461,6 +465,9 @@ impl Visibility {
                 | "varc"
                 | "varcstr"
                 | "varclan"
+                | "varclan_bit"
+                | "varclan_long"
+                | "varclan_string"
                 | "varobj"
                 | "varnbit"
                 | "varcon"

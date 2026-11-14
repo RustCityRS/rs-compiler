@@ -347,6 +347,19 @@ fn switch(
         }
     }
     cases.sort_by_key(|(position, _)| *position);
+    if cases.is_empty() && default_pos == i + 1 {
+        return Some((
+            Statement::Switch {
+                switch_type: "switch_int".into(),
+                expr: expr.clone(),
+                cases: Vec::new(),
+                default: None,
+                default_index: 0,
+                line: 0,
+            },
+            i + 1,
+        ));
+    }
     if default_pos != i + 1 && cases.first()?.0 != i + 2 {
         return None;
     }
@@ -363,18 +376,34 @@ fn switch(
             .flatten()
     })?;
     let end = *labels.get(&end_label)?;
-    if end <= i || default_pos > end || cases.iter().any(|(pos, _)| *pos >= end) {
+    // The last case can be empty, and its table entry then points at the end.
+    let empty_last = cases.last().is_some_and(|(pos, _)| *pos == end);
+    if end <= i
+        || default_pos > end
+        || cases
+            .iter()
+            .enumerate()
+            .any(|(index, (pos, _))| *pos > end || (*pos == end && index + 1 != cases.len()))
+    {
         return None;
     }
-    let trailing_jump = default_pos == end
+    let trailing_jump = !empty_last
+        && default_pos == end
         && label(body.get(end.checked_sub(1)?)?, "__jump").as_ref() == Some(&end_label);
     let mut result = Vec::new();
     for (index, (pos, values)) in cases.iter().enumerate() {
+        if *pos == end {
+            result.push(SwitchCase {
+                values: values.clone(),
+                body: Vec::new(),
+            });
+            continue;
+        }
         let mut next = cases.get(index + 1).map_or(end, |(pos, _)| *pos);
         if default_pos > *pos {
             next = next.min(default_pos);
         }
-        let stop = if next == end {
+        let stop = if next == end && !(empty_last && index + 2 == cases.len()) {
             next - usize::from(trailing_jump)
         } else {
             if label(body.get(next.checked_sub(1)?)?, "__jump").as_ref() != Some(&end_label) {
@@ -490,8 +519,10 @@ pub fn generate(
         }
     }
     merge_declarations(&mut script.body);
-    if let Some(Statement::Return { values, .. }) = script.body.last()
+    if let Some((Statement::Return { values, .. }, rest)) = script.body.split_last()
         && !keep_end
+        // Dropped, the end must still be the one the compiler adds back.
+        && !inference::written_end(rest, &script.return_types)
         && values.len() == script.return_types.len()
         && values
             .iter()

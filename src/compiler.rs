@@ -3,7 +3,7 @@ use crate::arguments::{
     proc_hints, stack_hints,
 };
 use crate::bytecode::*;
-use crate::clientscript::decompile::inference::collect_returns;
+use crate::clientscript::decompile::inference::written_end;
 use crate::clientscript::hooks;
 use crate::parser::*;
 use crate::symbol::{SymbolKind, SymbolRegistry, SymbolTable};
@@ -158,41 +158,7 @@ impl<'a> Compiler<'a> {
             self.compile_statement(stmt, &mut compiled, &mut locals);
         }
 
-        // A script's end is written out when it isn't the one its types give
-        // it: a second return in a row, or defaults with a -1 among them where
-        // the script's other returns hand on values.
-        let written_end = match script.body.as_slice() {
-            [.., Statement::Return { .. }, Statement::Return { .. }] => true,
-            [rest @ .., Statement::Return { values, .. }] => {
-                let literal = |value: &Expr| {
-                    matches!(
-                        value,
-                        Expr::IntLiteral(_) | Expr::StringLiteral(_) | Expr::LongLiteral(_)
-                    )
-                };
-                let mut others = vec![Vec::new(); values.len()];
-                collect_returns(rest, &mut others);
-                values.len() > 1
-                    && values.len() == script.return_types.len()
-                    && values
-                        .iter()
-                        .any(|value| matches!(value, Expr::IntLiteral(-1)))
-                    && values
-                        .iter()
-                        .zip(&script.return_types)
-                        .all(|(value, ty)| match value {
-                            Expr::IntLiteral(value) => {
-                                *value == -1 || *value == ty.default_return_value()
-                            }
-                            Expr::StringLiteral(value) => value.is_empty(),
-                            Expr::LongLiteral(value) => *value == 0,
-                            _ => false,
-                        })
-                    && !others[0].is_empty()
-                    && others.iter().flatten().any(|value| !literal(value))
-            }
-            _ => false,
-        };
+        let written_end = written_end(&script.body, &script.return_types);
         let implicit_return = self.implicit_return && !(self.client && written_end);
         for ret_type in script.return_types.iter().filter(|_| implicit_return) {
             match ret_type.base_type() {
@@ -1084,7 +1050,10 @@ impl<'a> Compiler<'a> {
         // position of the no-match Branch (when default is not first)
         let default_first = default_index == 0 && default.is_some();
 
-        let default_branch_pos = if default_first {
+        let default_branch_pos = if cases.is_empty() && default.is_none() {
+            // An empty switch only consumes its value: nothing follows it to skip.
+            None
+        } else if default_first {
             // Default body at sw_pos+1 (direct fall-through, no Branch needed at sw_pos+1)
             if let Some(default_stmts) = default {
                 for s in default_stmts {
@@ -1891,7 +1860,12 @@ impl<'a> Compiler<'a> {
                         || lookup_name == "db_find_refine"
                         || lookup_name == "db_findbyindex"
                         || lookup_name == "db_find_with_count"
-                        || lookup_name == "param")
+                        || lookup_name == "param"
+                        || self
+                            .registry
+                            .type_arguments
+                            .get(lookup_name)
+                            .is_some_and(|&n| i < n))
                         && (i == 0 || i == 1)
                         && let Expr::Identifier(n) = arg
                         && let Some(&tc) = self.registry.type_chars.get(n.as_str())
@@ -2773,6 +2747,50 @@ mod tests {
         assert_eq!(
             Compiler::compute_lookup_key("opheld1", "imp", &r),
             9952 * 1024 + 512 + 140
+        );
+    }
+
+    #[test]
+    fn a_type_argument_names_the_type_before_any_command() {
+        let mut r = seed_registry();
+        r.register_command("stat".into(), 3, vec![Type::Stat], vec![Type::Int]);
+        r.register_command(
+            "enum_hasoutput".into(),
+            4,
+            vec![Type::Int, Type::Enum, Type::Int],
+            vec![Type::Boolean],
+        );
+        r.type_chars.insert("stat".into(), 'S' as i32);
+        r.type_arguments.insert("enum_hasoutput".into(), 1);
+        let mut c = Compiler::new(&r);
+        let mut out = CompiledScript::new("t".into(), 0);
+        let mut locals = SymbolTable::new();
+        c.compile_expr_hinted(
+            &Expr::CommandCall {
+                name: "enum_hasoutput".into(),
+                args: vec![
+                    Expr::Identifier("stat".into()),
+                    Expr::IntLiteral(5472),
+                    Expr::IntLiteral(0),
+                ],
+                arg_lines: vec![],
+                call_line: 0,
+            },
+            &mut out,
+            &mut locals,
+            None,
+        );
+        assert!(
+            matches!(out.instructions[0].operand, Operand::Int(83)),
+            "{:?}",
+            out.instructions
+        );
+        assert!(
+            !out.instructions
+                .iter()
+                .any(|i| i.opcode == Opcode::Command && matches!(i.operand, Operand::Int(3))),
+            "{:?}",
+            out.instructions
         );
     }
 

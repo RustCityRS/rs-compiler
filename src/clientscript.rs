@@ -362,6 +362,16 @@ pub fn registry(source_dir: &Path, pack: &Path) -> Result<SymbolRegistry> {
                 command.kind == CommandKind::HookComponent,
             );
         }
+        let type_arguments = match command.kind {
+            CommandKind::Enum => 2,
+            CommandKind::EnumOutput => 1,
+            _ => 0,
+        };
+        if type_arguments > 0 {
+            registry
+                .type_arguments
+                .insert(command.name.clone(), type_arguments);
+        }
         let dynamic = match command.kind {
             CommandKind::Enum => Some(ReturnType::TypeArgument(1)),
             CommandKind::Param => Some(ReturnType::ParamArgument(
@@ -471,14 +481,24 @@ fn load_varc_types(registry: &mut SymbolRegistry, files: &[PathBuf]) -> Result<(
     Ok(())
 }
 
-/// A clan setting's opcodes follow its type, which only its config declares:
-/// `basevar` for a bit range, otherwise `type`.
+/// A clan setting's or clan var's opcodes follow its type, which only its
+/// config declares: `basevar` for a bit range, otherwise `type`.
 pub(crate) fn load_clan_settings(
     registry: &mut SymbolRegistry,
     files: &[PathBuf],
     pack: &Path,
 ) -> Result<()> {
-    let ids: HashMap<String, i32> = fs::read_to_string(pack.join("varclansetting.pack"))
+    load_clan_vars(registry, files, pack, "varclansetting")?;
+    load_clan_vars(registry, files, pack, "varclan")
+}
+
+fn load_clan_vars(
+    registry: &mut SymbolRegistry,
+    files: &[PathBuf],
+    pack: &Path,
+    ext: &str,
+) -> Result<()> {
+    let ids: HashMap<String, i32> = fs::read_to_string(pack.join(format!("{ext}.pack")))
         .unwrap_or_default()
         .lines()
         .filter_map(|line| line.split_once('='))
@@ -488,14 +508,18 @@ pub(crate) fn load_clan_settings(
         let id = ids
             .get(name)
             .copied()
-            .or_else(|| name.strip_prefix("varclansetting_")?.parse().ok())
-            .ok_or_else(|| invalid(format!("Unknown clan setting {name}")))?;
-        let (category, ty) = match (bits, ty) {
-            (true, _) => ("clansetting_varbit", Type::Int),
-            (_, Some("int" | "bit")) => ("clansetting_int", Type::Int),
-            (_, Some("long")) => ("clansetting_long", Type::Long),
-            (_, Some("clanforumqfc")) => ("clansetting_long", Type::ClanForumQfc),
-            (_, Some("string")) => ("clansetting_string", Type::String),
+            .or_else(|| name.strip_prefix(&format!("{ext}_"))?.parse().ok())
+            .ok_or_else(|| invalid(format!("Unknown {ext} {name}")))?;
+        let (category, ty) = match (ext, bits, ty) {
+            ("varclan", true, _) => ("varclan_bit", Type::Int),
+            ("varclan", _, Some("long" | "clanforumqfc")) => ("varclan_long", Type::Long),
+            ("varclan", _, Some("string")) => ("varclan_string", Type::String),
+            ("varclan", _, _) => ("varclan", Type::Int),
+            (_, true, _) => ("clansetting_varbit", Type::Int),
+            (_, _, Some("int" | "bit")) => ("clansetting_int", Type::Int),
+            (_, _, Some("long")) => ("clansetting_long", Type::Long),
+            (_, _, Some("clanforumqfc")) => ("clansetting_long", Type::ClanForumQfc),
+            (_, _, Some("string")) => ("clansetting_string", Type::String),
             _ => {
                 return Err(invalid(format!(
                     "Clan setting {name} has no opcodes for type {ty:?}"
@@ -506,7 +530,7 @@ pub(crate) fn load_clan_settings(
         Ok(())
     };
     for file in files {
-        if file.extension().is_none_or(|ext| ext != "varclansetting") {
+        if file.extension().is_none_or(|file_ext| file_ext != ext) {
             continue;
         }
         let text = fs::read_to_string(file)?;
@@ -783,11 +807,17 @@ pub fn encode(script: &CompiledScript, format: &Format) -> Result<Vec<u8>> {
 }
 
 pub fn encode_named(script: &CompiledScript, name: &str, format: &Format) -> Result<Vec<u8>> {
+    // Without BranchIfTrue/BranchIfFalse a format compares with the constant.
+    let lowered = |opcode: Opcode| {
+        matches!(opcode, Opcode::BranchIfTrue | Opcode::BranchIfFalse) && !format.has(opcode)
+    };
     let mut positions = Vec::with_capacity(script.instructions.len() + 1);
     let mut count = 0;
     for instruction in &script.instructions {
         positions.push(count);
-        if instruction.opcode != Opcode::LineNumber {
+        if lowered(instruction.opcode) {
+            count += 2;
+        } else if instruction.opcode != Opcode::LineNumber {
             count += 1;
         }
     }
@@ -807,6 +837,24 @@ pub fn encode_named(script: &CompiledScript, name: &str, format: &Format) -> Res
             let operand = value as i32;
             out.extend_from_slice(&opcode.to_be_bytes());
             format.width(opcode).integer(&mut out, operand as i64)?;
+            continue;
+        }
+        if lowered(instruction.opcode) {
+            let &Operand::JumpTarget(target) = &instruction.operand else {
+                return Err(invalid("Invalid branch operand"));
+            };
+            let (push, push_width) = format.instruction(Opcode::PushConstantInt)?;
+            out.extend_from_slice(&push.to_be_bytes());
+            push_width.integer(
+                &mut out,
+                i64::from(instruction.opcode == Opcode::BranchIfTrue),
+            )?;
+            let (branch, branch_width) = format.instruction(Opcode::BranchEquals)?;
+            let target = positions
+                .get(target)
+                .ok_or_else(|| invalid("Invalid branch target"))?;
+            out.extend_from_slice(&branch.to_be_bytes());
+            branch_width.integer(&mut out, i64::from(*target - positions[i] - 2))?;
             continue;
         }
         let (opcode, width) = match instruction.opcode {
@@ -972,6 +1020,39 @@ mod tests {
                 panic!("{name} is not registered");
             };
             assert_eq!((*var_id, category.as_str()), (id, expected), "{name}");
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn clan_vars_take_their_opcodes_from_their_type() {
+        let dir = std::env::temp_dir().join(format!("runec_varclan_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("all.varclan");
+        fs::write(
+            &file,
+            "// 0\n[varclan_0]\ntype=int\n\n// 1\n[named]\ntype=long\n\n\
+             // 2\n[varclan_2]\ntype=string\n\n\
+             // 3\n[varclan_3]\ntype=bit\nbasevar=0\nstartbit=0\nendbit=6\n",
+        )
+        .unwrap();
+        fs::write(dir.join("varclan.pack"), "1=named\n").unwrap();
+        let mut registry = SymbolRegistry::new();
+        load_clan_settings(&mut registry, std::slice::from_ref(&file), &dir).unwrap();
+        for (name, id, expected, opcode) in [
+            ("varclan_0", 0, "varclan", Opcode::PushVarClan),
+            ("named", 1, "varclan_long", Opcode::PushVarClanLong),
+            ("varclan_2", 2, "varclan_string", Opcode::PushVarClanString),
+            ("varclan_3", 3, "varclan_bit", Opcode::PushVarClanBit),
+        ] {
+            let Some(SymbolKind::GameVar {
+                var_id, category, ..
+            }) = registry.lookup_game_var(name).map(|symbol| &symbol.kind)
+            else {
+                panic!("{name} is not registered");
+            };
+            assert_eq!((*var_id, category.as_str()), (id, expected), "{name}");
+            assert_eq!(Opcode::push_var(category), opcode, "{name}");
         }
         fs::remove_dir_all(dir).unwrap();
     }

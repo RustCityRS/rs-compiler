@@ -101,6 +101,10 @@ impl Format {
         })
     }
 
+    pub fn has(&self, opcode: Opcode) -> bool {
+        self.instructions.contains_key(&opcode)
+    }
+
     pub fn instruction(&self, opcode: Opcode) -> Result<(u16, Width)> {
         self.instructions
             .get(&opcode)
@@ -159,5 +163,28 @@ impl Format {
             .get(&code)
             .copied()
             .ok_or_else(|| invalid(format!("Undefined opcode {code}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_var_instructions_take_an_int_operand() {
+        let format =
+            Format::parse("643=PushVarClan\n274=PushVarClanBit\n47=PushVarPlayer\n").unwrap();
+        assert_eq!(
+            format.decode(643).unwrap(),
+            (Opcode::PushVarClan, Width::Int)
+        );
+        assert_eq!(
+            format.decode(274).unwrap(),
+            (Opcode::PushVarClanBit, Width::Int)
+        );
+        assert_eq!(
+            format.decode(47).unwrap(),
+            (Opcode::PushVarPlayer, Width::Int)
+        );
     }
 }

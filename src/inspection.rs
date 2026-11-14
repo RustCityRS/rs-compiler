@@ -674,6 +674,9 @@ fn instruction_effect(instruction: &Instruction, registry: &SymbolRegistry) -> O
             | PushVarcInt
             | PushVarcString
             | PushVarClan
+            | PushVarClanBit
+            | PushVarClanLong
+            | PushVarClanString
             | PushVarObj
             | PushVarnBit
             | PushVarCon

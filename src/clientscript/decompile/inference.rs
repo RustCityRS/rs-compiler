@@ -31,6 +31,8 @@ struct Scope {
     arrays: HashMap<i32, usize>,
     /// Arrays the script reads without defining: they come in as parameters.
     array_params: HashMap<i32, usize>,
+    /// Returns the script's own end gives -1: their type isn't an int.
+    negative_returns: Vec<usize>,
 }
 
 pub struct Inferred {
@@ -374,7 +376,12 @@ impl Inference<'_> {
                             .iter()
                             .skip(1)
                             .take(types.len())
-                            .flat_map(|arg| self.expr(arg, scope, None))
+                            .zip(&types)
+                            .flat_map(|(arg, &ty)| {
+                                // A quoted name is a reference of the type the hook takes.
+                                let hint = matches!(arg, Expr::StringLiteral(_)).then_some(ty);
+                                self.expr(arg, scope, hint)
+                            })
                             .collect();
                         self.bind(&values, &callee.params);
                         for base in [BaseVarType::Integer, BaseVarType::String, BaseVarType::Long] {
@@ -572,6 +579,44 @@ impl Inference<'_> {
     }
 }
 
+/// A script's end is written out when it isn't the one its types give
+/// it: a second return in a row, or defaults with a -1 among them where
+/// the script's other returns hand on values.
+pub(crate) fn written_end(body: &[Statement], return_types: &[Type]) -> bool {
+    match body {
+        [.., Statement::Return { .. }, Statement::Return { .. }] => true,
+        [rest @ .., Statement::Return { values, .. }] => {
+            let literal = |value: &Expr| {
+                matches!(
+                    value,
+                    Expr::IntLiteral(_) | Expr::StringLiteral(_) | Expr::LongLiteral(_)
+                )
+            };
+            let mut others = vec![Vec::new(); values.len()];
+            collect_returns(rest, &mut others);
+            values.len() > 1
+                && values.len() == return_types.len()
+                && values
+                    .iter()
+                    .any(|value| matches!(value, Expr::IntLiteral(-1)))
+                && values
+                    .iter()
+                    .zip(return_types)
+                    .all(|(value, ty)| match value {
+                        Expr::IntLiteral(value) => {
+                            *value == -1 || *value == ty.default_return_value()
+                        }
+                        Expr::StringLiteral(value) => value.is_empty(),
+                        Expr::LongLiteral(value) => *value == 0,
+                        _ => false,
+                    })
+                && !others[0].is_empty()
+                && others.iter().flatten().any(|value| !literal(value))
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn collect_returns(body: &[Statement], returned: &mut [Vec<Expr>]) {
     for statement in body {
         match statement {
@@ -653,6 +698,7 @@ pub fn infer(
             returns: Vec::new(),
             arrays: HashMap::new(),
             array_params: HashMap::new(),
+            negative_returns: Vec::new(),
         };
         for param in &script.params {
             let id = inference.node(param.param_type);
@@ -679,6 +725,9 @@ pub fn infer(
             let mut returned = vec![Vec::new(); values.len()];
             collect_returns(&script.body, &mut returned);
             for (index, value) in values.iter().enumerate() {
+                if matches!(value, Expr::IntLiteral(-1)) {
+                    scope.negative_returns.push(index);
+                }
                 if matches!(value, Expr::IntLiteral(-1))
                     && returned[index]
                         .iter()
@@ -748,6 +797,7 @@ pub fn infer(
             let scope = inference.scopes[&key].clone();
             let order = inference.orders.get(&key).cloned();
             let array_params = scope.array_params.clone();
+            let negative_returns = scope.negative_returns.clone();
             let mut locals = scope.locals;
             for (array, id) in scope.arrays {
                 locals.insert(format!("array{array}"), id);
@@ -770,7 +820,11 @@ pub fn infer(
                     returns: scope
                         .returns
                         .into_iter()
-                        .map(|id| inference.ty(id))
+                        .enumerate()
+                        .map(|(index, id)| match inference.ty(id) {
+                            Type::Int if negative_returns.contains(&index) => Type::Any,
+                            ty => ty,
+                        })
                         .collect(),
                     locals: locals
                         .into_iter()

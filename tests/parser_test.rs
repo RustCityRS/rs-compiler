@@ -348,3 +348,34 @@ fn bare_identifiers_that_are_not_tags_are_still_commands() {
         "<displayname> is a command call: {body}"
     );
 }
+
+#[test]
+fn the_smallest_int_literal_parses() {
+    let file = parse_source("[proc,smallest]()(int)\nreturn(-2147483648);\n");
+    assert!(matches!(
+        &file.scripts[0].body[0],
+        runec::parser::Statement::Return { values, .. }
+            if matches!(values[..], [runec::parser::Expr::IntLiteral(i32::MIN)])
+    ));
+}
+
+#[test]
+fn a_spaced_star_after_a_command_multiplies() {
+    use runec::parser::{Expr, Statement};
+    let file = parse_source(
+        "[proc,star](int $n)(int)\nqueue*(walk, 0)($n);\nreturn(calc(cc_getid * (2 + $n)));\n",
+    );
+    let body = &file.scripts[0].body;
+    assert!(
+        matches!(
+            &body[0],
+            Statement::Expression { expr: Expr::CommandCall { name, .. }, .. } if name == "queue*"
+        ),
+        "{body:?}"
+    );
+    let Statement::Return { values, .. } = &body[1] else {
+        panic!("{body:?}");
+    };
+    assert!(!format!("{values:?}").contains("cc_getid*"), "{values:?}");
+    assert!(format!("{values:?}").contains("Mul"), "{values:?}");
+}

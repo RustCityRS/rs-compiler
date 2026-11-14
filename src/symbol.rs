@@ -462,6 +462,8 @@ pub struct SymbolRegistry {
     pub(crate) profile: Option<Arc<crate::environment::EngineProfile>>,
     pub(crate) visibility: Arc<crate::sources::Visibility>,
     pub(crate) dynamic_returns: HashMap<String, ReturnType>,
+    /// Leading arguments that name types (`enum(int, obj, ...)`), by command.
+    pub(crate) type_arguments: HashMap<String, usize>,
     pub(crate) param_types: HashMap<i32, Type>,
     pub(crate) stack_commands: HashSet<String>,
     component_first_commands: HashSet<String>,
@@ -643,6 +645,7 @@ impl SymbolRegistry {
         self.command_pointer_overrides.clear();
         self.hook_commands.clear();
         self.dynamic_returns.clear();
+        self.type_arguments.clear();
     }
 
     pub fn set_command_behavior(
@@ -712,6 +715,7 @@ impl SymbolRegistry {
             profile: None,
             visibility: Arc::default(),
             dynamic_returns: HashMap::new(),
+            type_arguments: HashMap::new(),
             param_types: HashMap::new(),
             stack_commands: HashSet::new(),
             component_first_commands: HashSet::new(),
