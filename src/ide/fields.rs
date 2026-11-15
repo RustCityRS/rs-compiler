@@ -166,7 +166,7 @@ const PARTICLEEFFECTOR: &[Field] = &[
     ("angle", NUMBER),
     ("falloff", NUMBER),
     ("forcedirection", NUMBER),
-    ("forcetype", NUMBER),
+    ("forcetype", FLAG),
     ("reversedirection", FLAG),
     ("unknown", NUMBER),
 ];
@@ -377,6 +377,7 @@ const LOC: &[Field] = &[
     ("membersop", TEXT),
     ("msi", &[Config(Type::Msi)]),
     ("msirotate", FLAG),
+    ("msirotateoffset", NUMBER),
     ("msimirror", FLAG),
     ("postoffsetx", NUMBER),
     ("postoffsety", NUMBER),
