@@ -135,6 +135,15 @@ pub fn patch_command_return_types(registry: &mut SymbolRegistry) {
 /// This matches how 2004scape's Compiler.ts loads CompilerTypeInfo from pack files.
 /// Fails when `command.pack` gives a command an opcode other than its own.
 pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) -> Result<(), String> {
+    load_packs_with_commands(registry, pack_dir, "command.pack")
+}
+
+/// [`load_packs`] with another `opcode=name` command pack, such as `ls2_command.pack`.
+pub(crate) fn load_packs_with_commands(
+    registry: &mut SymbolRegistry,
+    pack_dir: &Path,
+    commands: &str,
+) -> Result<(), String> {
     if !pack_dir.exists() {
         return Ok(());
     }
@@ -143,7 +152,7 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) -> Result<(), 
     // Pack files loaded below may overwrite these with content-specific values.
     register_engine_constants(registry);
 
-    load_commands(registry, &pack_dir.join("command.pack"))?;
+    load_commands(registry, &pack_dir.join(commands))?;
     load_clientscript_pack(registry, &pack_dir.join("clientscript.pack"));
 
     load_game_vars(registry, &pack_dir.join("varp.pack"), "varp");
@@ -1232,8 +1241,8 @@ fn register_engine_constants(registry: &mut SymbolRegistry) {
         ("runecraft", 20),
         ("hunter", 21),
         ("construction", 22),
-        ("summoning", 23),
-        ("dungeoneering", 24),
+        ("animallore", 23),
+        ("rand", 24),
     ];
     for &(name, id) in stats {
         registry.register_entity_id(name.to_string(), Type::Stat, id);

@@ -15,7 +15,7 @@ use std::path::Path;
 
 pub(super) fn entity_type(kind: &str) -> Option<Type> {
     match kind {
-        "command" | "cs2_command" => None,
+        "command" | "cs2_command" | "ls2_command" => None,
         "if" | "interface" | "overlayinterface" => Some(Type::Interface),
         "idk" => Some(Type::IdKit),
         "mesanim" => Some(Type::MesAnim),
@@ -33,7 +33,7 @@ pub(super) fn key(kind: &str, name: &str) -> String {
         | "varclan" | "varobj" | "varnbit" | "varcon" | "varconbit" => {
             format!("gamevar:{name}")
         }
-        "command" | "cs2_command" => format!("command:{name}"),
+        "command" | "cs2_command" | "ls2_command" => format!("command:{name}"),
         _ => format!(
             "config:{}:{name}",
             entity_type(kind).map_or(kind, |ty| ty.name())

@@ -14,7 +14,10 @@ use crate::text::LineIndex;
 use crate::token::Kind;
 use crate::typechecker::TypeChecker;
 use crate::writer::encode_script;
-use crate::{SourceProvider, lints, parallel_chunks, parallel_map_balanced};
+use crate::{
+    SourceProvider, diagnostic_messages as msg, lints, parallel_chunks, parallel_map_balanced,
+    trigger_table,
+};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -34,15 +37,17 @@ pub type SourceText = (String, Scope, i64, String);
 pub enum Target {
     Rune,
     Client(Format),
+    /// Server bytecode for lobbyscript, which compiles no .gs2.
+    Lobby,
 }
 
 impl Target {
     fn includes(&self, scope: Scope) -> bool {
-        scope == Scope::Global
-            || matches!(
-                (self, scope),
-                (Self::Rune, Scope::Rune) | (Self::Client(_), Scope::Client)
-            )
+        match self {
+            Self::Rune => matches!(scope, Scope::Rune | Scope::Global),
+            Self::Client(_) => matches!(scope, Scope::Client | Scope::Global),
+            Self::Lobby => scope == Scope::Lobby,
+        }
     }
 }
 
@@ -183,7 +188,11 @@ impl Project {
         match self.target {
             Target::Rune => Scope::Rune,
             Target::Client(_) => Scope::Client,
+            Target::Lobby => Scope::Lobby,
         }
+    }
+    pub(crate) fn includes(&self, scope: Scope) -> bool {
+        self.target.includes(scope)
     }
     pub(crate) fn analysis_cancelled(&self) -> bool {
         self.options.cancellation.is_cancelled()
@@ -430,6 +439,18 @@ impl Project {
                 continue;
             };
             for script in &source.file.scripts {
+                if document.scope == Scope::Lobby
+                    && !trigger_table::is_lobby_trigger(&script.trigger, &document.label)
+                {
+                    diagnostics.error(
+                        document.label.clone(),
+                        script.line,
+                        1,
+                        msg::fmt(msg::SCRIPT_TRIGGER_NOT_LOBBY, &[&script.trigger]),
+                        Phase::SymbolRegistration,
+                    );
+                    continue;
+                }
                 if script.trigger == "command" {
                     continue;
                 }
@@ -702,7 +723,7 @@ impl Project {
             if check_pointers {
                 let mut checker = match self.target {
                     Target::Client(_) => PointerChecker::new_client(&compiled, &self.registry),
-                    Target::Rune => PointerChecker::new(&compiled, &self.registry),
+                    Target::Rune | Target::Lobby => PointerChecker::new(&compiled, &self.registry),
                 };
                 checker.set_source_cache(source);
                 let names = compiled
@@ -726,7 +747,7 @@ impl Project {
             }
             let document = &self.documents[&id];
             let bytes = match &self.target {
-                Target::Rune => Ok(encode_script(&script)),
+                Target::Rune | Target::Lobby => Ok(encode_script(&script)),
                 Target::Client(format) => clientscript::encode(&script, format),
             };
             match bytes {

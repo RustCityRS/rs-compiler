@@ -120,7 +120,6 @@ opcodes! {
     PROJANIM_HALFSQ = 1026 => "projanim_halfsq";
     SOUND_VORBIS_AREA = 1027 => "sound_vorbis_area";
     TEXT_COORD = 1028 => "text_coord";
-    MAP_LOBBY = 1029 => "map_lobby";
 
     // Player
     AFK_EVENT = 2000 => "afk_event";

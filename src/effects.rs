@@ -367,7 +367,7 @@ impl Effects {
         let scope = project.target_scope();
         let documents = project
             .documents()
-            .filter(|document| document.scope == scope || document.scope == Scope::Global)
+            .filter(|document| project.includes(document.scope))
             .collect::<Vec<_>>();
         let mut commands = HashMap::new();
         let mut script_names = HashSet::new();
@@ -432,7 +432,7 @@ impl Effects {
                 Visitor {
                     registry: project.registry(),
                     commands: &commands,
-                    server: scope == Scope::Rune,
+                    server: scope != Scope::Client,
                     script_names: &script_names,
                     callback_names: &callback_names,
                     node: &mut nodes[next],
@@ -457,10 +457,12 @@ impl Effects {
                     vec![trigger.as_str()]
                 };
                 for trigger in triggers {
-                    for owner in [Scope::Global, node.scope]
-                        .into_iter()
-                        .take(if node.scope == Scope::Global { 1 } else { 2 })
-                    {
+                    let owners = [Scope::Global, node.scope];
+                    let owners = match node.scope {
+                        Scope::Global | Scope::Lobby => &owners[1..],
+                        _ => &owners[..],
+                    };
+                    for &owner in owners {
                         if let Some(ids) =
                             definitions.get(&(owner, trigger.to_owned(), name.clone()))
                         {

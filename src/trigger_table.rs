@@ -15,6 +15,7 @@
 
 use crate::types::Type;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy)]
@@ -385,6 +386,27 @@ const NAME_KEYED_TRIGGERS: &[&str] = &[
 // yet standardized in the reference implementation.
 const EXTENDED_TRIGGERS: &[&str] = &["switch_window_mode"];
 
+// Lobbyscript accepts only these, with their server bytes.
+const LOBBY_TRIGGERS: &[&str] = &[
+    "proc",
+    "label",
+    "login",
+    "logout",
+    "if_button",
+    "if_button1",
+    "if_button2",
+    "if_button3",
+    "if_button4",
+    "if_button5",
+    "if_button6",
+    "if_button7",
+    "if_button8",
+    "if_button9",
+    "if_button10",
+    "if_buttond",
+    "if_close",
+];
+
 // ── Public lookup API ────────────────────────────────────────────────
 
 fn table() -> &'static HashMap<&'static str, TriggerInfo> {
@@ -426,6 +448,22 @@ pub fn is_valid_trigger(name: &str) -> bool {
         || EXTENDED_TRIGGERS.contains(&name)
 }
 
+// `command` declares engine signatures, so only engine.ls2 takes it.
+pub fn is_lobby_trigger(name: &str, path: &Path) -> bool {
+    LOBBY_TRIGGERS.contains(&name) || name == "command" && is_lobby_engine(path)
+}
+
+pub fn lobby_names(path: &Path) -> impl Iterator<Item = &'static str> {
+    LOBBY_TRIGGERS
+        .iter()
+        .copied()
+        .chain(is_lobby_engine(path).then_some("command"))
+}
+
+fn is_lobby_engine(path: &Path) -> bool {
+    path.file_name().is_some_and(|file| file == "engine.ls2")
+}
+
 pub fn allows_returns(name: &str) -> bool {
     matches!(name, "proc" | "clientscript" | "command" | "logout")
 }
@@ -439,6 +477,13 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for t in TRIGGERS {
             assert!(seen.insert(t.name), "duplicate trigger name: {}", t.name);
+        }
+    }
+
+    #[test]
+    fn lobby_triggers_are_server_triggers() {
+        for name in lobby_names(Path::new("engine.ls2")) {
+            assert!(is_valid_trigger(name), "{name} is not a server trigger");
         }
     }
 

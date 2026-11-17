@@ -6,6 +6,8 @@ use crate::compiler::Compiler;
 use crate::diagnostic_messages as msg;
 use crate::diagnostics::{DiagnosticsCollector, Phase};
 use crate::parser::*;
+use crate::pointer::{PointerSet, PointerType, default_command_pointers};
+use crate::sources::Scope;
 use crate::symbol::{SymbolKind, SymbolRegistry, SymbolTable};
 use crate::types::{BaseVarType, Type};
 use std::collections::HashSet;
@@ -41,6 +43,7 @@ pub struct TypeChecker<'a> {
     file_path: PathBuf,
     current_script_is_test: bool,
     current_script_is_proc: bool,
+    lobby: bool,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -52,6 +55,7 @@ impl<'a> TypeChecker<'a> {
             file_path: PathBuf::new(),
             current_script_is_test: false,
             current_script_is_proc: false,
+            lobby: false,
         }
     }
 
@@ -66,6 +70,7 @@ impl<'a> TypeChecker<'a> {
         testscript_line: Option<usize>,
     ) {
         self.file_path = file_path.to_path_buf();
+        self.lobby = self.registry.visibility.scope(file_path) == Some(Scope::Lobby);
         for script in &file.scripts {
             self.current_script_is_test = match testscript_line {
                 Some(ts_line) => script.line >= ts_line,
@@ -73,6 +78,35 @@ impl<'a> TypeChecker<'a> {
             };
             self.check_script(script);
         }
+    }
+
+    /// A dot form, or a command that needs `.active_player`.
+    fn secondary_pointer(&self, expr: &Expr) -> Option<String> {
+        let name = match expr {
+            Expr::GameVar(name, _) => {
+                return name.strip_prefix('.').map(|name| format!(".%{name}"));
+            }
+            Expr::CommandCall { name, .. } => name,
+            Expr::Identifier(name)
+                if self
+                    .registry
+                    .lookup_command(name.trim_start_matches('.'))
+                    .is_some() =>
+            {
+                name
+            }
+            _ => return None,
+        };
+        let pointers = match &self.registry.profile {
+            Some(profile) => profile.command_pointers.get(name.as_str()),
+            None => default_command_pointers().get(name.as_str()),
+        };
+        let secondary = |set: PointerSet| {
+            set.contains(PointerType::ActivePlayer2) || set.contains(PointerType::PActivePlayer2)
+        };
+        (name.starts_with('.')
+            || pointers.is_some_and(|holder| secondary(holder.required) || secondary(holder.set)))
+        .then(|| name.clone())
     }
 
     fn is_test_command(name: &str) -> bool {
@@ -877,6 +911,15 @@ impl<'a> TypeChecker<'a> {
         {
             self.error(line, message);
             return Some(Type::Error);
+        }
+        if self.lobby
+            && let Some(form) = self.secondary_pointer(expr)
+        {
+            let at = match expr {
+                Expr::GameVar(_, at) | Expr::CommandCall { call_line: at, .. } if *at > 0 => *at,
+                _ => line,
+            };
+            self.error(at, msg::fmt(msg::LOBBY_SECONDARY_POINTER, &[&form]));
         }
         match expr {
             Expr::IntLiteral(_) => {
