@@ -446,3 +446,107 @@ fn interleaved_preview_replies_return_to_their_own_target() {
         fs::remove_file(path).unwrap();
     }
 }
+
+fn lobby_workspace() -> Workspace {
+    let mut workspace = workspace();
+    let environment = json!({
+        "target":"lobby",
+        "commands":[
+            {"name":"pulse","opcode":9000,"params":["int"],"returns":[]},
+            {"name":"lobby_only","opcode":79,"params":[],"returns":[]}
+        ]
+    });
+    let project = project_from_json(&environment).unwrap();
+    let loader: ProjectLoader = Box::new(move || project_from_json(&environment));
+    workspace.contexts.push(Context {
+        scope: Scope::Lobby,
+        server: Server::new(Some(project), Some(loader)),
+        diagnostics: HashMap::new(),
+    });
+    workspace
+}
+
+#[test]
+fn lobby_sources_route_only_to_the_lobby_context() {
+    let mut workspace = lobby_workspace();
+    let sent = initialize(&mut workspace);
+    let watcher = sent
+        .iter()
+        .find(|message| message["method"] == "client/registerCapability")
+        .unwrap();
+    assert!(
+        watcher["params"]["registrations"][0]["registerOptions"]["watchers"][0]["globPattern"]
+            .as_str()
+            .unwrap()
+            .contains(",ls2,")
+    );
+    for (index, (uri, language)) in [
+        ("file:///game/scripts/bank/clientscript/lobby.ls2", "cs2"),
+        ("untitled:lobby", "ls2"),
+        ("untitled:lobbyscript", "lobbyscript"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        open(
+            &mut workspace,
+            uri,
+            language,
+            &format!("[proc,entry{index}]\nlobby_only;\n"),
+        );
+        let sent = send(
+            &mut workspace,
+            json!({"jsonrpc":"2.0","id":2,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":uri}}}),
+        );
+        assert_eq!(response(&sent, 2)["items"], json!([]));
+        assert_eq!(workspace.document_scope(uri), Scope::Lobby);
+        for context in &workspace.contexts {
+            let found = context.server.find(uri);
+            assert_eq!(found.is_some(), context.scope == Scope::Lobby, "{uri}");
+            if let Some(id) = found {
+                assert_eq!(
+                    context.server.project.document(id).unwrap().scope,
+                    Scope::Lobby
+                );
+            }
+        }
+    }
+    let uri = "file:///game/scripts/lobby/server.ls2";
+    open(
+        &mut workspace,
+        uri,
+        "ls2",
+        "[proc,server_entry]\nserver_only;\n",
+    );
+    let sent = send(
+        &mut workspace,
+        json!({"jsonrpc":"2.0","id":3,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":uri}}}),
+    );
+    let items = response(&sent, 3)["items"].as_array().unwrap();
+    assert!(
+        items
+            .iter()
+            .any(|item| item["message"].as_str().unwrap().contains("server_only")),
+        "{items:?}"
+    );
+
+    let shared = "file:///game/scripts/bank/shared.gs2";
+    open(&mut workspace, shared, "gs2", "[proc,shared]\nreturn;\n");
+    let config = "file:///game/scripts/bank/limits.constant";
+    open(&mut workspace, config, "rs2config", "^limit=1\n");
+    let callback = "file:///game/scripts/bank/refresh.cs2";
+    open(
+        &mut workspace,
+        callback,
+        "cs2",
+        "[clientscript,refresh]\nreturn;\n",
+    );
+    for context in &workspace.contexts {
+        assert_eq!(
+            context.server.find(shared).is_some(),
+            context.scope != Scope::Lobby
+        );
+        assert!(context.server.find(config).is_some());
+        assert!(context.server.find(callback).is_some());
+    }
+}

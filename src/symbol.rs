@@ -144,7 +144,7 @@ pub enum SymbolKind {
         param_types: Vec<Type>,
         return_types: Vec<Type>,
     },
-    /// A game variable (varp, varn, vars, varbit).
+    /// A game variable (varp, varn, vars, varpbit).
     GameVar {
         var_type: Type,
         var_id: i32,
@@ -934,7 +934,7 @@ impl SymbolRegistry {
             Type::Varp
             | Type::Varn
             | Type::Vars
-            | Type::Varbit
+            | Type::VarpBit
             | Type::Varc
             | Type::VarCon
             | Type::VarConBit

@@ -15,6 +15,7 @@ pub enum Scope {
     Rune = 1,
     Client = 2,
     Global = 4,
+    Lobby = 8,
 }
 
 impl Scope {
@@ -23,6 +24,7 @@ impl Scope {
             Self::Rune => "runescript",
             Self::Client => "clientscript",
             Self::Global => "globalscript",
+            Self::Lobby => "lobbyscript",
         }
     }
 
@@ -31,6 +33,7 @@ impl Scope {
             Self::Rune => "rs2",
             Self::Client => "cs2",
             Self::Global => "gs2",
+            Self::Lobby => "ls2",
         }
     }
 
@@ -39,12 +42,13 @@ impl Scope {
             "rs2" => Some(Self::Rune),
             "cs2" => Some(Self::Client),
             "gs2" => Some(Self::Global),
+            "ls2" => Some(Self::Lobby),
             _ => None,
         }
     }
 
     /// Scripts use their extension. Configs and constants default to shared;
-    /// a leading `// @scope(server|client|shared)` comment can restrict them.
+    /// a leading `// @scope(server|client|lobby|shared)` comment can restrict them.
     pub fn for_file(path: &Path, text: &str) -> io::Result<Self> {
         if let Some(scope) = Self::from_path(path) {
             return Ok(scope);
@@ -68,12 +72,13 @@ impl Scope {
             let declared = match value.map(str::trim) {
                 Some("server") => Self::Rune,
                 Some("client") => Self::Client,
+                Some("lobby") => Self::Lobby,
                 Some("shared") => Self::Global,
                 _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!(
-                            "{}: expected // @scope(server|client|shared)",
+                            "{}: expected // @scope(server|client|lobby|shared)",
                             path.display()
                         ),
                     ));
@@ -158,7 +163,7 @@ pub fn script_files(dir: &Path, extension: &str) -> io::Result<Vec<PathBuf>> {
     files.retain(|path| {
         path.extension()
             .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext == extension || ext == "gs2")
+            .is_some_and(|ext| ext == extension || (ext == "gs2" && extension != "ls2"))
     });
     Ok(files)
 }
@@ -199,7 +204,7 @@ fn declarations(file: &Path) -> Vec<(String, String)> {
     let Some(ext) = file.extension().and_then(|ext| ext.to_str()) else {
         return declared;
     };
-    let is_script = matches!(ext, "rs2" | "cs2" | "gs2");
+    let is_script = matches!(ext, "rs2" | "cs2" | "gs2" | "ls2");
     if !is_script
         && ext != "constant"
         && !Type::from_name(ext).is_some_and(|ty| config_kind(ty).is_some())
@@ -261,6 +266,13 @@ fn declarations(file: &Path) -> Vec<(String, String)> {
     declared
 }
 
+/// Script declarations, as opposed to configs, constants and game vars.
+fn script_kind(kind: &str) -> bool {
+    (crate::trigger_table::is_valid_trigger(kind)
+        || crate::clientscript::triggers::lookup(kind).is_some())
+        && !Type::from_name(kind).is_some_and(|ty| config_kind(ty).is_some())
+}
+
 fn config_kind(ty: Type) -> Option<&'static str> {
     match ty {
         Type::NamedObj | Type::Obj => Some("obj"),
@@ -281,7 +293,7 @@ fn config_kind(ty: Type) -> Option<&'static str> {
         | Type::Varp
         | Type::Varn
         | Type::Vars
-        | Type::Varbit
+        | Type::VarpBit
         | Type::Hunt
         | Type::Controller
         | Type::Hitmark
@@ -302,7 +314,7 @@ fn config_kind(ty: Type) -> Option<&'static str> {
         | Type::VarClanSetting
         | Type::VarCon
         | Type::VarConBit
-        | Type::VarNBit
+        | Type::VarnBit
         | Type::VarObj => Some(ty.name()),
         _ => None,
     }
@@ -327,7 +339,7 @@ impl Visibility {
         self.documents.remove(label);
     }
 
-    fn scope(&self, label: &Path) -> Option<Scope> {
+    pub(crate) fn scope(&self, label: &Path) -> Option<Scope> {
         self.documents
             .get(label)
             .copied()
@@ -488,9 +500,16 @@ impl Visibility {
             .and_then(|names| names.get(name))
             .copied()
             .unwrap_or(0);
+        // Lobbyscript shares configs with every target but compiles no .gs2.
+        let script = scope == Scope::Lobby && script_kind(kind);
+        let private = match scope {
+            Scope::Lobby if script => 0,
+            Scope::Lobby => Scope::Lobby as u8,
+            _ => Scope::Rune as u8 | Scope::Client as u8,
+        };
         if (kind == "constant" || kind == "proc")
             && owners & Scope::Global as u8 != 0
-            && owners & (Scope::Rune as u8 | Scope::Client as u8) != 0
+            && owners & private != 0
         {
             return Some(format!(
                 "{kind} '{name}' is declared in both shared and private scopes; keep one shared declaration"
@@ -499,11 +518,18 @@ impl Visibility {
         if owners == 0 && !required {
             return None;
         }
-        if owners & (scope as u8 | Scope::Global as u8) != 0 {
+        let shared = if script { 0 } else { Scope::Global as u8 };
+        if owners & (scope as u8 | shared) != 0 {
             return None;
         }
         let allowed = if scope == Scope::Global {
             "a .gs2 source or shared config".to_owned()
+        } else if scope == Scope::Lobby {
+            if script {
+                "a .ls2 source".to_owned()
+            } else {
+                "a .ls2 source, or a shared or @scope(lobby) config".to_owned()
+            }
         } else {
             format!(
                 "a .{} or .gs2 source, or a visible config",
@@ -525,7 +551,7 @@ impl Visibility {
     ) -> Option<String> {
         if let Some(kind) = config_kind(ty) {
             let normalized;
-            let name = if !matches!(ty, Type::Varp | Type::Varbit | Type::Varn | Type::Vars) {
+            let name = if !matches!(ty, Type::Varp | Type::VarpBit | Type::Varn | Type::Vars) {
                 normalized = crate::symbol::normalize_entity_name(name);
                 normalized.as_ref()
             } else {

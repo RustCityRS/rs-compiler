@@ -44,9 +44,9 @@ pub(super) fn visible(symbol: &Symbol, document: &Document, offset: usize) -> bo
     if symbol.kind == SymbolKind::Command {
         return true;
     }
-    symbol
-        .scope
-        .is_none_or(|scope| scope == Scope::Global || scope == document.scope)
+    symbol.scope.is_none_or(|scope| {
+        scope == document.scope || (scope == Scope::Global && document.scope != Scope::Lobby)
+    })
 }
 
 #[derive(Clone)]
@@ -846,6 +846,7 @@ impl Index {
                                     "label"
                                 };
                                 lookup(&key(Scope::Global, trigger, &token.value))
+                                    .filter(|_| document.scope != Scope::Lobby)
                                     .or_else(|| lookup(&key(document.scope, trigger, &token.value)))
                             }
                             _ => {
@@ -918,6 +919,7 @@ impl Index {
                             .copied();
                     }
                     keys.get(key(Scope::Global, trigger, &token.value).as_str())
+                        .filter(|_| document.scope != Scope::Lobby)
                         .or_else(|| keys.get(key(document.scope, trigger, &token.value).as_str()))
                         .copied()
                 };

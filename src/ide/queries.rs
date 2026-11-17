@@ -311,15 +311,13 @@ impl Project {
         let header = line.strip_prefix('[').filter(|line| !line.contains(']'));
         if header.is_some_and(|header| !header.contains(',')) {
             let names = self.registry.profile.as_ref().map_or_else(
-                || {
-                    if self.target_scope() == Scope::Client {
-                        triggers::TRIGGERS
-                            .iter()
-                            .map(|trigger| trigger.name)
-                            .collect::<Vec<_>>()
-                    } else {
-                        trigger_table::names().collect()
-                    }
+                || match self.target_scope() {
+                    Scope::Client => triggers::TRIGGERS
+                        .iter()
+                        .map(|trigger| trigger.name)
+                        .collect::<Vec<_>>(),
+                    Scope::Lobby => trigger_table::lobby_names(&document.label).collect(),
+                    _ => trigger_table::names().collect(),
                 },
                 |profile| profile.triggers.keys().map(String::as_str).collect(),
             );

@@ -3,7 +3,7 @@ use super::source::script_name;
 use crate::arguments::{
     command_hints, command_parameters, command_returns, expression_types, proc_hints, stack_hints,
 };
-use crate::clientscript::hooks::{self, HookValue};
+use crate::clientscript::hooks::{self, HookArg};
 use crate::parser::{
     BinOp, Expr, ScriptDeclaration, ScriptFile, Statement, StringPart, array_name,
 };
@@ -679,7 +679,7 @@ pub fn hook_literal(
 /// The scripts' types, and what each variable they use turned out to be.
 pub fn infer(
     files: &[(u32, ScriptFile)],
-    component_hooks: &[Vec<HookValue>],
+    component_hooks: &[Vec<HookArg>],
     registry: &SymbolRegistry,
 ) -> (HashMap<u32, Inferred>, Vec<(String, Type)>) {
     let mut inference = Inference {
@@ -759,7 +759,7 @@ pub fn infer(
         })
         .collect();
     for hook in component_hooks {
-        if let Some(HookValue::Int(script)) = hook.first()
+        if let Some(HookArg::Int(script)) = hook.first()
             && let Some(key) = keys.get(script)
         {
             let callee = inference.scopes[key].clone();
@@ -767,8 +767,8 @@ pub fn infer(
                 .iter()
                 .map(|value| {
                     let ty = match value {
-                        HookValue::String(_) => Type::String,
-                        HookValue::Int(value) => event_name(*value, registry)
+                        HookArg::String(_) => Type::String,
+                        HookArg::Int(value) => event_name(*value, registry)
                             .and_then(event_type)
                             .unwrap_or(Type::Int),
                     };

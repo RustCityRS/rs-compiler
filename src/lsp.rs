@@ -255,7 +255,7 @@ fn uri_path(uri: &str) -> Option<PathBuf> {
 fn script_only(label: &Path) -> bool {
     label
         .extension()
-        .is_some_and(|ext| matches!(ext.to_str(), Some("rs2" | "cs2" | "gs2")))
+        .is_some_and(|ext| matches!(ext.to_str(), Some("rs2" | "cs2" | "gs2" | "ls2")))
         && label
             .file_stem()
             .is_none_or(|stem| stem.to_string_lossy() != "engine")
@@ -297,6 +297,7 @@ fn scope(value: &str) -> Result<Scope, String> {
         "rune" | "rs2" | "runescript" => Ok(Scope::Rune),
         "client" | "cs2" | "clientscript" => Ok(Scope::Client),
         "global" | "gs2" | "globalscript" => Ok(Scope::Global),
+        "lobby" | "ls2" | "lobbyscript" => Ok(Scope::Lobby),
         _ => Err(format!("Unknown script language '{value}'")),
     }
 }
@@ -340,16 +341,20 @@ pub fn project_from_json(value: &Value) -> Result<Project, String> {
             return Err(format!("Expected array '{name}'"));
         }
     }
-    let client = match value.get("target") {
-        None => false,
-        Some(Value::String(target)) if matches!(target.as_str(), "rune" | "rs2") => false,
-        Some(Value::String(target)) if matches!(target.as_str(), "client" | "cs2") => true,
-        _ => return Err("Expected target 'rune' or 'client'".into()),
+    let language = match value.get("target") {
+        None => Scope::Rune,
+        Some(Value::String(target)) if matches!(target.as_str(), "rune" | "rs2") => Scope::Rune,
+        Some(Value::String(target)) if matches!(target.as_str(), "client" | "cs2") => Scope::Client,
+        Some(Value::String(target)) if matches!(target.as_str(), "lobby" | "ls2") => Scope::Lobby,
+        _ => return Err("Expected target 'rune', 'client' or 'lobby'".into()),
     };
-    let target = if client {
-        Target::Client(Format::parse(field(value, "opcodes")?).map_err(|error| error.to_string())?)
-    } else {
-        Target::Rune
+    let client = language == Scope::Client;
+    let target = match language {
+        Scope::Client => Target::Client(
+            Format::parse(field(value, "opcodes")?).map_err(|error| error.to_string())?,
+        ),
+        Scope::Lobby => Target::Lobby,
+        _ => Target::Rune,
     };
     let mut registry = SymbolRegistry::new();
     let mut visibility = Visibility::new();
@@ -924,7 +929,7 @@ impl Server {
             self.request_id += 1;
             write_message(
                 output,
-                json!({"jsonrpc":"2.0","id":format!("runec/watch/{}",self.request_id),"method":"client/registerCapability","params":{"registrations":[{"id":"runec/files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.{rs2,cs2,gs2,pack,constant,obj,npc,loc,inv,enum,struct,param,dbtable,dbrow,varp,varn,vars,varpbit,varc,seq,spotanim,mesanim,hunt,if,interface,idk,flo,flu,anim,mel,order,hashes,config*}","kind":7}]}}]}}),
+                json!({"jsonrpc":"2.0","id":format!("runec/watch/{}",self.request_id),"method":"client/registerCapability","params":{"registrations":[{"id":"runec/files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.{rs2,cs2,gs2,ls2,pack,constant,obj,npc,loc,inv,enum,struct,param,dbtable,dbrow,varp,varn,vars,varpbit,varc,seq,spotanim,mesanim,hunt,if,interface,idk,flo,flu,anim,mel,order,hashes,config*}","kind":7}]}}]}}),
             )?;
         }
         let inspection_command = method == "workspace/executeCommand"
@@ -1633,7 +1638,7 @@ impl Server {
         let source = self.source(params)?;
         if method == "textDocument/codeLens" {
             let document = self.project.document(source).unwrap();
-            if document.scope != Scope::Global && document.scope != self.project.target_scope() {
+            if !self.project.includes(document.scope) {
                 return Ok(json!([]));
             }
             let Some(syntax) = document.syntax() else {

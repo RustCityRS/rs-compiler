@@ -33,6 +33,9 @@ enum Commands {
         /// Restrict the language server to RuneScript and GlobalScript
         #[arg(long, requires = "source")]
         server: bool,
+        /// Restrict the language server to LobbyScript
+        #[arg(long, conflicts_with_all = ["client", "server"], requires = "source")]
+        lobby: bool,
     },
     /// Compile .cs2 sources to individual cache script files
     CompileClient {
@@ -71,6 +74,34 @@ enum Commands {
         #[arg(long)]
         pack: Option<String>,
     },
+    /// Compile all .ls2 scripts to binary output for the lobby server
+    CompileLobby {
+        /// Source directory containing .ls2 files
+        #[arg(short, long)]
+        source: String,
+        /// Output directory for compiled scripts
+        #[arg(short, long, default_value = "./data/pack/lobby")]
+        output: String,
+        /// Pack directory (overrides auto-detection)
+        #[arg(long)]
+        pack: Option<String>,
+        /// Run lint passes (unused locals, unreachable code) after compilation
+        #[arg(long, default_value_t = false)]
+        lint: bool,
+        /// Trade compilation time for lower peak memory by recompiling scripts
+        /// on demand. Output is byte-identical to normal compilation.
+        #[arg(long, visible_alias = "recompile", default_value_t = false)]
+        low_mem: bool,
+    },
+    /// Run all analysis passes on .ls2 scripts without writing output
+    LintLobby {
+        /// Source directory containing .ls2 files
+        #[arg(short, long)]
+        source: String,
+        /// Pack directory (overrides auto-detection)
+        #[arg(long)]
+        pack: Option<String>,
+    },
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -102,6 +133,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             pack,
             client,
             server,
+            lobby,
         } => {
             if let Some(source) = source {
                 let source = sources::source_root(&source);
@@ -112,10 +144,15 @@ fn run() -> Result<(), Box<dyn Error>> {
                 let has_server = files
                     .iter()
                     .any(|path| Scope::from_path(path) == Some(Scope::Rune));
+                let has_lobby = files
+                    .iter()
+                    .any(|path| path.file_name().is_some_and(|name| name == "engine.ls2"));
                 let targets = if client {
                     vec![Scope::Client]
                 } else if server {
                     vec![Scope::Rune]
+                } else if lobby {
+                    vec![Scope::Lobby]
                 } else {
                     let mut targets = Vec::new();
                     if has_server || !has_client {
@@ -123,6 +160,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                     }
                     if has_client {
                         targets.push(Scope::Client);
+                    }
+                    if has_lobby {
+                        targets.push(Scope::Lobby);
                     }
                     targets
                 };
@@ -134,10 +174,10 @@ fn run() -> Result<(), Box<dyn Error>> {
                             let pack = pack.clone();
                             let loader: Box<dyn Fn() -> Result<runec::project::Project, String>> =
                                 Box::new(move || {
-                                    runec::filesystem::editor_project(
+                                    runec::filesystem::editor_project_for_scope(
                                         &source,
                                         pack.as_deref(),
-                                        scope == Scope::Client,
+                                        scope,
                                     )
                                     .map_err(|error| error.to_string())
                                 });
@@ -182,6 +222,29 @@ fn run() -> Result<(), Box<dyn Error>> {
             let scripts_dir = PathBuf::from(source);
             let pack_dir = pack.map(PathBuf::from);
             runec::lint(&scripts_dir, pack_dir.as_deref())?;
+        }
+        Commands::CompileLobby {
+            source,
+            output,
+            pack,
+            lint,
+            low_mem,
+        } => {
+            let scripts_dir = PathBuf::from(source);
+            let pack_dir = pack.map(PathBuf::from);
+            let output_dir = PathBuf::from(output);
+            runec::compile_lobby_with_options(
+                &scripts_dir,
+                pack_dir.as_deref(),
+                &output_dir,
+                lint,
+                low_mem,
+            )?;
+        }
+        Commands::LintLobby { source, pack } => {
+            let scripts_dir = PathBuf::from(source);
+            let pack_dir = pack.map(PathBuf::from);
+            runec::lint_lobby(&scripts_dir, pack_dir.as_deref())?;
         }
     }
 

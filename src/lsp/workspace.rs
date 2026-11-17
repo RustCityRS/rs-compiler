@@ -17,7 +17,7 @@ pub fn serve_workspace_with_loaders(loaders: Vec<(Scope, ProjectLoader)>) -> io:
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "A workspace requires one loader per available server/client target",
+            "A workspace requires one loader per available server/client/lobby target",
         ));
     }
     serve_host(Workspace::new(
@@ -47,6 +47,7 @@ fn target_name(scope: Scope) -> &'static str {
         Scope::Rune => "rune",
         Scope::Client => "client",
         Scope::Global => "global",
+        Scope::Lobby => "lobby",
     }
 }
 
@@ -55,6 +56,7 @@ fn target_label(scope: Scope) -> &'static str {
         Scope::Rune => "server",
         Scope::Client => "client",
         Scope::Global => "shared",
+        Scope::Lobby => "lobby",
     }
 }
 
@@ -106,12 +108,22 @@ impl Workspace {
             .unwrap_or(Scope::Global)
     }
 
+    /// Shared configs reach every context; .gs2 sources are not lobbyscript.
+    fn accepts(&self, uri: &str, target: Scope) -> bool {
+        let scope = self.document_scope(uri);
+        scope == target
+            || (scope == Scope::Global
+                && (target != Scope::Lobby
+                    || extension_scope(uri)
+                        .or_else(|| self.languages.get(&uri_key(uri)).copied())
+                        .is_none()))
+    }
+
     fn targets(&self, uri: Option<&str>) -> Vec<usize> {
-        let scope = uri.map_or(Scope::Global, |uri| self.document_scope(uri));
         self.contexts
             .iter()
             .enumerate()
-            .filter(|(_, context)| scope == Scope::Global || context.scope == scope)
+            .filter(|(_, context)| uri.is_none_or(|uri| self.accepts(uri, context.scope)))
             .map(|(index, _)| index)
             .collect()
     }
@@ -386,8 +398,7 @@ impl Workspace {
                     continue;
                 };
                 let key = uri_key(uri);
-                let scope = self.document_scope(uri);
-                if scope == Scope::Global || scope == self.contexts[index].scope {
+                if self.accepts(uri, self.contexts[index].scope) {
                     self.contexts[index]
                         .diagnostics
                         .insert(key.clone(), message["params"].clone());
@@ -433,10 +444,9 @@ impl Workspace {
                 continue;
             };
             let uri = first["uri"].as_str().unwrap();
-            let scope = self.document_scope(uri);
             let version = entries
                 .iter()
-                .filter(|(index, _)| scope == Scope::Global || scope == self.contexts[*index].scope)
+                .filter(|(index, _)| self.accepts(uri, self.contexts[*index].scope))
                 .filter_map(|(_, value)| value["version"].as_i64())
                 .max();
             let diagnostics = self.diagnostics(
@@ -444,7 +454,7 @@ impl Workspace {
                 entries
                     .iter()
                     .filter(|(index, value)| {
-                        (scope == Scope::Global || scope == self.contexts[*index].scope)
+                        self.accepts(uri, self.contexts[*index].scope)
                             && (value["version"].as_i64().is_none()
                                 || value["version"].as_i64() == version)
                     })
@@ -597,10 +607,13 @@ impl Host for Workspace {
                 .is_some_and(|name| name == "engine");
             targets.retain(|&index| {
                 let target = self.contexts[index].scope;
-                scope == Scope::Global || scope == target
-                    // The server's index needs current callback declarations;
-                    // its engine commands remain independent of client commands.
-                    || (scope == Scope::Client && target == Scope::Rune && !engine)
+                (scope == Scope::Global && target != Scope::Lobby)
+                    || scope == target
+                    // Server and lobby indexes need current callback declarations;
+                    // their engine commands remain independent of client commands.
+                    || (scope == Scope::Client
+                        && matches!(target, Scope::Rune | Scope::Lobby)
+                        && !engine)
             });
         }
         if method == "workspace/executeCommand" {

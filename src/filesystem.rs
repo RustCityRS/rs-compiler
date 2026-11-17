@@ -33,7 +33,23 @@ pub fn editor_project(
     pack: Option<&Path>,
     client: bool,
 ) -> Result<Project, Box<dyn Error>> {
-    let scope = if client { Scope::Client } else { Scope::Rune };
+    editor_project_for_scope(
+        source,
+        pack,
+        if client { Scope::Client } else { Scope::Rune },
+    )
+}
+
+/// [`editor_project`] for a server, client or lobby target.
+pub fn editor_project_for_scope(
+    source: &Path,
+    pack: Option<&Path>,
+    scope: Scope,
+) -> Result<Project, Box<dyn Error>> {
+    if scope == Scope::Global {
+        return Err("GlobalScript belongs to the server and client targets".into());
+    }
+    let client = scope == Scope::Client;
     let dir = sources::target_dir(source, scope);
     let pack = resolve_pack_dir(&dir, pack);
     let mut editor_roots = sources::roots(&dir);
@@ -44,7 +60,7 @@ pub fn editor_project(
                 .ok_or("Client opcode definitions require --pack")?,
         )?
     } else {
-        build_symbol_registry(&dir, pack.as_deref())?
+        build_symbol_registry(&dir, pack.as_deref(), scope)?
     };
     let target = if client {
         registry.preloaded_script_ids.clear();
@@ -59,6 +75,8 @@ pub fn editor_project(
         Target::Client(Format::load(
             &pack.as_ref().unwrap().join("cs2_command.pack"),
         )?)
+    } else if scope == Scope::Lobby {
+        Target::Lobby
     } else {
         Target::Rune
     };
@@ -74,7 +92,7 @@ pub fn editor_project(
             ..Options::default()
         },
     );
-    let paths = sources::script_files(&dir, if client { "cs2" } else { "rs2" })?;
+    let paths = sources::script_files(&dir, scope.extension())?;
     let files = read_sources(&paths)?;
     for id in project.open_all(files) {
         if client {
@@ -612,6 +630,7 @@ pub fn compile_memory_with_options(
     low_mem: bool,
 ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
     compile_memory_inner(
+        Scope::Rune,
         scripts_dir,
         pack_dir,
         lint,
@@ -627,10 +646,56 @@ pub fn compile_memory_with_ids(
     pack_dir: Option<&Path>,
     ids: &mut ScriptIds,
 ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
-    compile_memory_inner(scripts_dir, pack_dir, false, false, false, ids)
+    compile_memory_inner(Scope::Rune, scripts_dir, pack_dir, false, false, false, ids)
+}
+
+/// [`compile_memory`] for lobbyscript: `.ls2` sources, `ls2_command.pack` and `engine.ls2`.
+pub fn compile_lobby_memory(
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+    lint: bool,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
+    compile_lobby_memory_with_options(scripts_dir, pack_dir, lint, false, false)
+}
+
+/// [`compile_memory_with_options`] for lobbyscript.
+pub fn compile_lobby_memory_with_options(
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+    lint: bool,
+    include_tests: bool,
+    low_mem: bool,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
+    compile_memory_inner(
+        Scope::Lobby,
+        scripts_dir,
+        pack_dir,
+        lint,
+        include_tests,
+        low_mem,
+        &mut ScriptIds::new(),
+    )
+}
+
+/// [`compile_memory_with_ids`] for lobbyscript. Lobby IDs are separate from the server's.
+pub fn compile_lobby_memory_with_ids(
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+    ids: &mut ScriptIds,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
+    compile_memory_inner(
+        Scope::Lobby,
+        scripts_dir,
+        pack_dir,
+        false,
+        false,
+        false,
+        ids,
+    )
 }
 
 fn compile_memory_inner(
+    scope: Scope,
     scripts_dir: &Path,
     pack_dir: Option<&Path>,
     lint: bool,
@@ -640,11 +705,11 @@ fn compile_memory_inner(
 ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
     if low_mem || std::env::var("RUNEC_RECOMPILE").is_ok_and(|v| !v.is_empty()) {
         info!("[recompile] low-memory recompile pipeline enabled");
-        return compile_recompile_memory(scripts_dir, pack_dir, lint, include_tests, ids);
+        return compile_recompile_memory(scope, scripts_dir, pack_dir, lint, include_tests, ids);
     }
 
     let (compiled_scripts, diagnostics) =
-        run_pipeline(scripts_dir, pack_dir, lint, include_tests, ids)?;
+        run_pipeline(scope, scripts_dir, pack_dir, lint, include_tests, ids)?;
 
     info!("Writing compiled output to memory...");
     let writer = ScriptWriter::new("".into());
@@ -684,16 +749,68 @@ pub fn compile_with_options(
     lint: bool,
     low_mem: bool,
 ) -> Result<(), Box<dyn Error>> {
+    compile_output(
+        Scope::Rune,
+        scripts_dir,
+        pack_dir,
+        output_dir,
+        lint,
+        low_mem,
+    )
+}
+
+/// [`compile`] for lobbyscript: `.ls2` sources, `ls2_command.pack` and `engine.ls2`.
+pub fn compile_lobby(
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+    output_dir: &Path,
+    lint: bool,
+) -> Result<(), Box<dyn Error>> {
+    compile_lobby_with_options(scripts_dir, pack_dir, output_dir, lint, false)
+}
+
+/// [`compile_with_options`] for lobbyscript.
+pub fn compile_lobby_with_options(
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+    output_dir: &Path,
+    lint: bool,
+    low_mem: bool,
+) -> Result<(), Box<dyn Error>> {
+    compile_output(
+        Scope::Lobby,
+        scripts_dir,
+        pack_dir,
+        output_dir,
+        lint,
+        low_mem,
+    )
+}
+
+fn compile_output(
+    scope: Scope,
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+    output_dir: &Path,
+    lint: bool,
+    low_mem: bool,
+) -> Result<(), Box<dyn Error>> {
     // The recompile pipeline never holds all compiled scripts (it re-compiles on
     // demand for the pointer check + writes file-by-file). It does its own
     // output, so it returns here. The default path below is unchanged.
     if low_mem || std::env::var("RUNEC_RECOMPILE").is_ok_and(|v| !v.is_empty()) {
         info!("[recompile] low-memory recompile pipeline enabled");
-        return compile_recompile(scripts_dir, pack_dir, output_dir, lint);
+        return compile_recompile(scope, scripts_dir, pack_dir, output_dir, lint);
     }
 
-    let (compiled_scripts, diagnostics) =
-        run_pipeline(scripts_dir, pack_dir, lint, false, &mut ScriptIds::new())?;
+    let (compiled_scripts, diagnostics) = run_pipeline(
+        scope,
+        scripts_dir,
+        pack_dir,
+        lint,
+        false,
+        &mut ScriptIds::new(),
+    )?;
 
     let output = output_dir.display().to_string();
     // Normalize separators for a clean, consistent log message (input paths may
@@ -711,7 +828,27 @@ pub fn compile_with_options(
 /// Run all analysis passes (parse, type-check, codegen, pointer-check, lints)
 /// without writing output. Useful for editor tooling and CI lint gates.
 pub fn lint(scripts_dir: &Path, pack_dir: Option<&Path>) -> Result<(), Box<dyn Error>> {
-    let (_, diagnostics) = run_pipeline(scripts_dir, pack_dir, true, false, &mut ScriptIds::new())?;
+    lint_scope(Scope::Rune, scripts_dir, pack_dir)
+}
+
+/// [`lint`] for lobbyscript.
+pub fn lint_lobby(scripts_dir: &Path, pack_dir: Option<&Path>) -> Result<(), Box<dyn Error>> {
+    lint_scope(Scope::Lobby, scripts_dir, pack_dir)
+}
+
+fn lint_scope(
+    scope: Scope,
+    scripts_dir: &Path,
+    pack_dir: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
+    let (_, diagnostics) = run_pipeline(
+        scope,
+        scripts_dir,
+        pack_dir,
+        true,
+        false,
+        &mut ScriptIds::new(),
+    )?;
 
     diagnostics.print_all();
     info!("Compilation complete!");
@@ -723,13 +860,14 @@ pub fn lint(scripts_dir: &Path, pack_dir: Option<&Path>) -> Result<(), Box<dyn E
 /// pointer-check, and optional lint passes), returning the compiled scripts
 /// and accumulated diagnostics for the caller to handle output.
 fn run_pipeline(
+    scope: Scope,
     scripts_dir: &Path,
     pack_dir: Option<&Path>,
     lint: bool,
     include_tests: bool,
     ids: &mut ScriptIds,
 ) -> Result<(Vec<CompiledScript>, DiagnosticsCollector), Box<dyn Error>> {
-    let source_dir = sources::target_dir(scripts_dir, sources::Scope::Rune);
+    let source_dir = sources::target_dir(scripts_dir, scope);
     let scripts_dir = source_dir.as_path();
     if !scripts_dir.exists() || !scripts_dir.is_dir() {
         return Err(Box::new(error::CompilerError::FileNotFound(
@@ -741,10 +879,10 @@ fn run_pipeline(
     // with RUNEC_STREAM=1. The default batch path below is unchanged.
     if std::env::var("RUNEC_STREAM").is_ok_and(|v| !v.is_empty()) {
         info!("[stream] streaming pipeline enabled (RUNEC_STREAM)");
-        return run_pipeline_streaming(scripts_dir, pack_dir, lint, include_tests, ids);
+        return run_pipeline_streaming(scope, scripts_dir, pack_dir, lint, include_tests, ids);
     }
 
-    let mut rs2_files: Vec<PathBuf> = get_rs2_files(scripts_dir, "rs2")?;
+    let mut rs2_files: Vec<PathBuf> = get_rs2_files(scripts_dir, scope.extension())?;
 
     rs2_files.sort();
     info!("Found {} script files", rs2_files.len());
@@ -803,8 +941,8 @@ fn run_pipeline(
     // Phase 2: assign IDs and register every parsed script.
     info!("Registering scripts and building the symbol registry...");
     let resolved_pack_dir = resolve_pack_dir(scripts_dir, pack_dir);
-    let mut registry = build_symbol_registry(scripts_dir, resolved_pack_dir.as_deref())?;
-    register_scripts(&mut registry, ids, &mut diagnostics, &all_files);
+    let mut registry = build_symbol_registry(scripts_dir, resolved_pack_dir.as_deref(), scope)?;
+    register_scripts(scope, &mut registry, ids, &mut diagnostics, &all_files);
     info!("  Registered {} scripts", registry.scripts.len());
     // Pre-assigned script ids were consumed during registration; free them
     // before codegen (the compile's peak-memory phase) rather than at scope end.
@@ -968,13 +1106,14 @@ fn parse_one_file_sigs(path: &Path, include_tests: bool) -> FileSigsResult {
 }
 
 fn run_pipeline_streaming(
+    scope: Scope,
     scripts_dir: &Path,
     pack_dir: Option<&Path>,
     lint: bool,
     include_tests: bool,
     ids: &mut ScriptIds,
 ) -> Result<(Vec<CompiledScript>, DiagnosticsCollector), Box<dyn Error>> {
-    let mut rs2_files: Vec<PathBuf> = get_rs2_files(scripts_dir, "rs2")?;
+    let mut rs2_files: Vec<PathBuf> = get_rs2_files(scripts_dir, scope.extension())?;
     rs2_files.sort();
     info!("Found {} script files", rs2_files.len());
     mem_mark("startup");
@@ -1025,8 +1164,8 @@ fn run_pipeline_streaming(
     // Registration (from signatures, not ASTs).
     info!("[stream] Registering scripts and building the symbol registry...");
     let resolved_pack_dir = resolve_pack_dir(scripts_dir, pack_dir);
-    let mut registry = build_symbol_registry(scripts_dir, resolved_pack_dir.as_deref())?;
-    register_scripts_from_sigs(&mut registry, ids, &mut diagnostics, &file_sigs);
+    let mut registry = build_symbol_registry(scripts_dir, resolved_pack_dir.as_deref(), scope)?;
+    register_scripts_from_sigs(scope, &mut registry, ids, &mut diagnostics, &file_sigs);
     info!("  Registered {} scripts", registry.scripts.len());
     registry.drop_registration_scratch();
 
@@ -1148,6 +1287,7 @@ fn assign_script_ids<'a>(
 /// `register_scripts` for the streaming path: identical logic, driven by the
 /// extracted signatures instead of the (already-dropped) ASTs.
 fn register_scripts_from_sigs(
+    scope: Scope,
     registry: &mut SymbolRegistry,
     ids: &mut ScriptIds,
     diagnostics: &mut DiagnosticsCollector,
@@ -1174,11 +1314,20 @@ fn register_scripts_from_sigs(
                 &sig.trigger,
                 &sig.name,
             );
+            if scope == Scope::Lobby && !trigger_table::is_lobby_trigger(&sig.trigger, &fs.path) {
+                diagnostics.error(
+                    fs.path.clone(),
+                    sig.line,
+                    0,
+                    msg::fmt(msg::SCRIPT_TRIGGER_NOT_LOBBY, &[&sig.trigger]),
+                    diagnostics::Phase::SymbolRegistration,
+                );
+            }
             if sig.trigger == "command" {
                 continue;
             }
 
-            if !trigger_table::is_valid_trigger(&sig.trigger) {
+            if scope != Scope::Lobby && !trigger_table::is_valid_trigger(&sig.trigger) {
                 diagnostics.warning(
                     fs.path.clone(),
                     sig.line,
@@ -1368,9 +1517,15 @@ fn resolve_pack_dir(scripts_dir: &Path, pack_dir: Option<&Path>) -> Option<PathB
 fn build_symbol_registry(
     scripts_dir: &Path,
     resolved_pack_dir: Option<&Path>,
+    scope: Scope,
 ) -> Result<SymbolRegistry, Box<dyn Error>> {
-    let config_files = sources::target_config_files(scripts_dir, Scope::Rune)?;
-    let engine_rs2 = sources::engine_file(scripts_dir, Scope::Rune)?;
+    let config_files = sources::target_config_files(scripts_dir, scope)?;
+    let engine_rs2 = sources::engine_file(scripts_dir, scope)?;
+    let commands = if scope == Scope::Lobby {
+        "ls2_command.pack"
+    } else {
+        "command.pack"
+    };
     // Visibility reads every source and config, and only its indexing needs
     // the registry built meanwhile.
     let visibility = {
@@ -1381,7 +1536,7 @@ fn build_symbol_registry(
 
     if let Some(pd) = resolved_pack_dir {
         info!("  Loading packs from {}", pd.display());
-        symloader::load_packs(&mut registry, pd)?;
+        symloader::load_packs_with_commands(&mut registry, pd, commands)?;
         info!(
             "  Loaded {} commands, {} game vars",
             registry.commands.len(),
@@ -1438,6 +1593,7 @@ fn build_symbol_registry(
 
 /// Assign IDs and register the parsed scripts, reporting declaration errors.
 fn register_scripts(
+    scope: Scope,
     registry: &mut SymbolRegistry,
     ids: &mut ScriptIds,
     diagnostics: &mut DiagnosticsCollector,
@@ -1463,11 +1619,22 @@ fn register_scripts(
         for pf in all_files.iter() {
             Arc::make_mut(&mut registry.visibility).declare_source(&pf.path, &pf.file);
             for script in &pf.file.scripts {
+                if scope == Scope::Lobby
+                    && !trigger_table::is_lobby_trigger(&script.trigger, &pf.path)
+                {
+                    diagnostics.error(
+                        pf.path.clone(),
+                        script.line,
+                        0,
+                        msg::fmt(msg::SCRIPT_TRIGGER_NOT_LOBBY, &[&script.trigger]),
+                        diagnostics::Phase::SymbolRegistration,
+                    );
+                }
                 if script.trigger == "command" {
                     continue;
                 }
 
-                if !trigger_table::is_valid_trigger(&script.trigger) {
+                if scope != Scope::Lobby && !trigger_table::is_valid_trigger(&script.trigger) {
                     diagnostics.warning(
                         pf.path.clone(),
                         script.line,
@@ -1603,17 +1770,18 @@ type RecompiledOutput = (Vec<Vec<u8>>, DiagnosticsCollector);
 /// `compile_recompile_memory`) wrap this. On a phase error it prints diagnostics
 /// and returns `Err`, matching the batch path.
 fn recompile_to_encoded(
+    scope: Scope,
     scripts_dir: &Path,
     pack_dir: Option<&Path>,
     lint: bool,
     include_tests: bool,
     ids: &mut ScriptIds,
 ) -> Result<RecompiledOutput, Box<dyn Error>> {
-    let source_dir = sources::target_dir(scripts_dir, sources::Scope::Rune);
+    let source_dir = sources::target_dir(scripts_dir, scope);
     let scripts_dir = source_dir.as_path();
     use crate::pointer_checker::{PointerChecker, ScriptSource};
 
-    let mut rs2_files: Vec<PathBuf> = get_rs2_files(scripts_dir, "rs2")?;
+    let mut rs2_files: Vec<PathBuf> = get_rs2_files(scripts_dir, scope.extension())?;
     rs2_files.sort();
     info!("Found {} script files", rs2_files.len());
     mem_mark("startup");
@@ -1658,8 +1826,8 @@ fn recompile_to_encoded(
     // Registration.
     info!("[recompile] Registering scripts and building the symbol registry...");
     let resolved_pack_dir = resolve_pack_dir(scripts_dir, pack_dir);
-    let mut registry = build_symbol_registry(scripts_dir, resolved_pack_dir.as_deref())?;
-    register_scripts_from_sigs(&mut registry, ids, &mut diagnostics, &file_sigs);
+    let mut registry = build_symbol_registry(scripts_dir, resolved_pack_dir.as_deref(), scope)?;
+    register_scripts_from_sigs(scope, &mut registry, ids, &mut diagnostics, &file_sigs);
     info!("  Registered {} scripts", registry.scripts.len());
     registry.drop_registration_scratch();
     for fs in &file_sigs {
@@ -1845,13 +2013,20 @@ fn recompile_to_encoded(
 /// Full compile via the recompile (low-memory) pipeline: writes `script.dat` /
 /// `script.idx` to `output_dir`, then prints diagnostics.
 fn compile_recompile(
+    scope: Scope,
     scripts_dir: &Path,
     pack_dir: Option<&Path>,
     output_dir: &Path,
     lint: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let (encoded, diagnostics) =
-        recompile_to_encoded(scripts_dir, pack_dir, lint, false, &mut ScriptIds::new())?;
+    let (encoded, diagnostics) = recompile_to_encoded(
+        scope,
+        scripts_dir,
+        pack_dir,
+        lint,
+        false,
+        &mut ScriptIds::new(),
+    )?;
     info!(
         "Writing output to {}...",
         output_dir.display().to_string().replace('\\', "/")
@@ -1866,6 +2041,7 @@ fn compile_recompile(
 /// `(script.dat, script.idx)` bytes, then prints diagnostics. Byte-identical to
 /// the in-memory batch path (`compile_memory*`).
 fn compile_recompile_memory(
+    scope: Scope,
     scripts_dir: &Path,
     pack_dir: Option<&Path>,
     lint: bool,
@@ -1873,7 +2049,7 @@ fn compile_recompile_memory(
     ids: &mut ScriptIds,
 ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
     let (encoded, diagnostics) =
-        recompile_to_encoded(scripts_dir, pack_dir, lint, include_tests, ids)?;
+        recompile_to_encoded(scope, scripts_dir, pack_dir, lint, include_tests, ids)?;
     info!("Writing compiled output to memory...");
     let out = ScriptWriter::new("".into()).build_encoded(&encoded);
     diagnostics.print_all();

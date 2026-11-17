@@ -14,8 +14,9 @@
 # RuneScape Compiler (runec)
 
 `runec` compiles RuneScript (`.rs2`) for the server and ClientScript (`.cs2`)
-for the client. GlobalScript (`.gs2`) holds code shared by both. It also provides
-an editor language server and a Rust library with ClientScript decompilation.
+for the client. GlobalScript (`.gs2`) holds code shared by both. LobbyScript
+(`.ls2`) is compiled on its own for a lobby server. It also provides an editor
+language server and a Rust library with ClientScript decompilation.
 
 The examples assume `runec` is installed and on your `PATH`. Run commands from
 your project's root directory and adjust the source, pack and output paths to
@@ -31,33 +32,37 @@ content/
 ├── scripts/
 │   ├── engine.rs2
 │   ├── engine.cs2
+│   ├── engine.ls2
 │   ├── interface_bank/
 │   │   ├── scripts/bank.rs2
 │   │   ├── client/bank.cs2
 │   │   └── global/bank.gs2
 │   ├── skill_combat/
+│   ├── lobby/friends.ls2
 │   └── quests/
 └── pack/                 # script IDs, command opcodes and named assets
 ```
 
 Discovery searches the whole scripts root recursively. File extensions select
 the target: `.rs2` runs on the server, `.cs2` on the client, and `.gs2` is compiled
-for both. Folder names have no effect. Each file can contain multiple scripts.
+for both. `.ls2` runs on the lobby server, which compiles only `.ls2` and never
+`.gs2`. Folder names have no effect. Each file can contain multiple scripts.
 Keep existing feature names and nested source/config folders when adding client
 or shared scripts to a server project.
 Existing `runescript`, `clientscript` and `globalscript` folders still work;
 passing one of those paths resolves to its ancestor `scripts` root.
 
 Configs and constants are shared by default. To restrict a file, put
-`// @scope(server)` or `// @scope(client)` in its leading comments.
-`// @scope(shared)` states the default explicitly. This ownership travels with
+`// @scope(server)`, `// @scope(client)` or `// @scope(lobby)` in its leading
+comments. `// @scope(shared)` states the default explicitly. This ownership travels with
 the file when it moves. Shared scripts can only use shared definitions; each
 target can also use its own private definitions. Script ownership always comes
-from the extension.
+from the extension. LobbyScript uses shared configs and constants but no `.gs2`
+procs, and other targets cannot use `.ls2` scripts.
 
 Your project supplies the engine commands, asset names and script IDs.
-`engine.rs2` and `engine.cs2` declare command parameters and return types. They
-can be anywhere under the root; duplicate engine files are an error.
+`engine.rs2`, `engine.cs2` and `engine.ls2` declare command parameters and return
+types. They can be anywhere under the root; duplicate engine files are an error.
 Client commands follow their declared argument order. A command whose first
 `component` parameter is evaluated last uses `@stack(component_last)`:
 
@@ -84,6 +89,7 @@ The pack directory maps names to IDs:
 | Files | Purpose |
 |---|---|
 | `command.pack` | Server command opcodes; server script IDs are generated in memory |
+| `ls2_command.pack` | Lobby command opcodes, in the `command.pack` format |
 | `cs2_command.pack` and `clientscript.pack` | Client opcodes and script IDs |
 | Other packs, such as `obj.pack` and `inv.pack` | Named assets and game data |
 
@@ -123,6 +129,24 @@ Keep explicit ID entries when renaming scripts. For example, renaming
 `clientscript_1465` to `bank_refresh` requires `1465=[proc,bank_refresh]` in
 `clientscript.pack` to preserve that client's script ID.
 
+## Compile lobby scripts
+
+```bash
+runec compile-lobby --source content/scripts --pack content/pack --output data/lobby
+```
+
+This reads only the `.ls2` scripts and writes `script.dat` and `script.idx` in the
+server format, with script IDs of their own. Lobby commands come from
+`ls2_command.pack`, with signatures in `engine.ls2`; commands listed only in
+`command.pack` do not resolve. Lobby scripts
+accept only the `proc`, `label`, `login`, `logout`, `if_button`, `if_button1` to
+`if_button10`, `if_buttond` and `if_close` triggers, and cannot use the secondary
+player (`.command`, `.%var` or commands that need `.active_player`). Each is a
+compile error. `compile-lobby` takes the same flags as `compile`; without
+`--output`, lobby output goes to `./data/pack/lobby`.
+`runec lint-lobby --source content/scripts --pack content/pack` checks lobby
+scripts without writing output.
+
 ## Check server scripts
 
 ```bash
@@ -144,6 +168,7 @@ Use `--help` for all available options:
 runec --help
 runec compile --help
 runec compile-client --help
+runec compile-lobby --help
 runec lsp --help
 ```
 
@@ -200,7 +225,8 @@ runec lsp --source content/scripts --pack content/pack
 ```
 
 It loads separate server and client analysis contexts from the available engine
-files. Shared scripts are checked against both. Use `--server` or `--client` to
+files, and a lobby context when `engine.ls2` exists. Shared scripts are checked
+against the server and client. Use `--server`, `--client` or `--lobby` to
 restrict a process to one target when needed.
 
 If the editor has separate fields for the executable and arguments, use `runec`
@@ -212,13 +238,14 @@ With `--source`, only that revision's scripts tree, packs and supported
 cache asset folders belong to the server. Files from other revisions opened by
 project-wide search are ignored, so their script names cannot create duplicates.
 
-Map all three script extensions to this server:
+Map all four script extensions to this server:
 
 | File pattern | Language ID |
 |---|---|
 | `*.rs2` | `rs2` |
 | `*.cs2` | `cs2` |
 | `*.gs2` | `gs2` |
+| `*.ls2` | `ls2` |
 
 The language server provides diagnostics, completion, hover, definitions,
 references, rename, syntax highlighting, signature help, inlay hints, formatting,
@@ -344,7 +371,9 @@ Use [Project](src/project.rs) to manage source documents in memory:
 
 The host supplies a [SymbolRegistry](src/symbol.rs) and owns storage and script
 ID persistence. [EngineProfile](src/environment.rs) describes engine-specific
-triggers and pointer rules.
+triggers and pointer rules. `Target::Lobby` compiles `Scope::Lobby` documents to
+server bytecode; a lobby server compiles its scripts tree with
+`compile_lobby_memory_with_ids`.
 
 For ClientScript tools, use [Format](src/clientscript/format.rs) for opcode
 mappings, [Script::decode](src/clientscript/decode.rs) for binary decoding, and

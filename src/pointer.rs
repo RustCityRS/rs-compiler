@@ -1664,16 +1664,6 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         false,
     );
     add(
-        "map_lobby",
-        &[ActivePlayer],
-        &[],
-        &[],
-        &[ActivePlayer2],
-        &[],
-        &[],
-        false,
-    );
-    add(
         "staffmodlevel",
         &[ActivePlayer],
         &[],

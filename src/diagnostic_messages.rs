@@ -46,6 +46,9 @@ pub const SCRIPT_SUBJECT_ONLY_GLOBAL: &str = "Trigger '%s' only allows global su
 pub const SCRIPT_SUBJECT_NO_GLOBAL: &str = "Trigger '%s' does not allow global subjects.";
 pub const SCRIPT_SUBJECT_NO_CATEGORY: &str = "Trigger '%s' does not allow category subjects.";
 pub const SCRIPT_SUBJECT_NO_SPACES: &str = "Trigger '%s' does not allow spaces in subjects.";
+pub const SCRIPT_TRIGGER_NOT_LOBBY: &str = "The trigger type '%s' is not available in lobbyscript.";
+pub const LOBBY_SECONDARY_POINTER: &str =
+    "'%s' uses the secondary player pointer, which is not available in lobbyscript.";
 
 // Switch statement node specific
 pub const SWITCH_INVALID_TYPE: &str = "'%s' is not allowed within a switch statement.";

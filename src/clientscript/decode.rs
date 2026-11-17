@@ -11,12 +11,11 @@ use std::io::Result;
 pub struct Script {
     pub name: String,
     pub local_int_count: u16,
-    pub local_string_count: u16,
+    pub local_obj_count: u16,
     pub local_long_count: u16,
     pub int_param_count: u16,
     pub string_param_count: u16,
     pub long_param_count: u16,
-    /// Physical opcode IDs are retained for disassembly and lossless output.
     pub opcodes: Vec<u16>,
     pub operations: Vec<Opcode>,
     pub int_operands: Vec<i32>,
@@ -177,7 +176,7 @@ impl Script {
         let mut script = Self {
             name: code.string()?,
             local_int_count: counts[0][0],
-            local_string_count: counts[0][1],
+            local_obj_count: counts[0][1],
             local_long_count: counts[0][2],
             int_param_count: counts[1][0],
             string_param_count: counts[1][1],
@@ -234,7 +233,7 @@ impl Script {
             }
             let local = match operation {
                 Opcode::PushIntLocal | Opcode::PopIntLocal => Some(script.local_int_count),
-                Opcode::PushStringLocal | Opcode::PopStringLocal => Some(script.local_string_count),
+                Opcode::PushStringLocal | Opcode::PopStringLocal => Some(script.local_obj_count),
                 Opcode::PushLongLocal | Opcode::PopLongLocal => Some(script.local_long_count),
                 _ => None,
             };

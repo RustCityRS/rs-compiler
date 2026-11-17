@@ -1279,7 +1279,7 @@ impl<'a> PointerChecker<'a> {
                 // distinct opcodes (PushVar/PushVar2); we flatten that into a
                 // single opcode + operand flag and recover it here.
                 Opcode::PushVarp
-                | Opcode::PushVarbit
+                | Opcode::PushVarpBit
                 | Opcode::PushVarcInt
                 | Opcode::PushVarcString
                 | Opcode::PushVarClan
@@ -1298,7 +1298,7 @@ impl<'a> PointerChecker<'a> {
                 }
 
                 Opcode::PopVarp
-                | Opcode::PopVarbit
+                | Opcode::PopVarpBit
                 | Opcode::PopVarcInt
                 | Opcode::PopVarcString
                 | Opcode::PopVarClan
@@ -2574,7 +2574,7 @@ mod tests {
     // Test: secondary (dot-prefixed) var reads require the `*2` pointer
     // -----------------------------------------------------------------------
     // Regression: categorize_nodes used to map every PushVarn/PopVarn (and
-    // PushVarp/PopVarp/PushVarbit/PopVarbit) to the primary active_npc /
+    // PushVarp/PopVarp/PushVarpBit/PopVarpBit) to the primary active_npc /
     // active_player pointer, ignoring the bit-16 "secondary" flag that
     // compiler.rs sets on `.%var` operands. That miscategorization caused
     // the 4 spurious `uninitialized active_npc` warnings at

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// A value a component's hook hands its script.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HookValue {
+pub enum HookArg {
     Int(i32),
     String(String),
 }
@@ -16,20 +16,20 @@ fn hook_value(
     arg: &Expr,
     hint: Option<Type>,
     registry: &SymbolRegistry,
-) -> Result<HookValue, String> {
+) -> Result<HookArg, String> {
     let string = hint.is_some_and(|ty| ty.base_type() == BaseVarType::String);
     Ok(match arg {
-        Expr::IntLiteral(value) | Expr::CoordLiteral(value) => HookValue::Int(*value),
-        Expr::CharLiteral(value) => HookValue::Int(*value as i32),
-        Expr::BoolLiteral(value) => HookValue::Int(i32::from(*value)),
-        Expr::NullLiteral if string => HookValue::String("null".to_owned()),
-        Expr::NullLiteral => HookValue::Int(-1),
+        Expr::IntLiteral(value) | Expr::CoordLiteral(value) => HookArg::Int(*value),
+        Expr::CharLiteral(value) => HookArg::Int(*value as i32),
+        Expr::BoolLiteral(value) => HookArg::Int(i32::from(*value)),
+        Expr::NullLiteral if string => HookArg::String("null".to_owned()),
+        Expr::NullLiteral => HookArg::Int(-1),
         Expr::StringLiteral(name) => match hint
             .filter(|_| !string)
             .and_then(|ty| registry.lookup_reference(name, ty))
         {
-            Some(id) => HookValue::Int(id),
-            None => HookValue::String(name.clone()),
+            Some(id) => HookArg::Int(id),
+            None => HookArg::String(name.clone()),
         },
         Expr::JoinedString { parts } => {
             let mut text = String::new();
@@ -39,7 +39,7 @@ fn hook_value(
                 };
                 text.push_str(part);
             }
-            HookValue::String(text)
+            HookArg::String(text)
         }
         Expr::Identifier(name) | Expr::ConstantVar(name, _) => {
             let component = name
@@ -47,7 +47,7 @@ fn hook_value(
                 .and_then(|(interface, component)| registry.lookup_component(interface, component));
             let reference = hint.and_then(|ty| registry.lookup_reference(name, ty));
             if let Some(id) = component.or(reference) {
-                return Ok(HookValue::Int(id));
+                return Ok(HookArg::Int(id));
             }
             if let Some(SymbolKind::Constant {
                 int_value,
@@ -56,14 +56,14 @@ fn hook_value(
             }) = registry.lookup_constant(name).map(|symbol| &symbol.kind)
             {
                 if let Some(value) = int_value {
-                    return Ok(HookValue::Int(*value));
+                    return Ok(HookArg::Int(*value));
                 }
                 if let Some(value) = string_value {
-                    return Ok(HookValue::String(value.clone()));
+                    return Ok(HookArg::String(value.clone()));
                 }
             }
             match registry.lookup_entity_id(name) {
-                Some(entity) => HookValue::Int(entity.id),
+                Some(entity) => HookArg::Int(entity.id),
                 None => return Err(format!("Unknown hook argument '{name}'")),
             }
         }
@@ -77,7 +77,7 @@ pub fn component_hook(
     text: &str,
     kind: Option<&str>,
     registry: &SymbolRegistry,
-) -> Result<(Vec<HookValue>, Vec<i32>), String> {
+) -> Result<(Vec<HookArg>, Vec<i32>), String> {
     let values = parse(text)?;
     let Expr::Tuple(args) = &values[1] else {
         unreachable!()
@@ -102,7 +102,7 @@ pub fn component_hook(
         _ => unreachable!(),
     };
     let hints = stack_hints(registry, &params, args, &SymbolTable::new());
-    let mut hook = vec![HookValue::Int(script)];
+    let mut hook = vec![HookArg::Int(script)];
     for (arg, hint) in args.iter().zip(hints) {
         hook.push(hook_value(arg, hint, registry)?);
     }

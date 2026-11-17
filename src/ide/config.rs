@@ -15,13 +15,13 @@ use std::path::Path;
 
 pub(super) fn entity_type(kind: &str) -> Option<Type> {
     match kind {
-        "command" | "cs2_command" => None,
+        "command" | "cs2_command" | "ls2_command" => None,
         "if" | "interface" | "overlayinterface" => Some(Type::Interface),
         "idk" => Some(Type::IdKit),
         "mesanim" => Some(Type::MesAnim),
         "namedobj" => Some(Type::Obj),
         "sprites" => Some(Type::Graphic),
-        "writeinv" => Some(Type::WriteinvObj),
+        "writeinv" => Some(Type::WriteInv),
         _ => Type::from_name(kind),
     }
 }
@@ -33,7 +33,7 @@ pub(super) fn key(kind: &str, name: &str) -> String {
         | "varclan" | "varobj" | "varnbit" | "varcon" | "varconbit" => {
             format!("gamevar:{name}")
         }
-        "command" | "cs2_command" => format!("command:{name}"),
+        "command" | "cs2_command" | "ls2_command" => format!("command:{name}"),
         _ => format!(
             "config:{}:{name}",
             entity_type(kind).map_or(kind, |ty| ty.name())
@@ -781,7 +781,7 @@ fn is_placeholder(ty: Type, name: &str) -> bool {
         Type::IdKit => &["idkit", "idk"],
         Type::Texture => &["material", "texture"],
         Type::Varp => &["varplayer", "varp"],
-        Type::Varbit => &["varplayerbit", "varpbit"],
+        Type::VarpBit => &["varplayerbit", "varpbit"],
         Type::Varn => &["varnpc", "varn"],
         Type::Vars => &["varworld", "vars"],
         Type::Varc => &["varclient", "varc"],
@@ -798,7 +798,7 @@ fn is_placeholder(ty: Type, name: &str) -> bool {
 }
 
 fn is_var(ty: Type) -> bool {
-    matches!(ty, Type::Varp | Type::Varn | Type::Vars | Type::Varbit)
+    matches!(ty, Type::Varp | Type::Varn | Type::Vars | Type::VarpBit)
 }
 
 fn mismatch(names: &HashMap<&str, usize>, symbols: &[Symbol], ty: Type, name: &str) -> String {

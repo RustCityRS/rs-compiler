@@ -135,6 +135,15 @@ pub fn patch_command_return_types(registry: &mut SymbolRegistry) {
 /// This matches how 2004scape's Compiler.ts loads CompilerTypeInfo from pack files.
 /// Fails when `command.pack` gives a command an opcode other than its own.
 pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) -> Result<(), String> {
+    load_packs_with_commands(registry, pack_dir, "command.pack")
+}
+
+/// [`load_packs`] with another `opcode=name` command pack, such as `ls2_command.pack`.
+pub(crate) fn load_packs_with_commands(
+    registry: &mut SymbolRegistry,
+    pack_dir: &Path,
+    commands: &str,
+) -> Result<(), String> {
     if !pack_dir.exists() {
         return Ok(());
     }
@@ -143,7 +152,7 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) -> Result<(), 
     // Pack files loaded below may overwrite these with content-specific values.
     register_engine_constants(registry);
 
-    load_commands(registry, &pack_dir.join("command.pack"))?;
+    load_commands(registry, &pack_dir.join(commands))?;
     load_clientscript_pack(registry, &pack_dir.join("clientscript.pack"));
 
     load_game_vars(registry, &pack_dir.join("varp.pack"), "varp");
@@ -192,7 +201,7 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) -> Result<(), 
         ("varclan.pack", Type::VarClan),
         ("varcon.pack", Type::VarCon),
         ("varconbit.pack", Type::VarConBit),
-        ("varnbit.pack", Type::VarNBit),
+        ("varnbit.pack", Type::VarnBit),
         ("varobj.pack", Type::VarObj),
         ("category.pack", Type::Category),
         // UI types (override category)
@@ -226,7 +235,7 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) -> Result<(), 
         ("hunt.pack", Type::Hunt),
         ("npc_mode.pack", Type::NpcMode),
         ("enum.pack", Type::Enum),
-        ("writeinv.pack", Type::WriteinvObj),
+        ("writeinv.pack", Type::WriteInv),
         ("inv.pack", Type::Inv),
         ("loc.pack", Type::Loc),
         ("npc_stat.pack", Type::NpcStat),
@@ -649,7 +658,7 @@ impl Comments {
 /// Scan the game-var configs and refine the type of each matching game-var.
 /// `load_game_vars` defaults everything to `Type::Int`; the real type comes
 /// from the `type=<typename>` line in the config block. Only varp, varn, vars
-/// and varbit are registered from their file alone; the cache's tables number
+/// and varpbit are registered from their file alone; the cache's tables number
 /// the others, through their `.pack`.
 pub fn load_game_var_types(registry: &mut SymbolRegistry, files: &[std::path::PathBuf]) {
     // Track the next auto-assigned ID per category for vars only found in config files.
@@ -1018,6 +1027,7 @@ fn register_type_chars(registry: &mut SymbolRegistry) {
         ("npcstat", 0xFE),
         ("idkit", b'K' as i32), // 75
         ("idk", b'K' as i32),
+        ("wma", b'`' as i32),
     ];
     for (name, val) in type_chars {
         registry.type_chars.insert(name.to_string(), *val);
@@ -1231,8 +1241,8 @@ fn register_engine_constants(registry: &mut SymbolRegistry) {
         ("runecraft", 20),
         ("hunter", 21),
         ("construction", 22),
-        ("summoning", 23),
-        ("dungeoneering", 24),
+        ("animallore", 23),
+        ("rand", 24),
     ];
     for &(name, id) in stats {
         registry.register_entity_id(name.to_string(), Type::Stat, id);

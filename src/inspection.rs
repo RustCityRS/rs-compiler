@@ -670,7 +670,7 @@ fn instruction_effect(instruction: &Instruction, registry: &SymbolRegistry) -> O
         PushVarp
             | PushVarn
             | PushVars
-            | PushVarbit
+            | PushVarpBit
             | PushVarcInt
             | PushVarcString
             | PushVarClan
@@ -688,7 +688,7 @@ fn instruction_effect(instruction: &Instruction, registry: &SymbolRegistry) -> O
             | PopVarp
             | PopVarn
             | PopVars
-            | PopVarbit
+            | PopVarpBit
             | PopVarcInt
             | PopVarcString
             | PopVarClan
