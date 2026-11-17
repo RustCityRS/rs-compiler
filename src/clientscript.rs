@@ -19,7 +19,7 @@ pub mod format;
 pub(crate) mod hooks;
 pub(crate) mod triggers;
 use format::{Format, Width};
-pub use hooks::{HookValue, component_hook};
+pub use hooks::{HookArg, component_hook};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {

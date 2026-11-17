@@ -32,8 +32,8 @@ opcodes! {
     GOSUB = 22 => "gosub";
     JUMP = 23 => "jump";
     SWITCH = 24 => "switch";
-    PUSH_VARBIT = 25 => "push_varbit";
-    POP_VARBIT = 27 => "pop_varbit";
+    PUSH_VARPBIT = 25 => "push_varpbit";
+    POP_VARPBIT = 27 => "pop_varpbit";
     BRANCH_LESS_THAN_OR_EQUALS = 31 => "branch_less_than_or_equals";
     BRANCH_GREATER_THAN_OR_EQUALS = 32 => "branch_greater_than_or_equals";
     PUSH_INT_LOCAL = 33 => "push_int_local";

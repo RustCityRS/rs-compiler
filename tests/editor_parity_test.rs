@@ -424,7 +424,7 @@ const CONFIG_TABLES: &[(&str, Type)] = &[
     ("varclansetting", Type::VarClanSetting),
     ("varcon", Type::VarCon),
     ("varconbit", Type::VarConBit),
-    ("varnbit", Type::VarNBit),
+    ("varnbit", Type::VarnBit),
     ("varobj", Type::VarObj),
 ];
 
@@ -509,10 +509,10 @@ fn a_sprite_name_keeps_its_comma() {
         "3=icon,2\n",
         "pack:sprites",
     );
-    let text = "[msi_0]\nsprite=icon,2\n";
+    let text = "[msi_0]\ngraphic=icon,2\n";
     let msi = project.open_config("mem:all.msi", Scope::Global, 1, text, "msi");
     assert_eq!(
-        definition_after(&project, msi, text, "sprite="),
+        definition_after(&project, msi, text, "graphic="),
         Some(sprites)
     );
 }
@@ -542,7 +542,7 @@ fn a_config_value_can_be_an_id_or_a_table_placeholder() {
         "mem:all.msi",
         Scope::Global,
         1,
-        "[msi_0]\nsprite=1804\n\n[msi_1]\nsprite=sprites_168\n\n[msi_2]\nsprite=null\n",
+        "[msi_0]\ngraphic=1804\n\n[msi_1]\ngraphic=sprites_168\n\n[msi_2]\ngraphic=null\n",
         "msi",
     );
     project.open_config(

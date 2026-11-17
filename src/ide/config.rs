@@ -21,7 +21,7 @@ pub(super) fn entity_type(kind: &str) -> Option<Type> {
         "mesanim" => Some(Type::MesAnim),
         "namedobj" => Some(Type::Obj),
         "sprites" => Some(Type::Graphic),
-        "writeinv" => Some(Type::WriteinvObj),
+        "writeinv" => Some(Type::WriteInv),
         _ => Type::from_name(kind),
     }
 }
@@ -781,7 +781,7 @@ fn is_placeholder(ty: Type, name: &str) -> bool {
         Type::IdKit => &["idkit", "idk"],
         Type::Texture => &["material", "texture"],
         Type::Varp => &["varplayer", "varp"],
-        Type::Varbit => &["varplayerbit", "varpbit"],
+        Type::VarpBit => &["varplayerbit", "varpbit"],
         Type::Varn => &["varnpc", "varn"],
         Type::Vars => &["varworld", "vars"],
         Type::Varc => &["varclient", "varc"],
@@ -798,7 +798,7 @@ fn is_placeholder(ty: Type, name: &str) -> bool {
 }
 
 fn is_var(ty: Type) -> bool {
-    matches!(ty, Type::Varp | Type::Varn | Type::Vars | Type::Varbit)
+    matches!(ty, Type::Varp | Type::Varn | Type::Vars | Type::VarpBit)
 }
 
 fn mismatch(names: &HashMap<&str, usize>, symbols: &[Symbol], ty: Type, name: &str) -> String {

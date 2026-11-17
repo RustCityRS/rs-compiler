@@ -192,7 +192,7 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) -> Result<(), 
         ("varclan.pack", Type::VarClan),
         ("varcon.pack", Type::VarCon),
         ("varconbit.pack", Type::VarConBit),
-        ("varnbit.pack", Type::VarNBit),
+        ("varnbit.pack", Type::VarnBit),
         ("varobj.pack", Type::VarObj),
         ("category.pack", Type::Category),
         // UI types (override category)
@@ -226,7 +226,7 @@ pub fn load_packs(registry: &mut SymbolRegistry, pack_dir: &Path) -> Result<(), 
         ("hunt.pack", Type::Hunt),
         ("npc_mode.pack", Type::NpcMode),
         ("enum.pack", Type::Enum),
-        ("writeinv.pack", Type::WriteinvObj),
+        ("writeinv.pack", Type::WriteInv),
         ("inv.pack", Type::Inv),
         ("loc.pack", Type::Loc),
         ("npc_stat.pack", Type::NpcStat),
@@ -649,7 +649,7 @@ impl Comments {
 /// Scan the game-var configs and refine the type of each matching game-var.
 /// `load_game_vars` defaults everything to `Type::Int`; the real type comes
 /// from the `type=<typename>` line in the config block. Only varp, varn, vars
-/// and varbit are registered from their file alone; the cache's tables number
+/// and varpbit are registered from their file alone; the cache's tables number
 /// the others, through their `.pack`.
 pub fn load_game_var_types(registry: &mut SymbolRegistry, files: &[std::path::PathBuf]) {
     // Track the next auto-assigned ID per category for vars only found in config files.
@@ -1018,6 +1018,7 @@ fn register_type_chars(registry: &mut SymbolRegistry) {
         ("npcstat", 0xFE),
         ("idkit", b'K' as i32), // 75
         ("idk", b'K' as i32),
+        ("wma", b'`' as i32),
     ];
     for (name, val) in type_chars {
         registry.type_chars.insert(name.to_string(), *val);

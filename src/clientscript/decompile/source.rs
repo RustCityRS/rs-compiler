@@ -4,7 +4,7 @@ use super::structure;
 use crate::bytecode::Opcode;
 use crate::clientscript::decode::Script;
 use crate::clientscript::decode::is_branch;
-use crate::clientscript::hooks::{self, HookValue};
+use crate::clientscript::hooks::{self, HookArg};
 use crate::clientscript::{self, Command, CommandKind};
 use crate::parser::Expr;
 use crate::symbol::{SymbolKind, SymbolRegistry};
@@ -21,9 +21,7 @@ pub struct Signature {
     pub param_types: Vec<Type>,
     pub return_types: Vec<Type>,
     pub locals: HashMap<String, Type>,
-    /// The stack of each parameter in order, when a caller shows it.
     pub order: Option<Vec<BaseVarType>>,
-    /// The stack of each return value in order, as the script's end pushes them.
     pub return_order: Vec<BaseVarType>,
 }
 
@@ -63,7 +61,7 @@ fn stack(kind: BaseVarType) -> usize {
 
 pub fn infer_signatures(
     scripts: &HashMap<u32, Script>,
-    component_hooks: &[Vec<HookValue>],
+    component_hooks: &[Vec<HookArg>],
     names: &dyn Names,
     params: &HashMap<i32, bool>,
     commands: &[Command],
@@ -142,13 +140,13 @@ pub fn infer_signatures(
 
 /// How an interface writes a component's hook: `script(args){transmits}`.
 pub fn component_hook_text(
-    values: &[HookValue],
+    values: &[HookArg],
     transmits: Option<(&str, &[i32])>,
     signatures: &HashMap<u32, Signature>,
     names: &dyn Names,
     registry: &SymbolRegistry,
 ) -> Result<String> {
-    let Some(HookValue::Int(script)) = values.first() else {
+    let Some(HookArg::Int(script)) = values.first() else {
         bail!("A hook must start with its script");
     };
     let script = u32::try_from(*script).context("Hook with a negative script")?;
@@ -163,13 +161,13 @@ pub fn component_hook_text(
             .iter()
             .map(|value| {
                 Ok(match value {
-                    HookValue::Int(value) => structure::expressions(&[inference::hook_literal(
+                    HookArg::Int(value) => structure::expressions(&[inference::hook_literal(
                         *value,
                         ints.next().copied(),
                         names,
                         registry,
                     )])?,
-                    HookValue::String(value) => structure::hook_string(value),
+                    HookArg::String(value) => structure::hook_string(value),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -405,7 +403,7 @@ fn decompile_source(
     out.push('\n');
     for (kind, count) in [
         script.local_int_count,
-        script.local_string_count,
+        script.local_obj_count,
         script.local_long_count,
     ]
     .into_iter()
@@ -692,7 +690,7 @@ impl Decompiler<'_> {
                 Some((format!("{}L", script.long_operands[pc].unwrap()), 2))
             }
             Opcode::PushVarp => Some((variable("varp"), 0)),
-            Opcode::PushVarbit => Some((variable("varpbit"), 0)),
+            Opcode::PushVarpBit => Some((variable("varpbit"), 0)),
             Opcode::PushVarcInt => Some((variable("varc"), 0)),
             Opcode::PushVarcString => Some((variable("varcstr"), 1)),
             Opcode::PushClanSettingInt => Some((variable("varclansetting"), 0)),
@@ -724,7 +722,7 @@ impl Decompiler<'_> {
         }
         match opcode {
             Opcode::PopVarp
-            | Opcode::PopVarbit
+            | Opcode::PopVarpBit
             | Opcode::PopVarcInt
             | Opcode::PopVarcString
             | Opcode::PopIntLocal
@@ -732,7 +730,7 @@ impl Decompiler<'_> {
             | Opcode::PopLongLocal => {
                 let (target, kind) = match opcode {
                     Opcode::PopVarp => (variable("varp"), 0),
-                    Opcode::PopVarbit => (variable("varpbit"), 0),
+                    Opcode::PopVarpBit => (variable("varpbit"), 0),
                     Opcode::PopVarcInt => (variable("varc"), 0),
                     Opcode::PopVarcString => (variable("varcstr"), 1),
                     Opcode::PopIntLocal => (local(0), 0),

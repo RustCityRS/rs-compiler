@@ -1,6 +1,6 @@
 use runec::bytecode::{Opcode, Operand};
 use runec::clientscript::{
-    self, HookValue, Source,
+    self, HookArg, Source,
     decode::Script,
     decompile::{self, Names},
     format::Format,
@@ -201,11 +201,11 @@ fn a_component_hook_reads_back_from_how_it_is_written() {
     registry.register_constant("event_com".into(), Type::Int, Some(i32::MIN + 3), None);
     registry.register_game_var("bank_open".into(), Type::Int, 90, "varp".into());
     let values = vec![
-        HookValue::Int(2),
-        HookValue::Int(i32::MIN + 3),
-        HookValue::Int(1),
-        HookValue::String("a<br>b".into()),
-        HookValue::Int(-1),
+        HookArg::Int(2),
+        HookArg::Int(i32::MIN + 3),
+        HookArg::Int(1),
+        HookArg::String("a<br>b".into()),
+        HookArg::Int(-1),
     ];
     let signatures = HashMap::from([(
         2,

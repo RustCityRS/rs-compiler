@@ -281,7 +281,7 @@ fn config_kind(ty: Type) -> Option<&'static str> {
         | Type::Varp
         | Type::Varn
         | Type::Vars
-        | Type::Varbit
+        | Type::VarpBit
         | Type::Hunt
         | Type::Controller
         | Type::Hitmark
@@ -302,7 +302,7 @@ fn config_kind(ty: Type) -> Option<&'static str> {
         | Type::VarClanSetting
         | Type::VarCon
         | Type::VarConBit
-        | Type::VarNBit
+        | Type::VarnBit
         | Type::VarObj => Some(ty.name()),
         _ => None,
     }
@@ -525,7 +525,7 @@ impl Visibility {
     ) -> Option<String> {
         if let Some(kind) = config_kind(ty) {
             let normalized;
-            let name = if !matches!(ty, Type::Varp | Type::Varbit | Type::Varn | Type::Vars) {
+            let name = if !matches!(ty, Type::Varp | Type::VarpBit | Type::Varn | Type::Vars) {
                 normalized = crate::symbol::normalize_entity_name(name);
                 normalized.as_ref()
             } else {

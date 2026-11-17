@@ -101,7 +101,7 @@ const PARAM: &[Value] = &[Config(Type::Param), OfParam];
 const PARAM_INT: &[Value] = &[Config(Type::Param), Number];
 const PARAM_TEXT: &[Value] = &[Config(Type::Param), Text];
 const VARP_RANGE: &[Value] = &[Config(Type::Varp), Number, Number];
-const VARBIT_RANGE: &[Value] = &[Config(Type::Varbit), Number, Number];
+const VARPBIT_RANGE: &[Value] = &[Config(Type::VarpBit), Number, Number];
 const TILE: &[Value] = &[Tile];
 
 const AREA: &[Field] = &[("colour", RGB), ("trigger", FLAG)];
@@ -110,7 +110,6 @@ const BAS: &[Field] = &[
     ("readyanim", SEQ),
     ("readyanim_l", SEQ),
     ("readyanim_r", SEQ),
-    ("readyanim_random", WEIGHTED_SEQ),
     ("walkanim", SEQ),
     ("walkanim_b", SEQ),
     ("walkanim_l", SEQ),
@@ -123,7 +122,6 @@ const BAS: &[Field] = &[
     ("crawlanim_b", SEQ),
     ("crawlanim_l", SEQ),
     ("crawlanim_r", SEQ),
-    ("rotate", NUMBER),
     ("turnspeed", NUMBER),
     ("turnmax", NUMBER),
     ("rollspeed", NUMBER),
@@ -311,8 +309,6 @@ const INV: &[Field] = &[
 
 const LIGHT: &[Field] = &[
     ("amplitude", NUMBER),
-    ("speed", NUMBER),
-    ("base", NUMBER),
     ("function", NUMBER),
     ("frequency", NUMBER),
     ("offset", NUMBER),
@@ -335,11 +331,8 @@ const LOC: &[Field] = &[
     ("paramint", PARAM_INT),
     ("paramstr", PARAM_TEXT),
     ("cursor", OP_CURSOR),
-    ("msi_id", &[Config(Type::Msi)]),
     ("mapelement", &[Config(Type::MapElement)]),
     ("quest", QUEST),
-    ("ambient_sfx", NUMBER),
-    ("ambient_sfx_random", NUMBER),
     ("occlude", FLAG),
     ("occlude_off", FLAG),
     ("hillskew", FLAG),
@@ -352,7 +345,6 @@ const LOC: &[Field] = &[
     ("mirror", FLAG),
     ("shadow", FLAG),
     ("breakroutefinding", FLAG),
-    ("noblocks_npcs", FLAG),
     ("members_only", FLAG),
     ("hidden", FLAG),
     ("absent", FLAG),
@@ -366,9 +358,7 @@ const LOC: &[Field] = &[
     ("resizey", NUMBER),
     ("resizez", NUMBER),
     ("raiseobject", FLAG),
-    ("hillskew_t", NUMBER),
     ("wallwidth", NUMBER),
-    ("interaction_sides", NUMBER),
     ("offsetx", NUMBER),
     ("offsety", NUMBER),
     ("offsetz", NUMBER),
@@ -408,7 +398,7 @@ const MEL: &[Field] = &[
     ("opbase", TEXT),
     (
         "showvar",
-        &[Config(Type::Varbit), Config(Type::Varp), Number, Number],
+        &[Config(Type::VarpBit), Config(Type::Varp), Number, Number],
     ),
     ("show", WORD),
     ("mapfunction", FLAG),
@@ -425,14 +415,7 @@ const MEL: &[Field] = &[
 
 const MESANIM: &[Field] = &[("len", SEQ)];
 
-const MSI: &[Field] = &[
-    ("sprite", GRAPHIC),
-    ("nosprite", FLAG),
-    ("locsize", FLAG),
-    ("colour", RGB),
-    ("graphic", GRAPHIC),
-    ("resize", FLAG),
-];
+const MSI: &[Field] = &[("colour", RGB), ("graphic", GRAPHIC), ("resize", FLAG)];
 
 const NPC_FIELDS: &[Field] = &[
     ("model", MODEL),
@@ -457,14 +440,8 @@ const NPC_FIELDS: &[Field] = &[
     ("blockwalk", WORD),
     ("vislevel", NUMBER),
     ("cursor", OP_CURSOR),
-    ("attackcursor", &[Config(Type::Cursor)]),
     ("alwaysontop", FLAG),
     ("minimap", FLAG),
-    ("visiblepriority", FLAG),
-    ("invisiblepriority", FLAG),
-    ("animateidle", FLAG),
-    ("clickable", FLAG),
-    ("slowwalk", FLAG),
     ("members", FLAG),
     ("vorbis", FLAG),
     ("givechase", FLAG),
@@ -473,7 +450,6 @@ const NPC_FIELDS: &[Field] = &[
     ("contrast", NUMBER),
     ("walkmask", NUMBER),
     ("size", NUMBER),
-    ("mainoptionindex", NUMBER),
     ("resizeh", NUMBER),
     ("resizev", NUMBER),
     ("hitbar", NUMBER),
@@ -493,22 +469,8 @@ const NPC_FIELDS: &[Field] = &[
     ("ranged", NUMBER),
     ("headicon", NUMBER),
     ("unknown", NUMBER),
-    ("idlesound", NUMBER),
-    ("crawlsound", NUMBER),
-    ("walksound", NUMBER),
-    ("runsound", NUMBER),
-    ("sounddistance", NUMBER),
-    ("soundvolume", NUMBER),
-    ("campaign", NUMBER),
     ("timer", NUMBER),
-    ("translate", NUMBER),
-    ("slayertype", NUMBER),
-    ("shadowcolour", NUMBER),
-    ("shadowmod", NUMBER),
     ("tint", NUMBER),
-    ("armyicon", NUMBER),
-    ("height", NUMBER),
-    ("mapfunction", NUMBER),
     ("patrol", NUMBER),
     ("multinpc", &[Number, Config(Type::Npc)]),
     ("membersop", TEXT),
@@ -600,9 +562,9 @@ const QUEST_FIELDS: &[Field] = &[
     ("name", TEXT),
     ("sortname", TEXT),
     ("progressvarp", VARP_RANGE),
-    ("progressvarbit", VARBIT_RANGE),
+    ("progressvarpbit", VARPBIT_RANGE),
     ("varprequirement", VARP_RANGE),
-    ("varbitrequirement", VARBIT_RANGE),
+    ("varpbitrequirement", VARPBIT_RANGE),
     ("questrequirement", QUEST),
     ("statrequirement", &[Config(Type::Stat), Number]),
     ("pointsrequirement", NUMBER),
@@ -616,7 +578,7 @@ const QUEST_FIELDS: &[Field] = &[
     ("icon", GRAPHIC),
     ("mainstartcoord", NUMBER),
     ("viacoord", NUMBER),
-    ("masterquestvarbit", VARBIT_RANGE),
+    ("masterquestvarpbit", VARPBIT_RANGE),
     ("masterquestvarp", VARP_RANGE),
     ("parent", QUEST),
     ("questpoints", NUMBER),
@@ -628,16 +590,8 @@ const SEQ_FIELDS: &[Field] = &[
     ("frame", WORD),
     ("iframe", WORD),
     ("delay", NUMBER),
-    ("synth", NUMBER),
-    ("op", NUMBER),
-    ("sound_mask", NUMBER),
-    ("loopoffset", NUMBER),
     ("priority", NUMBER),
     ("walkmerge", WORD),
-    ("looptype", NUMBER),
-    ("interrupt", NUMBER),
-    ("loopcount", NUMBER),
-    ("tween", FLAG),
     ("loops", NUMBER),
     ("maxloops", NUMBER),
     ("duplicatebehaviour", WORD),
@@ -683,9 +637,9 @@ const DEFAULTS: &[Field] = &[
     ("maxhitmarks", NUMBER),
     ("hitmarkoffset", NUMBER),
     ("performancemetricsmodel", MODEL),
-    ("unknown1", TEXTURE),
-    ("unknown4", &[Config(Type::Enum)]),
-    ("unknown5", &[Config(Type::Enum)]),
+    ("environmentmap", TEXTURE),
+    ("titles", &[Config(Type::Enum)]),
+    ("femaletitles", &[Config(Type::Enum)]),
     ("wearpostype", NUMBER),
 ];
 
@@ -806,7 +760,7 @@ const IF3: &[Field] = &[
     ("onvarcstrtransmit", HOOK),
 ];
 
-const VARBIT_FIELDS: &[Field] = &[("basevar", VARP), ("startbit", NUMBER), ("endbit", NUMBER)];
+const VARPBIT_FIELDS: &[Field] = &[("basevar", VARP), ("startbit", NUMBER), ("endbit", NUMBER)];
 
 const VARCONBIT_FIELDS: &[Field] = &[
     ("basevar", &[Config(Type::VarCon)]),
@@ -873,7 +827,7 @@ pub(super) fn keys(kind: &str) -> &'static [Field] {
         "seq" => SEQ_FIELDS,
         "spotanim" => SPOTANIM,
         "struct" => STRUCT,
-        "varpbit" => VARBIT_FIELDS,
+        "varpbit" => VARPBIT_FIELDS,
         "varconbit" => VARCONBIT_FIELDS,
         "varcon" => VARC,
         "controller" => CONTROLLER,
