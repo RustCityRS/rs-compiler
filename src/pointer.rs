@@ -762,6 +762,16 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         false,
     );
     add(
+        "getsofttimer",
+        &[ActivePlayer],
+        &[],
+        &[],
+        &[ActivePlayer2],
+        &[],
+        &[],
+        false,
+    );
+    add(
         "coord",
         &[ActivePlayer],
         &[],

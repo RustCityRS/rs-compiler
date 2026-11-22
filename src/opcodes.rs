@@ -312,6 +312,7 @@ opcodes! {
     RUNCLIENTSCRIPTVARARG = 2187 => "runclientscriptvararg";
     SOUND_SPEECH_STOP = 2188 => "sound_speech_stop";
     SOUND_SPEECH_VOLUME = 2189 => "sound_speech_volume";
+    GETSOFTTIMER = 2190 => "getsofttimer";
 
     // Npc
     NPC_ADD = 2500 => "npc_add";
