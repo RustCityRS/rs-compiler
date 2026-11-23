@@ -48,7 +48,16 @@ fn quoted_hooks_preserve_arguments_transmits_and_clearing() {
                 vec![],
             );
             registry.set_stack_script("clientscript", "callback");
-            let component = if explicit { ", 762:95" } else { "" };
+            registry.register_entity_id(
+                "interface_762:com95".into(),
+                Type::Component,
+                762 << 16 | 95,
+            );
+            let component = if explicit {
+                ", interface_762:com95"
+            } else {
+                ""
+            };
             let triggers = if transmits { ", 5, 9, 2" } else { "" };
             let suffix = if transmits { "Y" } else { "" };
             let text = format!(
@@ -364,7 +373,15 @@ fn hook_descriptors_restore_callback_parameter_types() {
     let params = vec![Type::ClientScript, Type::String];
     registry.register_command("set_hook".into(), 1407, params.clone(), vec![]);
     registry.set_command_behavior("set_hook", true, Some(false), None);
-    let source = Source::parse("[proc,value]\nset_hook(callback, 1, 2, 3, 4, 5, \"zf\u{00ab}ke\");\n[clientscript,callback](int $a, int $b, int $c, int $d, int $e)\n", Path::new("hooks.cs2")).unwrap();
+    for (name, ty, id) in [
+        ("fontmetrics_2", Type::FontMetrics, 2),
+        ("vorbis_3", Type::Vorbis, 3),
+        ("chatcat_4", Type::ChatCat, 4),
+        ("chatphrase_5", Type::ChatPhrase, 5),
+    ] {
+        registry.register_entity_id(name.into(), ty, id);
+    }
+    let source = Source::parse("[proc,value]\nset_hook(callback, 1, fontmetrics_2, vorbis_3, chatcat_4, chatphrase_5, \"zf\u{00ab}ke\");\n[clientscript,callback](int $a, int $b, int $c, int $d, int $e)\n", Path::new("hooks.cs2")).unwrap();
     clientscript::register(
         &source.file,
         &HashMap::from([
@@ -422,7 +439,9 @@ fn hook_descriptors_restore_callback_parameter_types() {
     )
     .unwrap();
     assert!(
-        text.contains("set_hook(\"callback(1, 2, 3, 4, 5)\")"),
+        text.contains(
+            "set_hook(\"callback(1, fontmetrics_2, vorbis_3, chatcat_4, chatphrase_5)\")"
+        ),
         "{text}"
     );
     assert_eq!(
@@ -928,7 +947,7 @@ fn a_quoted_component_in_a_hook_keeps_the_arguments_after_it_in_place() {
     registry.set_command_behavior("set_hook", true, Some(false), None);
     registry.register_entity_id("interface_3:7_slot".into(), Type::Component, 3 << 16 | 7);
     let source = Source::parse(
-        "[proc,value]\ndef_int $count = 5;\nset_hook(callback, 196615, $count, 9, \"Iii\");\n[clientscript,callback](int $a, int $b, int $c)\n",
+        "[proc,value]\ndef_int $count = 5;\nset_hook(callback, interface_3:7_slot, $count, 9, \"Iii\");\n[clientscript,callback](int $a, int $b, int $c)\n",
         Path::new("hooks.cs2"),
     )
     .unwrap();

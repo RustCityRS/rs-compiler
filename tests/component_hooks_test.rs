@@ -151,7 +151,8 @@ fn component_evaluation_order_requires_valid_metadata_and_ignores_opcode_ids() {
         "target":"client",
         "opcodes":"0=PushConstantInt\n21=Return\n9007=paint\n",
         "commands":[{"name":"paint","opcode":9007,"params":["component","rgb"],"returns":[],"stack":"component_last"}],
-        "sources":[{"uri":"paint.cs2","languageId":"cs2","text":"[clientscript,entry]\npaint(65538, 16711680);\n"}]
+        "entities":[{"name":"panel:button","type":"component","id":65538,"scope":"global"}],
+        "sources":[{"uri":"paint.cs2","languageId":"cs2","text":"[clientscript,entry]\npaint(panel:button, 16711680);\n"}]
     });
     let mut project = runec::lsp::project_from_json(&environment).unwrap();
     let compilation = project.compile();

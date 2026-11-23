@@ -586,16 +586,58 @@ fn errors_use_typechecking_phase() {
 // ── Named-type / int strict type checking ──────────────────────────
 
 #[test]
-fn int_literal_adopts_named_type_hint() {
+fn int_literal_for_named_type_is_a_raw_id() {
     let res = check(
         "[proc,hint_test]\n\
          def_stat $s = 5;\n\
          def_npc_mode $m = 0;\n",
     );
-    assert_eq!(
-        res.error_count(),
-        0,
-        "literals should adopt hint type, got:\n{}",
+    assert_eq!(res.error_count(), 2, "got:\n{}", res.dump());
+    assert!(
+        res.has_error_containing("`5` is a raw `stat` id: use its name."),
+        "got:\n{}",
+        res.dump()
+    );
+    let res = check(
+        "[proc,hint_test]\n\
+         def_stat $s = null;\n\
+         def_int $x = 5;\n",
+    );
+    assert_eq!(res.error_count(), 0, "got:\n{}", res.dump());
+}
+
+#[test]
+fn minus_one_for_named_type_is_null() {
+    let res = check(
+        "[proc,null_test]\n\
+         def_stat $s = -1;\n",
+    );
+    assert!(
+        res.has_error_containing("`-1` for a `stat`: use `null`."),
+        "got:\n{}",
+        res.dump()
+    );
+}
+
+#[test]
+fn raw_type_code_names_the_type() {
+    let mut reg = empty_registry();
+    reg.register_command(
+        "enum".into(),
+        3408,
+        vec![Type::Int, Type::Int, Type::Enum, Type::Int],
+        vec![Type::Int],
+    );
+    let res = check_with_registry(
+        "[proc,codes](enum $enum)\n\
+         def_int $x = enum(105, 74, $enum, 0);\n",
+        reg,
+    );
+    assert_eq!(res.error_count(), 2, "got:\n{}", res.dump());
+    assert!(
+        res.has_error_containing("`105` is a raw type code: use `int`.")
+            && res.has_error_containing("`74` is a raw type code: use `struct`."),
+        "got:\n{}",
         res.dump()
     );
 }
@@ -606,7 +648,7 @@ fn namedobj_assignable_to_obj() {
     reg.register_command("obj_test".into(), 2000, vec![Type::Obj], vec![]);
     let res = check_with_registry(
         "[proc,namedobj_ok]\n\
-         def_namedobj $n = 0;\n\
+         def_namedobj $n = null;\n\
          obj_test($n);\n",
         reg,
     );
@@ -655,7 +697,7 @@ fn region_uid_is_its_own_type() {
          def_region_uid $uid = region_uid;\n\
          if (region_findbyuid($uid) = true) {\n\
          }\n\
-         if (region_findbyuid(-1) = false) {\n\
+         if (region_findbyuid(null) = false) {\n\
          }\n\
          if (region_uid = $uid) {\n\
          }\n",
@@ -681,7 +723,7 @@ fn region_uid_is_its_own_type() {
 fn named_type_to_int_lenient_in_production() {
     let res = check(
         "[proc,cross_type]\n\
-         def_stat $s = 0;\n\
+         def_stat $s = null;\n\
          def_int $x = $s;\n",
     );
     assert_eq!(
@@ -743,18 +785,17 @@ fn int_arg_widens_to_named_command_param() {
 }
 
 #[test]
-fn command_literal_arg_adopts_named_type() {
+fn command_literal_arg_is_a_raw_id() {
     let mut reg = empty_registry();
     reg.register_command("boost_stat".into(), 2001, vec![Type::Stat], vec![]);
     let res = check_with_registry(
-        "[proc,cmd_hint_ok]\n\
+        "[proc,cmd_hint]\n\
          boost_stat(5);\n",
         reg,
     );
-    assert_eq!(
-        res.error_count(),
-        0,
-        "literal arg should adopt stat hint, got:\n{}",
+    assert!(
+        res.has_error_containing("`5` is a raw `stat` id: use its name."),
+        "got:\n{}",
         res.dump()
     );
 }
@@ -793,17 +834,16 @@ fn named_type_to_different_named_proc_param_errors() {
 }
 
 #[test]
-fn proc_literal_arg_adopts_named_type() {
+fn proc_literal_arg_is_a_raw_id() {
     let res = check(
         "[proc,takes_stat](stat $s)\n\
          return;\n\
          [proc,caller]\n\
          ~takes_stat(5);\n",
     );
-    assert_eq!(
-        res.error_count(),
-        0,
-        "literal arg should adopt stat hint for proc param, got:\n{}",
+    assert!(
+        res.has_error_containing("`5` is a raw `stat` id: use its name."),
+        "got:\n{}",
         res.dump()
     );
 }
@@ -838,15 +878,14 @@ fn return_wrong_named_type_errors() {
 }
 
 #[test]
-fn return_literal_for_stat_proc_ok() {
+fn return_literal_for_stat_proc_is_a_raw_id() {
     let res = check(
         "[proc,ret_stat]()(stat)\n\
          return(0);\n",
     );
-    assert_eq!(
-        res.error_count(),
-        0,
-        "literal return should adopt stat hint, got:\n{}",
+    assert!(
+        res.has_error_containing("`0` is a raw `stat` id: use its name."),
+        "got:\n{}",
         res.dump()
     );
 }

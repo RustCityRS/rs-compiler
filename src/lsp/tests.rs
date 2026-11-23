@@ -1267,7 +1267,7 @@ fn pointer_code_lenses_without_refresh_wait_for_idle_and_cache_shared_components
             ],
             "sources":[
                 {"uri":shared,"languageId":"gs2","text":"[proc,paint]\ncc_settext(\"x\");\n"},
-                {"uri":caller,"languageId":"cs2","text":"[clientscript,entry]\n~paint;\n[clientscript,local]\ncc_create(1, 4, 0);\n~paint;\n[proc,secondary]\n.cc_settext(\"x\");\n"},
+                {"uri":caller,"languageId":"cs2","text":"[clientscript,entry]\n~paint;\n[clientscript,local]\ncc_create(null, 4, 0);\n~paint;\n[proc,secondary]\n.cc_settext(\"x\");\n"},
                 {"uri":other_scope,"languageId":"rs2","text":"[proc,secondary]\nreturn;\n"}
             ]
         }}}),
@@ -1339,7 +1339,7 @@ fn client_pointer_diagnostics_cross_shared_procedures_and_clear_after_edit() {
         json!({"id":20,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":uri}}}),
         json!({"method":"test/idle"}),
         json!({"id":2,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":uri}}}),
-        json!({"method":"textDocument/didChange","params":{"textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":"[clientscript,entry]\ncc_create(1, 4, 0);\n~paint;"}]}}),
+        json!({"method":"textDocument/didChange","params":{"textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":"[clientscript,entry]\ncc_create(null, 4, 0);\n~paint;"}]}}),
         json!({"method":"test/idle"}),
         json!({"id":3,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":uri}}}),
         json!({"id":4,"method":"shutdown"}),

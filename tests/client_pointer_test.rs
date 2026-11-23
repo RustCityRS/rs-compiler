@@ -62,60 +62,60 @@ fn component_selection_is_independent_and_requires_successful_control_flow() {
     for (body, pointer) in [
         ("cc_settext(\"x\");", Some("active_component")),
         (".cc_settext(\"x\");", Some(".active_component")),
-        ("cc_create(1, 4, 0); cc_settext(\"x\");", None),
+        ("cc_create(null, 4, 0); cc_settext(\"x\");", None),
         (
-            "cc_create(1, 4, 0); .cc_settext(\"x\");",
+            "cc_create(null, 4, 0); .cc_settext(\"x\");",
             Some(".active_component"),
         ),
-        (".cc_create(1, 4, 0); .cc_settext(\"x\");", None),
-        ("if (cc_find(1, 0) = true) { cc_settext(\"x\"); }", None),
+        (".cc_create(null, 4, 0); .cc_settext(\"x\");", None),
+        ("if (cc_find(null, 0) = true) { cc_settext(\"x\"); }", None),
         (
-            "if (cc_find(1, 0) = false) { cc_settext(\"x\"); }",
+            "if (cc_find(null, 0) = false) { cc_settext(\"x\"); }",
             Some("active_component"),
         ),
         (
-            "if (cc_find(1, 0) = false) { return; } cc_settext(\"x\");",
+            "if (cc_find(null, 0) = false) { return; } cc_settext(\"x\");",
             None,
         ),
-        ("if (cc_find(1, 0) ! 0) { cc_settext(\"x\"); }", None),
+        ("if (cc_find(null, 0) ! 0) { cc_settext(\"x\"); }", None),
         (
-            "if (cc_find(1, 0) ! 1) { cc_settext(\"x\"); }",
+            "if (cc_find(null, 0) ! 1) { cc_settext(\"x\"); }",
             Some("active_component"),
         ),
-        ("if (.if_find(1) = true) { .cc_settext(\"x\"); }", None),
+        ("if (.if_find(null) = true) { .cc_settext(\"x\"); }", None),
         (
-            "cc_find(1, 0); cc_settext(\"x\");",
-            Some("active_component"),
-        ),
-        (
-            "cc_find(1, 0); if ($flag = true) { cc_settext(\"x\"); }",
+            "cc_find(null, 0); cc_settext(\"x\");",
             Some("active_component"),
         ),
         (
-            "if (cc_find(1, 0) = true & $flag = 1) { cc_settext(\"x\"); }",
+            "cc_find(null, 0); if ($flag = true) { cc_settext(\"x\"); }",
+            Some("active_component"),
+        ),
+        (
+            "if (cc_find(null, 0) = true & $flag = 1) { cc_settext(\"x\"); }",
             None,
         ),
         (
-            "if (cc_find(1, 0) = true | $flag = 1) { cc_settext(\"x\"); }",
+            "if (cc_find(null, 0) = true | $flag = 1) { cc_settext(\"x\"); }",
             Some("active_component"),
         ),
         (
-            "if ($flag = 1) { cc_create(1, 4, 0); } cc_settext(\"x\");",
+            "if ($flag = 1) { cc_create(null, 4, 0); } cc_settext(\"x\");",
             Some("active_component"),
         ),
         (
-            "while ($flag = 1) { cc_create(1, 4, 0); $flag = 0; } cc_settext(\"x\");",
+            "while ($flag = 1) { cc_create(null, 4, 0); $flag = 0; } cc_settext(\"x\");",
             Some("active_component"),
         ),
         (
-            "cc_create(1, 4, 0); cc_find(2, 0); cc_settext(\"x\");",
+            "cc_create(null, 4, 0); cc_find(null, 0); cc_settext(\"x\");",
             None,
         ),
         ("cc_delete;", Some("active_component")),
-        ("cc_create(1, 4, 0); cc_delete; cc_settext(\"x\");", None),
-        ("cc_deleteall(1); if_settext(\"x\", 1);", None),
+        ("cc_create(null, 4, 0); cc_delete; cc_settext(\"x\");", None),
+        ("cc_deleteall(null); if_settext(\"x\", null);", None),
         (
-            "%state = 1; if (%state = 1) { if_settext(\"x\", 1); }",
+            "%state = 1; if (%state = 1) { if_settext(\"x\", null); }",
             None,
         ),
     ] {
@@ -152,7 +152,7 @@ fn shared_procedure_requirements_and_setters_reach_client_callers() {
         "select.gs2",
         Scope::Global,
         1,
-        "[proc,select]\ncc_create(1, 4, 0);",
+        "[proc,select]\ncc_create(null, 4, 0);",
     );
     project.open("nested.gs2", Scope::Global, 1, "[proc,nested]\n~paint;");
     let entry = project.open(

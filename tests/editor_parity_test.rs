@@ -21,12 +21,13 @@ fn quoted_callbacks_have_code_navigation_completion_highlighting_and_diagnostics
                 {"name":"runclientscriptvararg","opcode":5013,"params":["int"]}
             ],
             "constants":[{"name":"limit","type":"int","value":99,"scope":"global"}],
+            "entities":[{"name":"panel:clock","type":"component","id":49938527,"scope":"global"}],
             "variables":[{"name":"known","type":"int","id":1,"category":"varp","scope":"global"}],
             "scriptIds":[{"trigger":"clientscript","name":"callback","id":2}],
             "sources":[{"uri":"mem:callback","languageId":"cs2","text":"[clientscript,callback](int $first, int $second, int $third)\n"}]
         })).unwrap();
         let call = if client {
-            "if_setontimer(\"callback($value, ^limit, %known)\", 762:95);"
+            "if_setontimer(\"callback($value, ^limit, %known)\", panel:clock);"
         } else {
             "runclientscript(\"callback($value, ^limit, %known)\");"
         };

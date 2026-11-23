@@ -237,9 +237,10 @@ fn inspection_shows_expanded_hook_stack_and_bare_calls() {
     );
     registry.set_command_behavior("set_hook", true, Some(true), None);
     registry.set_component_first_command("set_hook", true);
+    registry.register_entity_id("panel:button".into(), Type::Component, 42);
     registry.register_command("current".into(), 456, vec![], vec![Type::Int]);
     let source = r#"[proc,main]
-set_hook(42, "callback(7, \"hello\")");
+set_hook(panel:button, "callback(7, \"hello\")");
 def_int $value = current;
 "#;
     let offset = source.find("set_hook").unwrap();

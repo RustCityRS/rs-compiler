@@ -1,6 +1,6 @@
 use crate::arguments::{
     command_hints, command_parameters, command_returns, expression_types, positional_hints,
-    proc_hints, stack_hints,
+    proc_hints, stack_hints, takes_type_keyword,
 };
 use crate::bytecode::*;
 use crate::clientscript::decompile::inference::written_end;
@@ -1853,20 +1853,7 @@ impl<'a> Compiler<'a> {
                     }
                     // For 'enum' command, args 0 and 1 are input/output type chars.
                     // Resolve plain identifiers as type chars before falling through to commands.
-                    if (lookup_name == "enum"
-                        || lookup_name == "enum2"
-                        || lookup_name == "db_getfield"
-                        || lookup_name == "db_find"
-                        || lookup_name == "db_find_refine"
-                        || lookup_name == "db_findbyindex"
-                        || lookup_name == "db_find_with_count"
-                        || lookup_name == "param"
-                        || self
-                            .registry
-                            .type_arguments
-                            .get(lookup_name)
-                            .is_some_and(|&n| i < n))
-                        && (i == 0 || i == 1)
+                    if takes_type_keyword(self.registry, lookup_name, i)
                         && let Expr::Identifier(n) = arg
                         && let Some(&tc) = self.registry.type_chars.get(n.as_str())
                     {

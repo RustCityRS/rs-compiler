@@ -92,6 +92,32 @@ pub fn command_returns(registry: &SymbolRegistry, name: &str, args: &[Expr]) -> 
     }
 }
 
+/// Whether a command's argument `index` is a type (`enum(int, obj, ...)`).
+pub(crate) fn is_type_argument(registry: &SymbolRegistry, name: &str, index: usize) -> bool {
+    index < 2
+        && (name == "enum"
+            || registry
+                .type_arguments
+                .get(name)
+                .is_some_and(|&n| index < n))
+}
+
+/// Whether an identifier at argument `index` may be a type keyword.
+pub(crate) fn takes_type_keyword(registry: &SymbolRegistry, name: &str, index: usize) -> bool {
+    is_type_argument(registry, name, index)
+        || index < 2
+            && matches!(
+                name,
+                "enum2"
+                    | "db_getfield"
+                    | "db_find"
+                    | "db_find_refine"
+                    | "db_findbyindex"
+                    | "db_find_with_count"
+                    | "param"
+            )
+}
+
 pub fn command_hints(
     registry: &SymbolRegistry,
     name: &str,

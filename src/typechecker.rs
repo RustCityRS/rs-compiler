@@ -1,5 +1,6 @@
 use crate::arguments::{
-    command_hints, command_parameters, command_returns, positional_hints, proc_hints, stack_hints,
+    command_hints, command_parameters, command_returns, is_type_argument, positional_hints,
+    proc_hints, stack_hints,
 };
 use crate::clientscript::{hooks, triggers};
 use crate::compiler::Compiler;
@@ -34,6 +35,30 @@ const LITERAL_TYPES: &[Type] = &[
 
 fn is_literal_type(t: Type) -> bool {
     LITERAL_TYPES.contains(&t)
+}
+
+/// An int literal written where a `ty` belongs: everything named is written by name.
+/// A colour or a region coord is a value, not an id.
+pub(crate) fn raw_id_error(value: i32, ty: Type) -> Option<String> {
+    if is_literal_type(ty)
+        || matches!(
+            ty,
+            Type::Error
+                | Type::Any
+                | Type::Colour
+                | Type::IntBool
+                | Type::ClanForumQfc
+                | Type::IntArray
+                | Type::RegionCoord
+        )
+    {
+        return None;
+    }
+    Some(if value == -1 {
+        msg::fmt(msg::RAW_NULL_ID, &[ty.name()])
+    } else {
+        msg::fmt(msg::RAW_ID, &[&value.to_string(), ty.name()])
+    })
 }
 
 pub struct TypeChecker<'a> {
@@ -922,11 +947,10 @@ impl<'a> TypeChecker<'a> {
             self.error(at, msg::fmt(msg::LOBBY_SECONDARY_POINTER, &[&form]));
         }
         match expr {
-            Expr::IntLiteral(_) => {
-                // Matching TS visitIntegerLiteral: if hint is a non-literal type,
-                // the integer is treated as a symbol reference of that type.
+            Expr::IntLiteral(value) => {
                 if let Some(h) = hint {
-                    if !is_literal_type(h) && h != Type::Error && h != Type::Any {
+                    if let Some(message) = raw_id_error(*value, h) {
+                        self.error(line, message);
                         return Some(h);
                     }
                     if h == Type::Boolean {
@@ -1335,11 +1359,28 @@ impl<'a> TypeChecker<'a> {
                 let args = lowered.as_deref().unwrap_or(args);
                 let hints = command_hints(self.registry, lookup_name, args, locals);
 
+                // A runclientscript callback's ids are already resolved: its
+                // literals are the ones `hooks::server_call` checked or made.
+                let resolved = call.is_some();
                 let arg_types: Vec<Option<Type>> = args
                     .iter()
                     .enumerate()
                     .map(|(i, a)| {
+                        if let Expr::IntLiteral(code) = a
+                            && is_type_argument(self.registry, lookup_name, i)
+                        {
+                            let name = u8::try_from(*code)
+                                .ok()
+                                .and_then(|code| Type::from_char(code as char))
+                                .map_or("its type name", |ty| ty.name());
+                            self.error(
+                                *call_line,
+                                msg::fmt(msg::RAW_TYPE_CODE, &[&code.to_string(), name]),
+                            );
+                        }
                         let arg_hint = hints.get(i).copied().flatten();
+                        let arg_hint =
+                            arg_hint.filter(|_| !(resolved && matches!(a, Expr::IntLiteral(_))));
                         self.infer_expr_type(a, locals, *call_line, arg_hint)
                     })
                     .collect();

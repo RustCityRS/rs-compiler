@@ -145,6 +145,11 @@ pub const UNRESOLVED_ENTITY_REF: &str = "`%s` does not resolve to a known `%s` â
 // form for clarity.
 pub const PREFER_BARE_IDENT: &str = "`\"%s\"` resolves to a `%s` entity; the bare identifier form is preferred when the name has no spaces.";
 
+// A `%s` takes a name: an int literal there is a raw id.
+pub const RAW_ID: &str = "`%s` is a raw `%s` id: use its name.";
+pub const RAW_NULL_ID: &str = "`-1` for a `%s`: use `null`.";
+pub const RAW_TYPE_CODE: &str = "`%s` is a raw type code: use `%s`.";
+
 pub const TEST_PROC_FROM_PRODUCTION: &str = "Cannot call test proc '~%s' from production code. Move the call below #testscript or move the proc above it.";
 pub const TEST_LABEL_FROM_PRODUCTION: &str = "Cannot jump to test label '@%s' from production code. Move the jump below #testscript or move the label above it.";
 pub const TEST_COMMAND_FROM_PRODUCTION: &str = "Cannot use test command '%s' from production code. Test commands are only available below #testscript.";

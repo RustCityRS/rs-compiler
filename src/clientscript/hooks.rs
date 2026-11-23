@@ -2,6 +2,7 @@ use crate::arguments::{expression_types, stack_hints};
 use crate::lexer::Lexer;
 use crate::parser::{Expr, Parser, ScriptDeclaration, StringPart};
 use crate::symbol::{SymbolKind, SymbolRegistry, SymbolTable};
+use crate::typechecker::raw_id_error;
 use crate::types::{BaseVarType, Type};
 use std::path::PathBuf;
 
@@ -393,6 +394,11 @@ pub(crate) fn server_call(
     }
     let mut lowered = vec![Expr::IntLiteral(id)];
     for (arg, hint) in args.iter().zip(hints) {
+        if let (Expr::IntLiteral(value), Some(ty)) = (arg, hint)
+            && let Some(error) = raw_id_error(*value, ty)
+        {
+            return Err(error);
+        }
         let mut arg = arg.clone();
         if let (Expr::Identifier(value) | Expr::StringLiteral(value), Some(ty)) = (&arg, hint)
             && let Some(id) = registry.lookup_reference(value, ty)

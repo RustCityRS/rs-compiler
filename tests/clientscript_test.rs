@@ -263,7 +263,7 @@ fn client_calls_require_declared_argument_order_and_types() {
             if_setcolour($colour, $component);",
             false,
         ),
-        ("if_setcolour(65538, 16711680);", true),
+        ("if_setcolour(panel:button, 16711680);", true),
         ("if_settext(panel:button, \"text\");", true),
         ("if_settext(\"text\", panel:button);", false),
         (
