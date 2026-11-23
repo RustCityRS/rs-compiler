@@ -368,6 +368,7 @@ opcodes! {
     NPC_PROJANIM_HALFSQ = 2550 => "npc_projanim_halfsq";
     NPC_QUEUEVARARG = 2551 => "npc_queuevararg";
     NPC_RUN = 2552 => "npc_run";
+    NPC_GETMULTINPC = 2553 => "npc_getmultinpc";
 
     // Loc
     LOC_ADD = 3000 => "loc_add";
@@ -386,7 +387,10 @@ opcodes! {
     LOC_TYPE = 3013 => "loc_type";
     LOC_PREFETCH = 3014 => "loc_prefetch";
     LOC_PREFETCHALL = 3015 => "loc_prefetchall";
-    LOC_MERGE = 3016 => "loc_merge";
+    LOC_CUSTOMISE = 3016 => "loc_customise";
+    LOC_WIDTH = 3017 => "loc_width";
+    LOC_LENGTH = 3018 => "loc_length";
+    LOC_GETMULTILOC = 3019 => "loc_getmultiloc";
 
     // Obj
     OBJ_ADD = 3500 => "obj_add";
@@ -413,6 +417,7 @@ opcodes! {
     NC_PARAM = 4005 => "nc_param";
     NC_SIZE = 4006 => "nc_size";
     NC_VISLEVEL = 4007 => "nc_vislevel";
+    NC_GETMULTINPC = 4008 => "nc_getmultinpc";
 
     // Loc config
     LC_CATEGORY = 4100 => "lc_category";
@@ -423,6 +428,7 @@ opcodes! {
     LC_OP = 4105 => "lc_op";
     LC_PARAM = 4106 => "lc_param";
     LC_WIDTH = 4107 => "lc_width";
+    LC_GETMULTILOC = 4108 => "lc_getmultiloc";
 
     // Obj config
     OC_CATEGORY = 4200 => "oc_category";

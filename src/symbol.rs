@@ -3,6 +3,19 @@ use crate::types::{BaseVarType, Type};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+/// `kind_N`: an id of `expected` with no name of its own, written by number.
+/// A value type has no ids, so `int_5` stays unknown.
+fn placeholder_id(name: &str, expected: Type) -> Option<i32> {
+    if crate::typechecker::is_value_type(expected) {
+        return None;
+    }
+    name.strip_prefix(expected.name())?
+        .strip_prefix('_')?
+        .parse::<i32>()
+        .ok()
+        .filter(|id| *id >= 0)
+}
+
 pub(crate) fn normalize_entity_name(name: &str) -> std::borrow::Cow<'_, str> {
     if name.is_ascii()
         && !name
@@ -921,16 +934,9 @@ impl SymbolRegistry {
                 .script_id_for_trigger("clientscript", name)
                 .or_else(|| self.script_id_for_trigger("proc", name)),
             Type::Proc => self.proc_script_id(name),
-            // These go by number without a name of their own.
-            Type::Model | Type::Texture | Type::Category => {
-                self.lookup_entity_id_typed(name, expected).or_else(|| {
-                    name.strip_prefix(expected.name())?
-                        .strip_prefix('_')?
-                        .parse::<i32>()
-                        .ok()
-                        .filter(|id| *id >= 0)
-                })
-            }
+            Type::Model | Type::Texture | Type::Category => self
+                .lookup_entity_id_typed(name, expected)
+                .or_else(|| placeholder_id(name, expected)),
             Type::Varp
             | Type::Varn
             | Type::Vars
@@ -953,7 +959,9 @@ impl SymbolRegistry {
                     None
                 }
             }),
-            _ => self.lookup_entity_id_typed(name, expected),
+            _ => self
+                .lookup_entity_id_typed(name, expected)
+                .or_else(|| placeholder_id(name, expected)),
         }
     }
 

@@ -886,10 +886,13 @@ pub fn named_literal(
         Type::Graphic => names.name("sprites", id),
         Type::NamedObj => names.name("obj", id),
         Type::IdKit => names.name("idk", id),
+        Type::MapArea => names.name("wma", id),
         _ => names.name(ty.name(), id),
     };
     if registry.lookup_reference(&name, ty) != Some(value) {
-        return None;
+        let placeholder = format!("{}_{id}", ty.name());
+        return (registry.lookup_reference(&placeholder, ty) == Some(value))
+            .then_some(Expr::Identifier(placeholder));
     }
     Some(
         if name.split(':').all(|part| {
@@ -1129,16 +1132,18 @@ fn format_expr(
             lhs,
             rhs,
         } => {
-            // Only `=` and `!` read a value by the other side's type.
+            // `=` and `!` read a value by the other side's type; the others
+            // only an id, which the compiler wants by name too.
             let equality = matches!(op, BinOp::Eq | BinOp::NotEq);
+            let reads = |ty: &Type| equality || !crate::typechecker::is_value_type(*ty);
             let left = expression_types(lhs, registry, locals)
                 .first()
                 .copied()
-                .filter(|_| equality);
+                .filter(reads);
             let right = expression_types(rhs, registry, locals)
                 .first()
                 .copied()
-                .filter(|_| equality);
+                .filter(reads);
             format_expr(lhs, right, names, registry, locals, canonical);
             format_expr(rhs, left, names, registry, locals, canonical);
         }

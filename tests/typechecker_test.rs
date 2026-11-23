@@ -607,6 +607,23 @@ fn int_literal_for_named_type_is_a_raw_id() {
 }
 
 #[test]
+fn number_in_arithmetic_is_not_an_id() {
+    let res = check(
+        "[proc,hint_test]
+         def_stat $s = null;
+         $s = calc($s + 1);
+",
+    );
+    assert_eq!(
+        res.error_count(),
+        0,
+        "got:
+{}",
+        res.dump()
+    );
+}
+
+#[test]
 fn minus_one_for_named_type_is_null() {
     let res = check(
         "[proc,null_test]\n\

@@ -37,10 +37,10 @@ fn is_literal_type(t: Type) -> bool {
     LITERAL_TYPES.contains(&t)
 }
 
-/// An int literal written where a `ty` belongs: everything named is written by name.
-/// A colour or a region coord is a value, not an id.
-pub(crate) fn raw_id_error(value: i32, ty: Type) -> Option<String> {
-    if is_literal_type(ty)
+/// Whether an int literal is a value of `ty`, not an id to write by name.
+/// A colour or a region coord is a value.
+pub(crate) fn is_value_type(ty: Type) -> bool {
+    is_literal_type(ty)
         || matches!(
             ty,
             Type::Error
@@ -51,7 +51,11 @@ pub(crate) fn raw_id_error(value: i32, ty: Type) -> Option<String> {
                 | Type::IntArray
                 | Type::RegionCoord
         )
-    {
+}
+
+/// An int literal written where a `ty` belongs: everything named is written by name.
+pub(crate) fn raw_id_error(value: i32, ty: Type) -> Option<String> {
+    if is_value_type(ty) {
         return None;
     }
     Some(if value == -1 {
@@ -1244,8 +1248,11 @@ impl<'a> TypeChecker<'a> {
                     }
 
                     let expected = hint.unwrap_or(Type::Int);
-                    let lt = self.infer_expr_type(lhs, locals, line, Some(expected));
-                    let rt = self.infer_expr_type(rhs, locals, line, Some(expected));
+                    // A number in arithmetic is a number, not an id (`calc($obj + 1)`).
+                    let operand =
+                        |e: &Expr| (!matches!(e, Expr::IntLiteral(_))).then_some(expected);
+                    let lt = self.infer_expr_type(lhs, locals, line, operand(lhs));
+                    let rt = self.infer_expr_type(rhs, locals, line, operand(rhs));
                     if let Some(ref lt) = lt
                         && lt.base_type() == BaseVarType::String
                         && *lt != Type::Error

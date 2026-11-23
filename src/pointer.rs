@@ -2282,6 +2282,16 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         false,
     );
     add(
+        "npc_getmultinpc",
+        &[ActiveNpc, ActivePlayer],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        false,
+    );
+    add(
         "npc_param",
         &[ActiveNpc],
         &[],
@@ -2714,7 +2724,47 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         false,
     );
 
-    add("loc_merge", &[ActiveLoc], &[], &[], &[], &[], &[], false);
+    add(
+        "loc_width",
+        &[ActiveLoc],
+        &[],
+        &[],
+        &[ActiveLoc2],
+        &[],
+        &[],
+        false,
+    );
+    add(
+        "loc_length",
+        &[ActiveLoc],
+        &[],
+        &[],
+        &[ActiveLoc2],
+        &[],
+        &[],
+        false,
+    );
+
+    add(
+        "loc_customise",
+        &[ActiveLoc],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        false,
+    );
+    add(
+        "loc_getmultiloc",
+        &[ActiveLoc, ActivePlayer],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        false,
+    );
 
     // -----------------------------------------------------------------------
     // Obj ops
