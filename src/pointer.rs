@@ -2031,6 +2031,16 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         &[PActivePlayer2],
         true,
     );
+    add(
+        "cam_forceangle",
+        &[ActivePlayer],
+        &[],
+        &[],
+        &[ActivePlayer2],
+        &[],
+        &[],
+        false,
+    );
 
     // -----------------------------------------------------------------------
     // NPC ops
