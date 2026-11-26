@@ -314,6 +314,7 @@ opcodes! {
     SOUND_SPEECH_VOLUME = 2189 => "sound_speech_volume";
     GETSOFTTIMER = 2190 => "getsofttimer";
     CAM_FORCEANGLE = 2191 => "cam_forceangle";
+    SOUND_VORBIS = 2192 => "sound_vorbis";
 
     // Npc
     NPC_ADD = 2500 => "npc_add";

@@ -1977,6 +1977,7 @@ fn build_command_pointers() -> HashMap<String, PointerHolder> {
         "if_setevents",
         "longqueuevararg",
         "queuevararg",
+        "sound_vorbis",
         "strongqueuevararg",
         "weakqueuevararg",
     ] {
